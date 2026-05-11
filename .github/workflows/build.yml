@@ -1,0 +1,46 @@
+name: Build Windows PASADA
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Python Backend
+        shell: bash
+        run: |
+          cd backend
+          pip install fastapi uvicorn sqlalchemy pandas python-docx docx2pdf passlib bcrypt pydantic python-multipart requests scikit-learn pytz pyinstaller
+          pyinstaller --onefile --noconsole --add-data "template.docx;." --name pasada-backend-x86_64-pc-windows-msvc main.py
+          mkdir -p ../frontend/src-tauri/bin
+          cp dist/pasada-backend-x86_64-pc-windows-msvc.exe ../frontend/src-tauri/bin/
+
+      - name: Build Tauri Frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm install
+          npm run tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PASADA-Windows-Installer
+          path: |
+            frontend/src-tauri/target/release/bundle/msi/*.msi
+            frontend/src-tauri/target/release/bundle/nsis/*.exe
