@@ -1,133 +1,186 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle } from "lucide-react"
+import { useState } from "react";
+import { UploadCloud, CheckCircle, Loader2, FileText, AlertTriangle, Database } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-export default function ImportPage() {
-  const [route, setRoute] = useState("")
-  const [files, setFiles] = useState<FileList | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState<{ type: "success" | "error", message: string } | null>(null)
+export default function MassImport() {
+  const [selectedRoute, setSelectedRoute] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [successMsg, setSuccessMsg] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
 
-  const handleUpload = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!files || !route) return
+  const isDatabaseFile = files.length === 1 && files[0].name.endsWith(".db");
 
-    setUploading(true)
-    setResult(null)
-    setProgress(0)
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      // Browsers can handle selecting 10,000 files, we store them instantly in React state
+      setFiles(Array.from(e.target.files));
+    }
+  };
 
-    const token = localStorage.getItem("pasada_token")
-    const fileArray = Array.from(files)
-    const MAX_FILES_PER_REQUEST = 200 
-    
-    let totalImported = 0
-    let hasError = false
+  const executeUpload = async () => {
+    setUploading(true);
+    setSuccessMsg("");
+    setErrorMsg("");
 
-    for (let i = 0; i < fileArray.length; i += MAX_FILES_PER_REQUEST) {
-      const chunk = fileArray.slice(i, i + MAX_FILES_PER_REQUEST)
-      const formData = new FormData()
-      
-      for (let j = 0; j < chunk.length; j++) {
-        formData.append("files", chunk[j])
-      }
+    const token = localStorage.getItem("pasada_token") || localStorage.getItem("token");
 
-      try {
-        const response = await fetch(`${API_URL}/upload/bulk/${route.toUpperCase()}`, {
+    try {
+      if (isDatabaseFile) {
+        // Handle Direct Database Migration (.db)
+        const formData = new FormData();
+        formData.append("file", files[0]);
+
+        const res = await fetch(`${API_URL}/upload/database`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${token}` },
           body: formData
-        })
+        });
 
-        if (response.ok) {
-          const data = await response.json()
-          totalImported += data.imported
-          const currentProgress = Math.round(((i + chunk.length) / fileArray.length) * 100)
-          setProgress(currentProgress > 100 ? 100 : currentProgress)
-          await new Promise(resolve => setTimeout(resolve, 300))
-        } else {
-          hasError = true
-          break
+        if (!res.ok) throw new Error("Database migration failed");
+        const data = await res.json();
+        setSuccessMsg(`Database seamlessly merged! Added ${data.imported} new records.`);
+      } else {
+        // Handle Standard Legacy Chunks (.docx, .xlsx, .csv)
+        if (!selectedRoute.trim()) {
+          setErrorMsg("Please provide a valid Target Route.");
+          setUploading(false);
+          return;
         }
-      } catch (error) {
-        hasError = true
-        break
-      }
-    }
 
-    if (hasError) {
-      setResult({ type: "error", message: "Data ingestion interrupted. Server rejected a chunk payload." })
-    } else {
-      setResult({ type: "success", message: `Successfully synchronized ${totalImported} records into ${route.toUpperCase()}` })
-      setFiles(null)
-      window.dispatchEvent(new Event('toda_imported'))
+        let importedTotal = 0;
+        
+        //UPGRADED: 500 files per chunk. Handles 10,000 files in just 20 rapid-fire requests.
+        const CHUNK_SIZE = 500; 
+        const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
+        const formattedRoute = selectedRoute.trim().toUpperCase();
+
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = files.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          const formData = new FormData();
+          chunk.forEach(f => formData.append("files", f));
+
+          const res = await fetch(`${API_URL}/upload/bulk/${formattedRoute}`, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${token}` },
+            body: formData
+          });
+
+          if (!res.ok) throw new Error("Chunk failed to upload");
+          const data = await res.json();
+          importedTotal += data.imported;
+          
+          setProgress(Math.round(((i + 1) / totalChunks) * 100));
+        }
+        
+        // Broadcast custom event so the Sidebar instantly refreshes its TODA list
+        window.dispatchEvent(new Event('toda_imported'));
+        setSuccessMsg(`Successfully extracted and imported ${importedTotal} unique records for ${formattedRoute}.`);
+      }
+      
+      setFiles([]);
+      setSelectedRoute("");
+    } catch (err) {
+      setErrorMsg("Data ingestion interrupted. Server connection failed during upload.");
+    } finally {
+      setUploading(false);
+      setProgress(0);
     }
-    
-    setUploading(false)
-  }
+  };
 
   return (
-    <div className="flex-1 space-y-4 p-4 md:p-8 pt-6 min-h-screen bg-muted/10 transition-all duration-300">
-      <div className="flex items-center justify-between space-y-2 mb-6">
+    <div className="p-6 md:p-8 max-w-4xl animate-in fade-in duration-500">
+      <div className="flex items-center gap-3 mb-8">
+        <UploadCloud className="w-8 h-8 text-blue-600" />
         <div>
-          <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight">System Data Ingestion</h2>
-          <p className="text-muted-foreground mt-1">Securely migrate legacy municipal records into the active database.</p>
+          <h1 className="text-3xl font-black tracking-tight">System Data Migration</h1>
+          <p className="text-muted-foreground mt-1 font-medium">Extract legacy documents or merge external SQLite databases.</p>
         </div>
       </div>
-      
-      <Card className="max-w-2xl mt-4 shadow-xl border-border/50 bg-card/95 backdrop-blur">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-xl"><UploadCloud className="h-6 w-6 text-blue-500"/> Mass Upload Protocol</CardTitle>
-          <CardDescription>Drag and drop or select records. Large batches will be auto-chunked to prevent server rejection.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleUpload} className="space-y-6">
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Target TODA Route Allocation</Label>
-              <Input value={route} onChange={(e) => setRoute(e.target.value)} required placeholder="e.g. NCTODA" className="uppercase h-12 text-lg tracking-wider font-medium" />
-            </div>
-            
-            <div className="space-y-2">
-              <Label className="text-sm font-semibold">Document Selection</Label>
-              <div className={`border-2 border-dashed rounded-xl p-10 text-center transition-all duration-300 flex flex-col items-center justify-center ${files ? 'border-blue-500 bg-blue-50/30' : 'border-border/60 hover:bg-muted/50'}`}>
-                <Input type="file" multiple accept=".xlsx,.csv,.docx" onChange={(e) => setFiles(e.target.files)} className="hidden" id="file-upload" disabled={uploading} />
-                <Label htmlFor="file-upload" className={`cursor-pointer flex flex-col items-center gap-3 w-full h-full ${uploading ? 'pointer-events-none opacity-50' : ''}`}>
-                  <FileSpreadsheet className={`h-12 w-12 transition-colors ${files ? 'text-blue-500' : 'text-muted-foreground/70'}`} />
-                  <span className="text-base font-semibold">{files ? `${files.length} documents verified and ready` : "Click to browse local files"}</span>
-                </Label>
-              </div>
-            </div>
 
-            <div className={`transition-all duration-500 overflow-hidden ${uploading ? 'max-h-20 opacity-100' : 'max-h-0 opacity-0'}`}>
-              <div className="flex justify-between text-xs font-semibold mb-1 text-muted-foreground">
-                <span>Ingesting and Parsing Data Batches...</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="w-full bg-muted rounded-full h-2 overflow-hidden border border-border/50">
-                <div className="bg-blue-600 h-full rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
+      <div className="bg-card border border-border rounded-2xl p-8 shadow-sm">
+        {successMsg && (
+          <div className="mb-6 p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 rounded-lg flex items-center gap-2 font-bold shadow-sm">
+            <CheckCircle size={18} /> {successMsg}
+          </div>
+        )}
+        {errorMsg && (
+          <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 text-red-600 rounded-lg flex items-center gap-2 font-bold shadow-sm">
+            <AlertTriangle size={18} /> {errorMsg}
+          </div>
+        )}
+
+        <div className="space-y-6">
+          {!isDatabaseFile && (
+            <div className="space-y-2 animate-in fade-in">
+              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route Assignment (E.g. BATODA)</label>
+              <input 
+                type="text"
+                value={selectedRoute} 
+                onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}
+                placeholder="Required for .docx/.csv files"
+                className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase"
+              />
+            </div>
+          )}
+
+          {isDatabaseFile && (
+            <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3 animate-in fade-in">
+              <Database className="text-blue-600" size={24} />
+              <div>
+                <p className="text-sm font-bold text-blue-600">Database Migration File Detected</p>
+                <p className="text-xs text-blue-600/80 font-semibold">The system will automatically parse and merge all new records.</p>
               </div>
             </div>
+          )}
 
-            {result && !uploading && (
-              <div className={`flex items-center gap-3 text-sm p-4 rounded-lg border transition-all ${result.type === 'success' ? 'text-green-700 bg-green-500/10 border-green-500/20' : 'text-red-700 bg-red-500/10 border-red-500/20'}`}>
-                {result.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-                <span className="font-medium">{result.message}</span>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Upload Files (.docx, .xlsx, .csv, .db)</label>
+            <div className="border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 hover:bg-muted/50 transition-colors relative">
+              <input 
+                type="file" 
+                multiple 
+                accept=".docx,.xlsx,.csv,.db" 
+                onChange={handleFileChange}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+              <FileText className="w-10 h-10 text-slate-400 mx-auto mb-3" />
+              <p className="text-sm font-bold text-slate-700 dark:text-slate-300">Click or Drag & Drop municipal files here</p>
+              <p className="text-xs text-muted-foreground mt-1 font-medium">{files.length.toLocaleString()} files currently queued for extraction</p>
+            </div>
+          </div>
+
+          {uploading ? (
+            <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4">
+              <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
+              <div>
+                <p className="text-sm font-bold">{isDatabaseFile ? "Merging Database Integrity..." : "Extracting Data Payload"}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-1">Please do not close this window.</p>
               </div>
-            )}
-
-            <Button type="submit" disabled={!files || !route || uploading} className="w-full h-12 text-md font-bold">
-              {uploading ? "Processing Sequential Batches..." : "Initialize Import Sequence"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+              {!isDatabaseFile && (
+                <>
+                  <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                    <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                  </div>
+                  <p className="text-xs font-bold text-blue-600">{progress}% Complete</p>
+                </>
+              )}
+            </div>
+          ) : (
+            <button 
+              onClick={executeUpload}
+              disabled={files.length === 0 || (!isDatabaseFile && !selectedRoute.trim())}
+              className="w-full bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-blue-700 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 shadow-md"
+            >
+              <UploadCloud size={18} /> Execute Data Integration
+            </button>
+          )}
+        </div>
+      </div>
     </div>
-  )
+  );
 }
