@@ -27,7 +27,10 @@ jobs:
         run: |
           cd backend
           pip install fastapi uvicorn sqlalchemy pandas python-docx docx2pdf passlib bcrypt pydantic python-multipart requests scikit-learn pytz pyinstaller
-          pyinstaller --onefile --noconsole --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import multipart --add-data "template.docx;." --name pasada-backend-x86_64-pc-windows-msvc main.py
+          
+          # DEFINITIVE FIX: Removed --noconsole to prevent Uvicorn stdout crash
+          pyinstaller --onefile --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import multipart --add-data "template.docx;." --name pasada-backend-x86_64-pc-windows-msvc main.py
+          
           mkdir -p ../frontend/src-tauri/bin
           cp dist/pasada-backend-x86_64-pc-windows-msvc.exe ../frontend/src-tauri/bin/
 
