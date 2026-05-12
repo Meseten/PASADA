@@ -1,3 +1,4 @@
+import multiprocessing
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -35,7 +36,6 @@ app.add_middleware(
     expose_headers=["Content-Disposition"]
 )
 
-# Start Background LAN Auto-Discovery
 start_lan_sync()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -398,4 +398,5 @@ def get_global_stats(db: Session = Depends(get_db)):
     }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    multiprocessing.freeze_support()
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
