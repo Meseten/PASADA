@@ -1,0 +1,15 @@
+{
+  "identifier": "sidecar-permission",
+  "windows": ["*"],
+  "permissions": [
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "pasada-backend",
+          "sidecar": true
+        }
+      ]
+    }
+  ]
+}
