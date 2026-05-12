@@ -1,6 +1,11 @@
 import multiprocessing
 import sys
 import os
+import traceback
+import subprocess
+import time
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -12,7 +17,6 @@ from extractor import extract_docx_data
 from sync_engine import start_lan_sync, get_local_ip, PEERS
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from datetime import datetime, timedelta
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
@@ -399,51 +403,44 @@ def get_global_stats(db: Session = Depends(get_db)):
         "monthly_trend": monthly_trend
     }
 
-# DEFINTIVE FIX FOR WINDOWS EXECUTABLE
+
+# DEFINITIVE FIX: PORT NUKER & BLACK BOX LOGGER
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
     # 1. Setup Black Box Logger in Documents folder
     log_file = os.path.join(BASE_DIR, "backend_startup.log")
-    def write_log(msg):
-        try:
-            with open(log_file, "a") as f:
-                from datetime import datetime
-                f.write(f"[{datetime.now()}] {msg}\n")
-        except:
-            pass
-            
-    write_log("\n" + "="*50)
-    write_log("APP LAUNCH INITIATED")
     
-    # 2. Prevent NoneType write errors in PyInstaller
-    if sys.stdout is None:
-        sys.stdout = open(os.devnull, "w")
-    if sys.stderr is None:
-        sys.stderr = open(os.devnull, "w")
-
-    # 3. The Port Nuker: Hunt down and kill zombie processes jamming Port 8000
+    # FORCE ALL SYSTEM OUTPUT TO BE WRITTEN TO THE TEXT FILE
+    # This prevents Windows from silently crashing Uvicorn and ensures all errors are caught
+    sys.stdout = open(log_file, "a", buffering=1)
+    sys.stderr = open(log_file, "a", buffering=1)
+    
+    print("\n" + "="*50)
+    print(f"[{datetime.now()}] APP LAUNCH INITIATED")
+    
+    # 2. The Port Nuker: Hunt down and kill zombie processes jamming Port 8000
     try:
-        write_log("Scanning for zombie processes on Port 8000...")
-        # Run Windows netstat to find processes holding the port
+        print(f"[{datetime.now()}] Scanning for zombie processes on Port 8000...")
         result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
         for line in result.stdout.splitlines():
             if ':8000 ' in line and 'LISTENING' in line:
                 parts = line.split()
                 pid = parts[-1]
-                write_log(f"CRITICAL: Found ghost process (PID: {pid}) blocking Port 8000. Nuking it...")
+                print(f"[{datetime.now()}] CRITICAL: Found ghost process (PID: {pid}) blocking Port 8000. Nuking it...")
                 subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
                 time.sleep(2)  # Give Windows 2 seconds to release the port
                 break
-        write_log("Port 8000 is clear and ready.")
+        print(f"[{datetime.now()}] Port 8000 is clear and ready.")
     except Exception as e:
-        write_log(f"Port scanning warning: {e}")
+        print(f"[{datetime.now()}] Port scanning warning: {e}")
 
-    # 4. Start the Server
+    # 3. Start the Server
     try:
-        write_log("Booting Uvicorn Server Engine...")
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
-        write_log("Server shut down normally.")
+        print(f"[{datetime.now()}] Booting Uvicorn Server Engine...")
+        # log_config=None is removed so Uvicorn prints its errors directly into our log file
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"[{datetime.now()}] Server shut down normally.")
     except Exception as e:
-        write_log("FATAL SERVER CRASH DETECTED:")
-        write_log(traceback.format_exc())
+        print(f"[{datetime.now()}] FATAL SERVER CRASH DETECTED:")
+        traceback.print_exc()
