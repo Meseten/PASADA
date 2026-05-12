@@ -4,12 +4,13 @@ import os
 import traceback
 import subprocess
 import time
+import calendar
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from sqlalchemy import func, extract
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import func, extract, create_engine
 from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, get_pht_now, BASE_DIR
 from ml_engine import train_and_predict
 from doc_generator import generate_certificate
@@ -41,7 +42,6 @@ app.add_middleware(
     expose_headers=["Content-Disposition"]
 )
 
-# Start Background LAN Auto-Discovery
 start_lan_sync()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -85,7 +85,6 @@ class SettingsUpdate(BaseModel):
     enable_esignature: bool
 
 class PasswordUpdate(BaseModel):
-    old_password: str
     new_password: str
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -133,8 +132,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.put("/users/password")
 def update_password(payload: PasswordUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not pwd_context.verify(payload.old_password, current_user.password_hash):
-        raise HTTPException(status_code=400, detail="Invalid current password")
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     
@@ -175,11 +172,19 @@ def sync_pull(since: str, db: Session = Depends(get_db)):
     return records
 
 @app.get("/export/mass")
-def mass_export(route: str = "ALL", year: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def mass_export(route: str = "ALL", year: str = "ALL", export_status: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = db.query(FranchiseRecord)
     if route != "ALL": query = query.filter(FranchiseRecord.route == route.upper())
     if year != "ALL": query = query.filter(extract('year', FranchiseRecord.issue_date) == int(year))
     
+    current_year = get_pht_now().year
+    if export_status == "ACTIVE":
+        query = query.filter(FranchiseRecord.is_active == True)
+    elif export_status == "FLAGGED":
+        query = query.filter(FranchiseRecord.is_active == True, extract('year', FranchiseRecord.issue_date) == current_year - 1)
+    elif export_status == "REVOKED":
+        query = query.filter(FranchiseRecord.is_active == False)
+        
     records = query.all()
     if not records: raise HTTPException(status_code=404, detail="No records found")
 
@@ -267,6 +272,49 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     else:
         log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated details for {db_record.operator_name}")
     return {"status": "success"}
+
+@app.post("/upload/database")
+async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    """Allows importing a full .db SQLite file and merges it with the existing records"""
+    temp_db_path = os.path.join(BASE_DIR, "temp_import.db")
+    with open(temp_db_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    try:
+        temp_engine = create_engine(f"sqlite:///{temp_db_path}")
+        TempSession = sessionmaker(bind=temp_engine)
+        temp_db = TempSession()
+        
+        imported_records = temp_db.query(FranchiseRecord).all()
+        
+        db = SessionLocal()
+        existing_chassis = {r.chassis_no for r in db.query(FranchiseRecord.chassis_no).all()}
+        
+        new_count = 0
+        for r in imported_records:
+            if r.chassis_no not in existing_chassis:
+                new_record = FranchiseRecord(
+                    id=r.id, sbn_no=r.sbn_no, operator_name=r.operator_name,
+                    address=r.address, motor_no=r.motor_no, chassis_no=r.chassis_no,
+                    make=r.make, plate_no=r.plate_no, route=r.route,
+                    driving_route=r.driving_route, issue_date=r.issue_date,
+                    valid_until=r.valid_until, is_active=r.is_active,
+                    processed_by=f"{current_user.first_name} {current_user.last_name}", 
+                    updated_at=r.updated_at
+                )
+                db.add(new_record)
+                existing_chassis.add(r.chassis_no)
+                new_count += 1
+                
+        db.commit()
+        temp_db.close()
+        os.remove(temp_db_path)
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file.")
+        return {"imported": new_count}
+    except Exception as e:
+        if os.path.exists(temp_db_path):
+            os.remove(temp_db_path)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/upload/bulk/{route_name}")
 async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -377,12 +425,30 @@ def get_global_stats(db: Session = Depends(get_db)):
     routes = db.query(FranchiseRecord.route, func.count(FranchiseRecord.id)).filter(FranchiseRecord.is_active == True).group_by(FranchiseRecord.route).all()
     route_data = [{"route": r[0], "count": r[1]} for r in routes]
 
-    daily_trend = []
-    for i in range(6, -1, -1):
-        target_date = (current_time - timedelta(days=i)).strftime('%Y-%m-%d')
-        count = db.query(func.count(FranchiseRecord.id)).filter(func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) == target_date).scalar()
-        daily_trend.append({"name": target_date[-5:], "val": count})
+    # DAILY TREND: Aggregate of all records across the entire DB by exact day of the week (Monday, Tuesday, etc.)
+    days_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat'}
+    daily_trend_dict = {d: 0 for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}
+    
+    day_records = db.query(func.strftime('%w', FranchiseRecord.issue_date), func.count(FranchiseRecord.id)).group_by(func.strftime('%w', FranchiseRecord.issue_date)).all()
+    for day_idx, count in day_records:
+        if day_idx and day_idx in days_map:
+            daily_trend_dict[days_map[day_idx]] = count
+            
+    daily_trend = [{"name": k, "val": v} for k, v in daily_trend_dict.items()]
         
+    # WEEKLY TREND: Formatted cleanly using the start date of the week (e.g. "Oct 12")
+    weekly_trend = []
+    for i in range(4, -1, -1):
+        target_date = current_time - timedelta(days=current_time.weekday() + (i * 7))
+        start_str = target_date.strftime('%Y-%m-%d')
+        end_str = (target_date + timedelta(days=6)).strftime('%Y-%m-%d')
+        count = db.query(func.count(FranchiseRecord.id)).filter(
+            func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) >= start_str,
+            func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) <= end_str
+        ).scalar()
+        weekly_trend.append({"name": target_date.strftime('%b %d'), "val": count})
+
+    # MONTHLY TREND: Exact string months (Jan, Feb)
     monthly_trend = []
     for i in range(5, -1, -1):
         target_month = current_month - i
@@ -390,8 +456,9 @@ def get_global_stats(db: Session = Depends(get_db)):
         if target_month <= 0:
             target_month += 12
             target_year -= 1
+        month_name = calendar.month_abbr[target_month]
         count = db.query(func.count(FranchiseRecord.id)).filter(extract('year', FranchiseRecord.issue_date) == target_year, extract('month', FranchiseRecord.issue_date) == target_month).scalar()
-        monthly_trend.append({"name": str(target_month), "val": count})
+        monthly_trend.append({"name": month_name, "val": count})
 
     return {
         "total_system_capacity": total_system_capacity,
@@ -400,26 +467,21 @@ def get_global_stats(db: Session = Depends(get_db)):
         "flagged_pending": flagged_pending, "revoked": vacant_slots, 
         "route_breakdown": route_data,
         "daily_trend": daily_trend,
+        "weekly_trend": weekly_trend,
         "monthly_trend": monthly_trend
     }
 
-
-# DEFINITIVE FIX: PORT NUKER & BLACK BOX LOGGER
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
-    # 1. Setup Black Box Logger in Documents folder
     log_file = os.path.join(BASE_DIR, "backend_startup.log")
     
-    # FORCE ALL SYSTEM OUTPUT TO BE WRITTEN TO THE TEXT FILE
-    # This prevents Windows from silently crashing Uvicorn and ensures all errors are caught
     sys.stdout = open(log_file, "a", buffering=1)
     sys.stderr = open(log_file, "a", buffering=1)
     
     print("\n" + "="*50)
     print(f"[{datetime.now()}] APP LAUNCH INITIATED")
     
-    # 2. The Port Nuker: Hunt down and kill zombie processes jamming Port 8000
     try:
         print(f"[{datetime.now()}] Scanning for zombie processes on Port 8000...")
         result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
@@ -429,16 +491,14 @@ if __name__ == "__main__":
                 pid = parts[-1]
                 print(f"[{datetime.now()}] CRITICAL: Found ghost process (PID: {pid}) blocking Port 8000. Nuking it...")
                 subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-                time.sleep(2)  # Give Windows 2 seconds to release the port
+                time.sleep(2)  
                 break
         print(f"[{datetime.now()}] Port 8000 is clear and ready.")
     except Exception as e:
         print(f"[{datetime.now()}] Port scanning warning: {e}")
 
-    # 3. Start the Server
     try:
         print(f"[{datetime.now()}] Booting Uvicorn Server Engine...")
-        # log_config=None is removed so Uvicorn prints its errors directly into our log file
         uvicorn.run(app, host="0.0.0.0", port=8000)
         print(f"[{datetime.now()}] Server shut down normally.")
     except Exception as e:
