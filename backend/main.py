@@ -403,11 +403,47 @@ def get_global_stats(db: Session = Depends(get_db)):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
-    # 1. Prevent NoneType write errors in PyInstaller
+    # 1. Setup Black Box Logger in Documents folder
+    log_file = os.path.join(BASE_DIR, "backend_startup.log")
+    def write_log(msg):
+        try:
+            with open(log_file, "a") as f:
+                from datetime import datetime
+                f.write(f"[{datetime.now()}] {msg}\n")
+        except:
+            pass
+            
+    write_log("\n" + "="*50)
+    write_log("APP LAUNCH INITIATED")
+    
+    # 2. Prevent NoneType write errors in PyInstaller
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w")
-        
-    # 2. log_config=None completely disables the Uvicorn logger that causes the crash
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
+
+    # 3. The Port Nuker: Hunt down and kill zombie processes jamming Port 8000
+    try:
+        write_log("Scanning for zombie processes on Port 8000...")
+        # Run Windows netstat to find processes holding the port
+        result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            if ':8000 ' in line and 'LISTENING' in line:
+                parts = line.split()
+                pid = parts[-1]
+                write_log(f"CRITICAL: Found ghost process (PID: {pid}) blocking Port 8000. Nuking it...")
+                subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                time.sleep(2)  # Give Windows 2 seconds to release the port
+                break
+        write_log("Port 8000 is clear and ready.")
+    except Exception as e:
+        write_log(f"Port scanning warning: {e}")
+
+    # 4. Start the Server
+    try:
+        write_log("Booting Uvicorn Server Engine...")
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
+        write_log("Server shut down normally.")
+    except Exception as e:
+        write_log("FATAL SERVER CRASH DETECTED:")
+        write_log(traceback.format_exc())
