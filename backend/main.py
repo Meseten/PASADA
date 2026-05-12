@@ -1,4 +1,6 @@
 import multiprocessing
+import sys
+import os
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -13,7 +15,6 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
-import os
 import pandas as pd
 import io
 import zipfile
@@ -36,6 +37,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition"]
 )
 
+# Start Background LAN Auto-Discovery
 start_lan_sync()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -397,6 +399,15 @@ def get_global_stats(db: Session = Depends(get_db)):
         "monthly_trend": monthly_trend
     }
 
+# DEFINTIVE FIX FOR WINDOWS EXECUTABLE
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    
+    # 1. Prevent NoneType write errors in PyInstaller
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+        
+    # 2. log_config=None completely disables the Uvicorn logger that causes the crash
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
