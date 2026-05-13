@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "pasada",
+  "productName": "PASADA",
   "version": "0.1.0",
   "identifier": "com.pasada.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PASADA Administration (TRU)",
+        "title": "PASADA Administration (TFRU)",
         "width": 800,
         "height": 600,
         "resizable": true,
