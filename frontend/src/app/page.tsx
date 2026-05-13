@@ -89,7 +89,7 @@ export default function Login() {
       <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">
         <div className="flex flex-col items-center mb-8">
           {/* TFRU LOGO INTEGRATION */}
-          <img src="/TFRU.jpg" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
+          <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
           <p className="text-muted-foreground mt-1 text-sm font-medium">Predictive Franchise Administration System</p>
         </div>
