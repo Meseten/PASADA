@@ -6,7 +6,7 @@ from database import SessionLocal, FranchiseRecord, get_pht_now
 from datetime import datetime
 
 BROADCAST_PORT = 54321
-API_PORT = 8000
+API_PORT = 43888
 PEERS = set()
 
 def get_local_ip():
