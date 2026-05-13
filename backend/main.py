@@ -1,35 +1,44 @@
-import multiprocessing
-import os
 import sys
+import os
 import traceback
 from datetime import datetime
 
 # ==========================================
-# 1. BULLETPROOF LOGGER
-# Writes exactly where the .exe is, bypassing Windows Desktop/OneDrive blocks
+# 1. THE OS-LEVEL LOGGER (GUARANTEED TO CATCH SILENT CRASHES)
 # ==========================================
-if getattr(sys, 'frozen', False):
-    application_path = os.path.dirname(sys.executable)
-else:
-    application_path = os.path.dirname(os.path.abspath(__file__))
+# Writes directly to C:\Users\Username\PASADA_CRASH_LOG.txt
+user_folder = os.path.expanduser('~')
+crash_log_path = os.path.join(user_folder, "PASADA_CRASH_LOG.txt")
 
-crash_log_path = os.path.join(application_path, "PASADA_CRASH_LOG.txt")
-
-def log_error(msg):
-    print(msg)
+def force_log(msg):
     try:
         with open(crash_log_path, "a", encoding="utf-8") as f:
             f.write(f"{msg}\n")
     except:
         pass
 
-log_error(f"\n[{datetime.now()}] --- STARTING PASADA BACKEND ---")
+# Intercept ANY fatal crash that bypasses try/except blocks
+def exception_hook(exc_type, exc_value, exc_traceback):
+    err_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    force_log(f"\n[{datetime.now()}] !!! OS-LEVEL FATAL CRASH !!!\n{err_msg}")
+    sys.exit(1)
+
+sys.excepthook = exception_hook
+
+force_log(f"\n[{datetime.now()}] --- BOOTING PASADA BACKEND ---")
+force_log(f"Running from: {sys.executable}")
+
+import multiprocessing
+
+if __name__ == "__main__":
+    # MUST BE THE FIRST THING EXECUTED FOR PYINSTALLER ON WINDOWS
+    multiprocessing.freeze_support()
 
 try:
     # ==========================================
-    # 2. LOAD HEAVY LIBRARIES IN A TRAP
+    # 2. LOAD HEAVY LIBRARIES
     # ==========================================
-    log_error("Loading system dependencies...")
+    force_log("Loading Pandas, FastAPI, and ML libraries...")
     import subprocess
     import time
     import calendar
@@ -54,7 +63,7 @@ try:
     from typing import List, Optional
     from fastapi.responses import FileResponse
     import starlette.formparsers
-    log_error("Dependencies loaded successfully!")
+    force_log("All libraries loaded successfully!")
 
     starlette.formparsers.MultiPartParser.max_files = 10000
     starlette.formparsers.MultiPartParser.max_fields = 10000
@@ -474,47 +483,30 @@ try:
             "monthly_trend": monthly_trend
         }
 
-# ==========================================
-# 3. FATAL ERROR TRAP - PREVENTS SILENT CLOSING
-# ==========================================
 except Exception as e:
-    log_error(f"FATAL BOOT ERROR:\n{traceback.format_exc()}")
-    print("\n" + "="*50)
-    print("FATAL PYTHON CRASH DETECTED")
-    print("="*50)
-    print(traceback.format_exc())
-    # THIS WILL FREEZE THE WINDOW OPEN SO YOU CAN READ THE EXACT ERROR
-    input("\n[ERROR] PASADA Backend Crashed. Press ENTER to close this window...")
+    force_log(f"\n[{datetime.now()}] !!! BOOT FATAL ERROR !!!\n{traceback.format_exc()}")
     sys.exit(1)
 
-
 # ==========================================
-# 4. SERVER EXECUTION
+# 3. SERVER EXECUTION ON PORT 43888
 # ==========================================
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
-    
     try:
-        log_error("Scanning for zombie processes on Port 8000...")
+        force_log("Scanning for zombie processes on Port 43888...")
         if os.name == 'nt':
             result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, shell=True)
             for line in result.stdout.splitlines():
-                if ':8000 ' in line and 'LISTENING' in line:
+                if ':43888 ' in line and 'LISTENING' in line:
                     parts = line.split()
                     pid = parts[-1]
-                    log_error(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
+                    force_log(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
                     subprocess.run(['taskkill', '/F', '/T', '/PID', pid], capture_output=True, shell=True)
                     time.sleep(2)  
                     break
-        log_error("Port 8000 is clear. Starting Uvicorn server...")
+        force_log("Port 43888 is clear. Starting Uvicorn server...")
         
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host="0.0.0.0", port=43888)
         
     except Exception as e:
-        log_error(f"FATAL SERVER CRASH:\n{traceback.format_exc()}")
-        print("\n" + "="*50)
-        print("SERVER FAILED TO START")
-        print("="*50)
-        print(traceback.format_exc())
-        input("\n[ERROR] PASADA Server Crashed. Press ENTER to close this window...")
+        force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{traceback.format_exc()}")
         sys.exit(1)
