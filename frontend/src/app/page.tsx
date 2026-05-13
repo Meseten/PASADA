@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+// FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
@@ -87,9 +88,8 @@ export default function Login() {
       <ThemeToggle />
       <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 bg-slate-900 dark:bg-white dark:text-slate-900 text-white rounded-full flex items-center justify-center text-xl font-bold mb-4 shadow-sm">
-            P
-          </div>
+          {/* TFRU LOGO INTEGRATION */}
+          <img src="/TFRU.jpg" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
           <p className="text-muted-foreground mt-1 text-sm font-medium">Predictive Franchise Administration System</p>
         </div>
