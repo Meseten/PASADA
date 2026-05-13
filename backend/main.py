@@ -474,33 +474,41 @@ def get_global_stats(db: Session = Depends(get_db)):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
-    log_file = os.path.join(BASE_DIR, "backend_startup.log")
+    # Absolute Fallback Logger: Writes directly to the Desktop so we can see why it fails
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    crash_log_path = os.path.join(desktop_path, "PASADA_CRASH_LOG.txt")
     
-    sys.stdout = open(log_file, "a", buffering=1)
-    sys.stderr = open(log_file, "a", buffering=1)
-    
-    print("\n" + "="*50)
-    print(f"[{datetime.now()}] APP LAUNCH INITIATED")
+    def log_to_desktop(msg):
+        print(msg)
+        try:
+            with open(crash_log_path, "a") as f:
+                f.write(f"{msg}\n")
+        except:
+            pass
+
+    log_to_desktop(f"\n[{datetime.now()}] --- NEW LAUNCH ATTEMPT ---")
     
     try:
-        print(f"[{datetime.now()}] Scanning for zombie processes on Port 8000...")
-        result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if ':8000 ' in line and 'LISTENING' in line:
-                parts = line.split()
-                pid = parts[-1]
-                print(f"[{datetime.now()}] CRITICAL: Found ghost process (PID: {pid}) blocking Port 8000. Nuking it...")
-                subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-                time.sleep(2)  
-                break
-        print(f"[{datetime.now()}] Port 8000 is clear and ready.")
+        log_to_desktop(f"[{datetime.now()}] Scanning for zombie processes on Port 8000...")
+        if os.name == 'nt':
+            # Added shell=True to fix Windows Taskkill failure
+            result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, shell=True)
+            for line in result.stdout.splitlines():
+                if ':8000 ' in line and 'LISTENING' in line:
+                    parts = line.split()
+                    pid = parts[-1]
+                    log_to_desktop(f"[{datetime.now()}] CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', pid], capture_output=True, shell=True)
+                    time.sleep(2)  
+                    break
+        log_to_desktop(f"[{datetime.now()}] Port 8000 is clear and ready.")
     except Exception as e:
-        print(f"[{datetime.now()}] Port scanning warning: {e}")
+        log_to_desktop(f"[{datetime.now()}] Port scanning warning: {e}")
 
     try:
-        print(f"[{datetime.now()}] Booting Uvicorn Server Engine...")
+        log_to_desktop(f"[{datetime.now()}] Booting Uvicorn Server Engine...")
         uvicorn.run(app, host="0.0.0.0", port=8000)
-        print(f"[{datetime.now()}] Server shut down normally.")
+        log_to_desktop(f"[{datetime.now()}] Server shut down normally.")
     except Exception as e:
-        print(f"[{datetime.now()}] FATAL SERVER CRASH DETECTED:")
-        traceback.print_exc()
+        log_to_desktop(f"[{datetime.now()}] FATAL SERVER CRASH DETECTED:")
+        log_to_desktop(traceback.format_exc())
