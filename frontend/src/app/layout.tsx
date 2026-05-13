@@ -17,8 +17,8 @@ function ThemeToggle() {
   const { theme, setTheme } = useTheme()
   return (
     <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="p-2 rounded-md hover:bg-accent transition-colors">
-      <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-      <Moon className="absolute top-4 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+      <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0 text-slate-700" />
+      <Moon className="absolute top-4 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100 text-slate-200" />
     </button>
   )
 }
@@ -30,7 +30,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [activeRoutes, setActiveRoutes] = useState<string[]>([])
   const [routeSearch, setRouteSearch] = useState("")
   
-  // Explicitly track User state to prevent Hydration mismatches
   const [userName, setUserName] = useState("System User")
   const [userRole, setUserRole] = useState("Clerk")
 
@@ -48,7 +47,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true))
     
-    // Correctly fetch the raw strings from the new Login payload
     const storedName = localStorage.getItem("pasada_full_name") || localStorage.getItem("full_name")
     const storedRole = localStorage.getItem("pasada_role")
     
@@ -59,7 +57,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       fetchRoutes()
     }
 
-    // Listen for the custom event from the Bulk Importer to refresh the sidebar instantly
     window.addEventListener('toda_imported', fetchRoutes)
     return () => window.removeEventListener('toda_imported', fetchRoutes)
   }, [pathname, fetchRoutes])
@@ -81,7 +78,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     return (
       <html lang="en" suppressHydrationWarning>
         <body className={inter.className}>
-          <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
             {children}
           </ThemeProvider>
         </body>
@@ -94,7 +91,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
           <div className="flex h-screen overflow-hidden bg-background">
             <aside className="w-64 border-r bg-card hidden md:flex flex-col">
               <div className="px-4 py-6 flex justify-between items-center border-b border-border">
