@@ -98,7 +98,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <div className="px-4 py-6 flex justify-between items-center border-b border-border">
                 {/* TFRU LOGO INTEGRATION */}
                 <div className="flex items-center gap-3">
-                  <img src="/TFRU.jpg" alt="TFRU" className="w-9 h-9 rounded-full shadow-sm border border-border" />
+                  <img src="/TFRU.png" alt="TFRU" className="w-9 h-9 rounded-full shadow-sm border border-border" />
                   <div className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</div>
                 </div>
                 <ThemeToggle />
