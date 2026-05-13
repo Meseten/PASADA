@@ -11,7 +11,8 @@ import { Input } from "@/components/ui/input"
 
 const inter = Inter({ subsets: ["latin"] })
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+// FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
@@ -95,7 +96,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="flex h-screen overflow-hidden bg-background">
             <aside className="w-64 border-r bg-card hidden md:flex flex-col">
               <div className="px-4 py-6 flex justify-between items-center border-b border-border">
-                <div className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</div>
+                {/* TFRU LOGO INTEGRATION */}
+                <div className="flex items-center gap-3">
+                  <img src="/TFRU.jpg" alt="TFRU" className="w-9 h-9 rounded-full shadow-sm border border-border" />
+                  <div className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</div>
+                </div>
                 <ThemeToggle />
               </div>
               <div className="px-4 py-4 border-b border-border bg-muted/20">

@@ -1,32 +1,54 @@
-import multiprocessing
-import sys
 import os
+import sys
 import traceback
-import subprocess
-import time
-import calendar
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy import func, extract, create_engine
-from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, get_pht_now, BASE_DIR
-from ml_engine import train_and_predict
-from doc_generator import generate_certificate
-from extractor import extract_docx_data
-from sync_engine import start_lan_sync, get_local_ip, PEERS
-from passlib.context import CryptContext
-from pydantic import BaseModel
-import uvicorn
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import io
-import zipfile
-import shutil
-from typing import List, Optional
-from fastapi.responses import FileResponse
-import starlette.formparsers
+# 1. EXTREME EARLY LOGGER: Must run before any heavy imports to catch missing C++ libraries
+desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+crash_log_path = os.path.join(desktop_path, "PASADA_CRASH_LOG.txt")
+
+def log_to_desktop(msg):
+    try:
+        with open(crash_log_path, "a") as f:
+            f.write(f"{msg}\n")
+    except:
+        pass
+
+log_to_desktop(f"\n[{datetime.now()}] --- SYSTEM BOOT SEQUENCE INITIATED ---")
+
+# 2. WRAP ALL IMPORTS IN A TRY/CATCH TO PREVENT SILENT DEATH
+try:
+    log_to_desktop(f"[{datetime.now()}] Loading Heavy Libraries (Pandas, ML, FastAPI)...")
+    import multiprocessing
+    import subprocess
+    import time
+    import calendar
+    from datetime import timedelta
+    from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+    from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+    from sqlalchemy.orm import Session, sessionmaker
+    from sqlalchemy import func, extract, create_engine
+    from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, get_pht_now, BASE_DIR
+    from ml_engine import train_and_predict
+    from doc_generator import generate_certificate
+    from extractor import extract_docx_data
+    from sync_engine import start_lan_sync, get_local_ip, PEERS
+    from passlib.context import CryptContext
+    from pydantic import BaseModel
+    import uvicorn
+    from fastapi.middleware.cors import CORSMiddleware
+    import pandas as pd
+    import io
+    import zipfile
+    import shutil
+    from typing import List, Optional
+    from fastapi.responses import FileResponse
+    import starlette.formparsers
+    log_to_desktop(f"[{datetime.now()}] Libraries loaded successfully.")
+except Exception as e:
+    log_to_desktop(f"[{datetime.now()}] FATAL IMPORT ERROR (Likely missing MS Visual C++):")
+    log_to_desktop(traceback.format_exc())
+    sys.exit(1)
 
 starlette.formparsers.MultiPartParser.max_files = 10000
 starlette.formparsers.MultiPartParser.max_fields = 10000
@@ -275,7 +297,6 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
 
 @app.post("/upload/database")
 async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
-    """Allows importing a full .db SQLite file and merges it with the existing records"""
     temp_db_path = os.path.join(BASE_DIR, "temp_import.db")
     with open(temp_db_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -425,7 +446,6 @@ def get_global_stats(db: Session = Depends(get_db)):
     routes = db.query(FranchiseRecord.route, func.count(FranchiseRecord.id)).filter(FranchiseRecord.is_active == True).group_by(FranchiseRecord.route).all()
     route_data = [{"route": r[0], "count": r[1]} for r in routes]
 
-    # DAILY TREND: Aggregate of all records across the entire DB by exact day of the week (Monday, Tuesday, etc.)
     days_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat'}
     daily_trend_dict = {d: 0 for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}
     
@@ -436,7 +456,6 @@ def get_global_stats(db: Session = Depends(get_db)):
             
     daily_trend = [{"name": k, "val": v} for k, v in daily_trend_dict.items()]
         
-    # WEEKLY TREND: Formatted cleanly using the start date of the week (e.g. "Oct 12")
     weekly_trend = []
     for i in range(4, -1, -1):
         target_date = current_time - timedelta(days=current_time.weekday() + (i * 7))
@@ -448,7 +467,6 @@ def get_global_stats(db: Session = Depends(get_db)):
         ).scalar()
         weekly_trend.append({"name": target_date.strftime('%b %d'), "val": count})
 
-    # MONTHLY TREND: Exact string months (Jan, Feb)
     monthly_trend = []
     for i in range(5, -1, -1):
         target_month = current_month - i
@@ -474,24 +492,9 @@ def get_global_stats(db: Session = Depends(get_db)):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
-    # Absolute Fallback Logger: Writes directly to the Desktop so we can see why it fails
-    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-    crash_log_path = os.path.join(desktop_path, "PASADA_CRASH_LOG.txt")
-    
-    def log_to_desktop(msg):
-        print(msg)
-        try:
-            with open(crash_log_path, "a") as f:
-                f.write(f"{msg}\n")
-        except:
-            pass
-
-    log_to_desktop(f"\n[{datetime.now()}] --- NEW LAUNCH ATTEMPT ---")
-    
     try:
         log_to_desktop(f"[{datetime.now()}] Scanning for zombie processes on Port 8000...")
         if os.name == 'nt':
-            # Added shell=True to fix Windows Taskkill failure
             result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, shell=True)
             for line in result.stdout.splitlines():
                 if ':8000 ' in line and 'LISTENING' in line:
