@@ -6,7 +6,7 @@ import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
 // FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()

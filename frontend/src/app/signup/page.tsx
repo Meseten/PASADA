@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
-// FIXED: Using localhost bypasses Windows WebView2 Loopback Restriction
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
@@ -28,6 +27,7 @@ export default function Signup() {
   const [loading, setLoading] = useState(false);
   const [serverReady, setServerReady] = useState(false);
 
+  // Poll server to check if it's awake
   useEffect(() => {
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
@@ -46,6 +46,12 @@ export default function Signup() {
     return () => clearInterval(interval);
   }, []);
 
+  // Auto-generate Username when First or Last name changes
+  useEffect(() => {
+    const autoGen = `${firstName.trim()} ${lastName.trim()}`.trim();
+    setUsername(autoGen);
+  }, [firstName, lastName]);
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!serverReady) return;
@@ -63,11 +69,11 @@ export default function Signup() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          first_name: firstName,
-          last_name: lastName,
-          username: username,
+          first_name: firstName.trim(),
+          last_name: lastName.trim(),
+          username: username.trim(),
           password: password,
-          role: "Clerk", // Hardcoded so the backend doesn't crash, but hidden from UI
+          role: "Clerk", 
         }),
       });
 
@@ -89,7 +95,6 @@ export default function Signup() {
       <ThemeToggle />
       <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">
         <div className="flex flex-col items-center mb-8">
-          {/* TFRU LOGO INTEGRATION */}
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border bg-white" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
           <p className="text-muted-foreground mt-1 text-sm font-medium">New Administrative Registration</p>
@@ -115,6 +120,7 @@ export default function Signup() {
                   type="text"
                   value={firstName}
                   onChange={(e) => setFirstName(e.target.value.toUpperCase())}
+                  onBlur={() => setFirstName(firstName.trim())}
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"
                   required
                 />
@@ -125,6 +131,7 @@ export default function Signup() {
                   type="text"
                   value={lastName}
                   onChange={(e) => setLastName(e.target.value.toUpperCase())}
+                  onBlur={() => setLastName(lastName.trim())}
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"
                   required
                 />
@@ -136,10 +143,8 @@ export default function Signup() {
               <input
                 type="text"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="E.g. JDELACRUZ"
-                className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all text-slate-900 dark:text-white"
-                required
+                readOnly
+                className="w-full bg-muted/60 border border-border rounded-lg px-4 py-3 text-sm font-bold text-slate-500 dark:text-slate-400 cursor-not-allowed uppercase"
               />
             </div>
 
