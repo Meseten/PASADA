@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
-// FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
+// DEFINITIVE FIX: 127.0.0.1 forces IPv4 connection, completely bypassing the Windows IPv6 localhost trap.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
@@ -88,7 +88,6 @@ export default function Login() {
       <ThemeToggle />
       <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">
         <div className="flex flex-col items-center mb-8">
-          {/* TFRU LOGO INTEGRATION */}
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
           <p className="text-muted-foreground mt-1 text-sm font-medium">Predictive Franchise Administration System</p>
@@ -97,7 +96,7 @@ export default function Login() {
         {!serverReady ? (
           <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />
-            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Booting local server engine...</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to local server...</p>
           </div>
         ) : (
           <form onSubmit={handleLogin} className="space-y-5">
@@ -127,7 +126,8 @@ export default function Login() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white"
+                  // DEFINITIVE FIX: [&::-ms-reveal]:hidden securely removes the duplicated Windows Edge eye icon
+                  className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
                 <button

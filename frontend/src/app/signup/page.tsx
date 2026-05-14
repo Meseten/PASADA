@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
@@ -27,7 +27,6 @@ export default function Signup() {
   const [loading, setLoading] = useState(false);
   const [serverReady, setServerReady] = useState(false);
 
-  // Poll server to check if it's awake
   useEffect(() => {
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
@@ -46,7 +45,7 @@ export default function Signup() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-generate Username when First or Last name changes
+  // DEFINITIVE FIX: Auto-generates Username based on trimmed names
   useEffect(() => {
     const autoGen = `${firstName.trim()} ${lastName.trim()}`.trim();
     setUsername(autoGen);
@@ -103,7 +102,7 @@ export default function Signup() {
         {!serverReady ? (
           <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />
-            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Booting local server engine...</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to local server...</p>
           </div>
         ) : (
           <form onSubmit={handleSignup} className="space-y-5">
@@ -156,7 +155,8 @@ export default function Signup() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white"
+                  // DEFINITIVE FIX: Removes the duplicated Windows Edge eye icon
+                  className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
                 <button
