@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText } from "lucide-react"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 interface Member {
   id: string; sbn_no: string; operator_name: string; address: string; 

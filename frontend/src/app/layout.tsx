@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input"
 const inter = Inter({ subsets: ["latin"] })
 
 // FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { UploadCloud, CheckCircle, Loader2, FileText, AlertTriangle, Database } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 export default function MassImport() {
   const [selectedRoute, setSelectedRoute] = useState("");
