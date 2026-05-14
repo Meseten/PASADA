@@ -6,10 +6,11 @@ import pytz
 import os
 import uuid
 
-# production-safe persistent storage directory
-USER_HOME = os.path.expanduser("~")
-BASE_DIR = os.path.join(USER_HOME, "Documents", "PASADA_DATA")
+# DEFINITIVE FIX: Move database out of protected "Documents" to guaranteed "LocalAppData"
+local_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+BASE_DIR = os.path.join(local_app_data, "PASADA_DATA")
 
+# Ensure the folder actually exists before SQLite tries to write to it
 if not os.path.exists(BASE_DIR):
     os.makedirs(BASE_DIR)
 

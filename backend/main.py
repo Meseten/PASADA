@@ -488,9 +488,15 @@ except Exception as e:
     sys.exit(1)
 
 # ==========================================
-# 3. SERVER EXECUTION ON PORT 43888
+# 4. SERVER EXECUTION ON PORT 43888
 # ==========================================
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    
+    # DEFINITIVE FIX: Force Uvicorn to write API traffic and 500 errors into our crash log
+    sys.stdout = open(crash_log_path, "a", encoding="utf-8", buffering=1)
+    sys.stderr = sys.stdout
+
     try:
         force_log("Scanning for zombie processes on Port 43888...")
         if os.name == 'nt':
@@ -505,7 +511,8 @@ if __name__ == "__main__":
                     break
         force_log("Port 43888 is clear. Starting Uvicorn server...")
         
-        uvicorn.run(app, host="0.0.0.0", port=43888)
+        # log_config=None forces Uvicorn to use our sys.stdout redirect above
+        uvicorn.run(app, host="0.0.0.0", port=43888, log_config=None)
         
     except Exception as e:
         force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{traceback.format_exc()}")
