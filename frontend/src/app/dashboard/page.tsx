@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe } from "lucide-react";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+const API_URL = "http://127.0.0.1:43888";
 const COLORS = ['#10b981', '#f59e0b', '#ef4444']; 
 
 interface GlobalStats {

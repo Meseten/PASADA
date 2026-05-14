@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+const API_URL = "http://127.0.0.1:43888";
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState("general");
