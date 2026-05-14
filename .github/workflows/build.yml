@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           cd backend
-          pip install fastapi uvicorn sqlalchemy pandas python-docx docx2pdf passlib bcrypt pydantic python-multipart requests scikit-learn pytz pyinstaller
+          pip install fastapi uvicorn sqlalchemy pandas python-docx docx2pdf passlib bcrypt pydantic python-multipart requests scikit-learn pytz pyinstaller "numpy<2"
           
           pyinstaller --onefile --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import multipart --hidden-import anyio._backends._asyncio --add-data "template.docx;." --name pasada-backend-x86_64-pc-windows-msvc main.py
           
