@@ -353,8 +353,63 @@ try:
         for file in files:
             contents = await file.read()
             try:
+                # ========================================================
+                # NEW LOGIC: Parses Excel Masterlists into the Database
+                # ========================================================
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
-                    pass 
+                    if file.filename.endswith(".xlsx"):
+                        df = pd.read_excel(io.BytesIO(contents))
+                    else:
+                        df = pd.read_csv(io.BytesIO(contents))
+                    
+                    # Normalize columns to uppercase to avoid key errors
+                    df.columns = [str(c).strip().upper() for c in df.columns]
+
+                    for _, row in df.iterrows():
+                        name = str(row.get('NAME', '')).strip()
+                        if not name or name.lower() == 'nan': continue
+
+                        chassis = str(row.get('CHASSIS NO.', '')).strip()
+                        dedup_key = f"{name.upper()}_{chassis.upper()}"
+                        if dedup_key in existing_set: continue
+
+                        motor = str(row.get('MOTOR NO.', '')).strip()
+                        plate = str(row.get('PLATE NO.', '')).strip()
+                        address = str(row.get('ADDRESS', '')).strip()
+                        sbn = str(row.get('SBN NO.', '')).strip()
+
+                        # Priority: Date of Renewal. Fallback to Issue Date, else Jan 1.
+                        raw_date = row.get('DATE OF RENEWAL', row.get('DATE ISSUED', ''))
+                        try:
+                            parsed_date = pd.to_datetime(raw_date).to_pydatetime()
+                        except:
+                            parsed_date = datetime(current_time.year, 1, 1)
+
+                        if not sbn or sbn.lower() == 'nan':
+                            sbn = f"{route_name[:3]}-000-{str(current_time.year)[-2:]}"
+
+                        clean_plate = sanitize_plate(plate, chassis, motor)
+
+                        record = FranchiseRecord(
+                            sbn_no=sbn.upper(), 
+                            operator_name=name.upper(),
+                            address=address.upper() if address.lower() != 'nan' else "", 
+                            motor_no=motor.upper() if motor.lower() != 'nan' else "",
+                            plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
+                            chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
+                            make="UNKNOWN", # Default if make is missing in masterlist
+                            route=route_name.upper(),
+                            driving_route="POBLACION", 
+                            issue_date=parsed_date,
+                            valid_until=datetime(parsed_date.year, 12, 31),
+                            processed_by=full_name, 
+                            is_active=determine_status(parsed_date)
+                        )
+                        db.add(record)
+                        existing_set.add(dedup_key)
+                        imported_count += 1
+
+                # Legacy Word Document Extractor
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
                     dedup_key = f"{extracted['operator_name']}_{extracted['chassis_no']}"
@@ -375,7 +430,7 @@ try:
                     db.add(record)
                     existing_set.add(dedup_key)
                     imported_count += 1
-            except Exception:
+            except Exception as e:
                 continue
 
         db.commit()
@@ -420,6 +475,45 @@ try:
     def get_prediction(route: str, db: Session = Depends(get_db)):
         return train_and_predict(db, route)
 
+# =================================================================
+    # NEW ENDPOINT: EXPORT SPECIFIC TODA MASTERLIST (EXCEL/CSV FORMAT)
+    # =================================================================
+    @app.get("/export/masterlist/{route_name}")
+    def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
+        
+        if not records:
+            raise HTTPException(status_code=404, detail="No records found for this route")
+            
+        csv_data = []
+        for r in records:
+            csv_data.append({
+                "SBN NO.": r.sbn_no,
+                "DATE OF RENEWAL": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else "",
+                "NAME": r.operator_name,
+                "ADDRESS": r.address,
+                "MOTOR NO.": r.motor_no,
+                "CHASSIS NO.": r.chassis_no,
+                "PLATE NO.": r.plate_no,
+                " ": "",   # Blank columns to perfectly match your original Excel template
+                "  ": "",
+                "   ": ""
+            })
+            
+        # Convert to CSV formatted string
+        df = pd.DataFrame(csv_data)
+        output = io.StringIO()
+        df.to_csv(output, index=False)
+        
+        # Log the action
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
+        
+        # Trigger download in the browser
+        headers = {
+            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.csv"'
+        }
+        return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
+    
     @app.get("/stats/global")
     def get_global_stats(db: Session = Depends(get_db)):
         current_time = get_pht_now()

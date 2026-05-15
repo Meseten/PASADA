@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download } from "lucide-react"
 
 const API_URL = "http://127.0.0.1:43888";
 
@@ -38,6 +38,7 @@ export default function TodaClient() {
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [isGeneratingId, setIsGeneratingId] = useState<string | null>(null)
+  const [isExporting, setIsExporting] = useState(false)
   
   // Batch Printing States
   const [batchModalOpen, setBatchModalOpen] = useState(false)
@@ -92,6 +93,39 @@ export default function TodaClient() {
   const handleOpenEdit = (member: Member) => {
     setFormData({ ...member, route: safeRouteName })
     setIsEditOpen(true)
+  }
+
+  // ==========================================
+  // NEW FUNCTION: EXPORT MASTERLIST EXCEL/CSV
+  // ==========================================
+  const handleExportMasterlist = async () => {
+    setIsExporting(true)
+    const token = localStorage.getItem("token")
+    try {
+      const response = await fetch(`${API_URL}/export/masterlist/${safeRouteName}`, {
+        headers: { "Authorization": `Bearer ${token}` }
+      })
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.style.display = 'none'
+        a.href = url
+        a.download = `${safeRouteName}_MASTERLIST_2026.csv`
+        document.body.appendChild(a)
+        a.click()
+        setTimeout(() => {
+          document.body.removeChild(a)
+          window.URL.revokeObjectURL(url)
+        }, 1000)
+      } else {
+        alert("Failed to export masterlist.")
+      }
+    } catch (error) {
+      alert("Network error while exporting.")
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const handleNativePrint = async (member: Member) => {
@@ -260,6 +294,12 @@ export default function TodaClient() {
           <p className="text-muted-foreground mt-1 text-sm md:text-base">Comprehensive operator registry and compliance tracking.</p>
         </div>
         <div className="flex items-center gap-3">
+          {/* NEW BUTTON: EXPORT MASTERLIST */}
+          <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
+            {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
+            Export Masterlist
+          </Button>
+
           <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600">
             <Printer className="mr-2 h-5 w-5" /> Batch Print (A4)
           </Button>
