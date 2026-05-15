@@ -4,7 +4,7 @@ import traceback
 from datetime import datetime
 
 # ==========================================
-# 1. THE OS-LEVEL LOGGER (GUARANTEED TO CATCH SILENT CRASHES)
+# 1. THE OS-LEVEL LOGGER
 # ==========================================
 user_folder = os.path.expanduser('~')
 crash_log_path = os.path.join(user_folder, "PASADA_CRASH_LOG.txt")
@@ -32,9 +32,6 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
 try:
-    # ==========================================
-    # 2. LOAD HEAVY LIBRARIES
-    # ==========================================
     force_log("Loading Pandas, FastAPI, and ML libraries...")
     import subprocess
     import time
@@ -58,7 +55,6 @@ try:
     import zipfile
     import shutil
     from typing import List, Optional
-    # DEFINITIVE FIX: Added Response to the imports here!
     from fastapi.responses import FileResponse, Response
     import starlette.formparsers
     
@@ -341,6 +337,9 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ========================================================
+    # EXCEL MASTERLIST IMPORT (WITH OPENPYXL DEPENDENCY FIX)
+    # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
@@ -352,24 +351,25 @@ try:
         for file in files:
             contents = await file.read()
             try:
-                # ========================================================
-                # DEFINITIVE FIX: Smart Header Detector for messy Excel files
-                # ========================================================
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
-                        df = pd.read_excel(io.BytesIO(contents), header=None)
+                        # Engine is required to prevent Pandas from silently crashing
+                        df = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
                     else:
                         df = pd.read_csv(io.BytesIO(contents), header=None)
                     
-                    # Scan down the sheet until we find the actual header row
-                    header_idx = 0
+                    # SMART HEADER SCANNER: Ignores the messy top row "162,,,,,"
+                    header_idx = -1
                     for i, row in df.iterrows():
-                        row_vals = [str(x).upper().strip() for x in row.values]
-                        if "NAME" in row_vals or "SBN NO." in row_vals or "SBN" in row_vals:
+                        row_vals = [str(x).upper().strip() for x in row.values if pd.notna(x)]
+                        if "NAME" in row_vals and ("SBN NO." in row_vals or "SBN" in row_vals):
                             header_idx = i
                             break
+                            
+                    if header_idx == -1:
+                        continue  # Could not find headers, skip file
                     
-                    # Set the true headers and slice off the garbage top rows
+                    # Assign the correct row as headers and slice off the garbage above
                     df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
                     df = df.iloc[header_idx+1:].reset_index(drop=True)
 
@@ -386,7 +386,6 @@ try:
                         address = str(row.get('ADDRESS', '')).strip()
                         sbn = str(row.get('SBN NO.', '')).strip()
 
-                        # Priority: Date of Renewal. Fallback to Issue Date, else Jan 1.
                         raw_date = row.get('DATE OF RENEWAL', row.get('DATE ISSUED', ''))
                         try:
                             parsed_date = pd.to_datetime(raw_date).to_pydatetime()
@@ -437,7 +436,8 @@ try:
                     db.add(record)
                     existing_set.add(dedup_key)
                     imported_count += 1
-            except Exception:
+            except Exception as e:
+                force_log(f"Import Error: {e}")
                 continue
 
         db.commit()
@@ -483,7 +483,7 @@ try:
         return train_and_predict(db, route)
 
     # =================================================================
-    # NEW ENDPOINT: EXPORT SPECIFIC TODA MASTERLIST (EXCEL/CSV FORMAT)
+    # NEW ENDPOINT: EXPORT SPECIFIC TODA MASTERLIST (EXACT FORMAT MATCH)
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -492,29 +492,31 @@ try:
         if not records:
             raise HTTPException(status_code=404, detail="No records found for this route")
             
-        csv_data = []
-        for r in records:
-            csv_data.append({
-                "SBN NO.": r.sbn_no,
-                "DATE OF RENEWAL": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else "",
-                "NAME": r.operator_name,
-                "ADDRESS": r.address,
-                "MOTOR NO.": r.motor_no,
-                "CHASSIS NO.": r.chassis_no,
-                "PLATE NO.": r.plate_no,
-                " ": "",   
-                "  ": "",
-                "   ": ""
-            })
-            
-        df = pd.DataFrame(csv_data)
         output = io.StringIO()
-        df.to_csv(output, index=False)
         
+        # EXACT EXCEL/CSV FORMATTING MATCH
+        # Row 1: Record count followed by exactly 10 commas to mimic your Excel template
+        output.write(f"{len(records)},,,,,,,,,,\n")
+        # Row 2: Exact headers
+        output.write("SBN NO.,DATE OF RENEWAL,NAME,ADDRESS,MOTOR NO.,CHASSIS NO.,PLATE NO.,,,,\n")
+        
+        for r in records:
+            sbn = r.sbn_no or ""
+            date = r.issue_date.strftime('%Y-%m-%d') if r.issue_date else ""
+            
+            # Wrap strings in quotes if they contain commas to prevent CSV breakage
+            name = f'"{r.operator_name}"' if ',' in r.operator_name else r.operator_name
+            address = f'"{r.address}"' if ',' in r.address else r.address
+            motor = f'"{r.motor_no}"' if ',' in r.motor_no else r.motor_no
+            chassis = f'"{r.chassis_no}"' if ',' in r.chassis_no else r.chassis_no
+            plate = f'"{r.plate_no}"' if ',' in r.plate_no else r.plate_no
+            
+            output.write(f"{sbn},{date},{name},{address},{motor},{chassis},{plate},,,,\n")
+            
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.csv"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.csv"'
         }
         return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
     
