@@ -6,7 +6,6 @@ from datetime import datetime
 # ==========================================
 # 1. THE OS-LEVEL LOGGER (GUARANTEED TO CATCH SILENT CRASHES)
 # ==========================================
-# Writes directly to C:\Users\Username\PASADA_CRASH_LOG.txt
 user_folder = os.path.expanduser('~')
 crash_log_path = os.path.join(user_folder, "PASADA_CRASH_LOG.txt")
 
@@ -17,7 +16,6 @@ def force_log(msg):
     except:
         pass
 
-# Intercept ANY fatal crash that bypasses try/except blocks
 def exception_hook(exc_type, exc_value, exc_traceback):
     err_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     force_log(f"\n[{datetime.now()}] !!! OS-LEVEL FATAL CRASH !!!\n{err_msg}")
@@ -31,7 +29,6 @@ force_log(f"Running from: {sys.executable}")
 import multiprocessing
 
 if __name__ == "__main__":
-    # MUST BE THE FIRST THING EXECUTED FOR PYINSTALLER ON WINDOWS
     multiprocessing.freeze_support()
 
 try:
@@ -61,8 +58,10 @@ try:
     import zipfile
     import shutil
     from typing import List, Optional
-    from fastapi.responses import FileResponse
+    # DEFINITIVE FIX: Added Response to the imports here!
+    from fastapi.responses import FileResponse, Response
     import starlette.formparsers
+    
     force_log("All libraries loaded successfully!")
 
     starlette.formparsers.MultiPartParser.max_files = 10000
@@ -354,16 +353,25 @@ try:
             contents = await file.read()
             try:
                 # ========================================================
-                # NEW LOGIC: Parses Excel Masterlists into the Database
+                # DEFINITIVE FIX: Smart Header Detector for messy Excel files
                 # ========================================================
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
-                        df = pd.read_excel(io.BytesIO(contents))
+                        df = pd.read_excel(io.BytesIO(contents), header=None)
                     else:
-                        df = pd.read_csv(io.BytesIO(contents))
+                        df = pd.read_csv(io.BytesIO(contents), header=None)
                     
-                    # Normalize columns to uppercase to avoid key errors
-                    df.columns = [str(c).strip().upper() for c in df.columns]
+                    # Scan down the sheet until we find the actual header row
+                    header_idx = 0
+                    for i, row in df.iterrows():
+                        row_vals = [str(x).upper().strip() for x in row.values]
+                        if "NAME" in row_vals or "SBN NO." in row_vals or "SBN" in row_vals:
+                            header_idx = i
+                            break
+                    
+                    # Set the true headers and slice off the garbage top rows
+                    df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
+                    df = df.iloc[header_idx+1:].reset_index(drop=True)
 
                     for _, row in df.iterrows():
                         name = str(row.get('NAME', '')).strip()
@@ -397,7 +405,7 @@ try:
                             motor_no=motor.upper() if motor.lower() != 'nan' else "",
                             plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
                             chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
-                            make="UNKNOWN", # Default if make is missing in masterlist
+                            make="UNKNOWN", 
                             route=route_name.upper(),
                             driving_route="POBLACION", 
                             issue_date=parsed_date,
@@ -409,7 +417,6 @@ try:
                         existing_set.add(dedup_key)
                         imported_count += 1
 
-                # Legacy Word Document Extractor
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
                     dedup_key = f"{extracted['operator_name']}_{extracted['chassis_no']}"
@@ -430,7 +437,7 @@ try:
                     db.add(record)
                     existing_set.add(dedup_key)
                     imported_count += 1
-            except Exception as e:
+            except Exception:
                 continue
 
         db.commit()
@@ -475,7 +482,7 @@ try:
     def get_prediction(route: str, db: Session = Depends(get_db)):
         return train_and_predict(db, route)
 
-# =================================================================
+    # =================================================================
     # NEW ENDPOINT: EXPORT SPECIFIC TODA MASTERLIST (EXCEL/CSV FORMAT)
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
@@ -495,20 +502,17 @@ try:
                 "MOTOR NO.": r.motor_no,
                 "CHASSIS NO.": r.chassis_no,
                 "PLATE NO.": r.plate_no,
-                " ": "",   # Blank columns to perfectly match your original Excel template
+                " ": "",   
                 "  ": "",
                 "   ": ""
             })
             
-        # Convert to CSV formatted string
         df = pd.DataFrame(csv_data)
         output = io.StringIO()
         df.to_csv(output, index=False)
         
-        # Log the action
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
-        # Trigger download in the browser
         headers = {
             'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.csv"'
         }
@@ -587,7 +591,6 @@ except Exception as e:
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
-    # DEFINITIVE FIX: Force Uvicorn to write API traffic and 500 errors into our crash log
     sys.stdout = open(crash_log_path, "a", encoding="utf-8", buffering=1)
     sys.stderr = sys.stdout
 
@@ -605,7 +608,6 @@ if __name__ == "__main__":
                     break
         force_log("Port 43888 is clear. Starting Uvicorn server...")
         
-        # log_config=None forces Uvicorn to use our sys.stdout redirect above
         uvicorn.run(app, host="0.0.0.0", port=43888, log_config=None)
         
     except Exception as e:
