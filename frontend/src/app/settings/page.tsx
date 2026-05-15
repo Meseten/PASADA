@@ -283,7 +283,7 @@ export default function Settings() {
                 </p>
                 <div className="flex items-center gap-2 mt-4 text-xs font-bold text-emerald-600 bg-emerald-500/10 w-max px-3 py-1.5 rounded-full border border-emerald-500/20">
                   <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-                  Active on Port 8000
+                  Active on Port 43888
                 </div>
               </div>
 

@@ -1,6 +1,7 @@
 import sys
 import os
 import traceback
+import re
 from datetime import datetime
 
 # ==========================================
@@ -142,6 +143,9 @@ try:
         if p == c or p == m:
             return ""
         return p
+
+    def clean_dedup_key(text):
+        return re.sub(r'\s+', '', str(text).upper())
 
     @app.post("/signup")
     def signup(user: UserCreate, db: Session = Depends(get_db)):
@@ -337,39 +341,36 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ========================================================
-    # EXCEL MASTERLIST IMPORT (WITH OPENPYXL DEPENDENCY FIX)
-    # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
         imported_count = 0
         current_time = get_pht_now()
         existing_records = db.query(FranchiseRecord.operator_name, FranchiseRecord.chassis_no).filter(FranchiseRecord.route == route_name.upper()).all()
-        existing_set = {f"{str(r[0]).strip().upper()}_{str(r[1]).strip().upper()}" for r in existing_records}
+        
+        # DEFINITIVE FIX: Aggressive space stripping guarantees DOCX and Excel match perfectly
+        existing_set = {f"{clean_dedup_key(r[0])}_{clean_dedup_key(r[1])}" for r in existing_records}
 
         for file in files:
             contents = await file.read()
             try:
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
-                        # Engine is required to prevent Pandas from silently crashing
                         df = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
                     else:
                         df = pd.read_csv(io.BytesIO(contents), header=None)
                     
-                    # SMART HEADER SCANNER: Ignores the messy top row "162,,,,,"
+                    # SMART HEADER SCANNER: Extremely resilient, ignores NaNs and trailing spaces
                     header_idx = -1
                     for i, row in df.iterrows():
                         row_vals = [str(x).upper().strip() for x in row.values if pd.notna(x)]
-                        if "NAME" in row_vals and ("SBN NO." in row_vals or "SBN" in row_vals):
+                        if any("NAME" in val for val in row_vals) and any("SBN" in val for val in row_vals):
                             header_idx = i
                             break
                             
                     if header_idx == -1:
-                        continue  # Could not find headers, skip file
+                        continue 
                     
-                    # Assign the correct row as headers and slice off the garbage above
                     df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
                     df = df.iloc[header_idx+1:].reset_index(drop=True)
 
@@ -378,22 +379,29 @@ try:
                         if not name or name.lower() == 'nan': continue
 
                         chassis = str(row.get('CHASSIS NO.', '')).strip()
-                        dedup_key = f"{name.upper()}_{chassis.upper()}"
+                        dedup_key = f"{clean_dedup_key(name)}_{clean_dedup_key(chassis)}"
                         if dedup_key in existing_set: continue
 
                         motor = str(row.get('MOTOR NO.', '')).strip()
                         plate = str(row.get('PLATE NO.', '')).strip()
                         address = str(row.get('ADDRESS', '')).strip()
-                        sbn = str(row.get('SBN NO.', '')).strip()
-
+                        
                         raw_date = row.get('DATE OF RENEWAL', row.get('DATE ISSUED', ''))
                         try:
                             parsed_date = pd.to_datetime(raw_date).to_pydatetime()
                         except:
                             parsed_date = datetime(current_time.year, 1, 1)
 
-                        if not sbn or sbn.lower() == 'nan':
+                        raw_sbn = str(row.get('SBN NO.', '')).strip()
+                        if not raw_sbn or raw_sbn.lower() == 'nan':
                             sbn = f"{route_name[:3]}-000-{str(current_time.year)[-2:]}"
+                        else:
+                            # DEFINITIVE FIX: Automatically append the renewal year to the SBN if it's missing
+                            sbn_parts = raw_sbn.split('-')
+                            if len(sbn_parts) == 2:
+                                sbn = f"{raw_sbn}-{str(parsed_date.year)[-2:]}"
+                            else:
+                                sbn = raw_sbn
 
                         clean_plate = sanitize_plate(plate, chassis, motor)
 
@@ -404,7 +412,7 @@ try:
                             motor_no=motor.upper() if motor.lower() != 'nan' else "",
                             plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
                             chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
-                            make="UNKNOWN", 
+                            make="", # DEFINITIVE FIX: Masterlist lacks MAKE column, leaves it blank cleanly
                             route=route_name.upper(),
                             driving_route="POBLACION", 
                             issue_date=parsed_date,
@@ -418,7 +426,7 @@ try:
 
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
-                    dedup_key = f"{extracted['operator_name']}_{extracted['chassis_no']}"
+                    dedup_key = f"{clean_dedup_key(extracted['operator_name'])}_{clean_dedup_key(extracted['chassis_no'])}"
                     if dedup_key in existing_set: continue
 
                     clean_plate = sanitize_plate(extracted['plate_no'], extracted['chassis_no'], extracted['motor_no'])
@@ -483,7 +491,7 @@ try:
         return train_and_predict(db, route)
 
     # =================================================================
-    # NEW ENDPOINT: EXPORT SPECIFIC TODA MASTERLIST (EXACT FORMAT MATCH)
+    # EXCEL MASTERLIST EXPORT (NATIVE .XLSX GENERATION)
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -492,33 +500,35 @@ try:
         if not records:
             raise HTTPException(status_code=404, detail="No records found for this route")
             
-        output = io.StringIO()
-        
-        # EXACT EXCEL/CSV FORMATTING MATCH
-        # Row 1: Record count followed by exactly 10 commas to mimic your Excel template
-        output.write(f"{len(records)},,,,,,,,,,\n")
-        # Row 2: Exact headers
-        output.write("SBN NO.,DATE OF RENEWAL,NAME,ADDRESS,MOTOR NO.,CHASSIS NO.,PLATE NO.,,,,\n")
-        
+        csv_data = []
         for r in records:
-            sbn = r.sbn_no or ""
-            date = r.issue_date.strftime('%Y-%m-%d') if r.issue_date else ""
+            csv_data.append({
+                "SBN NO.": r.sbn_no or "",
+                "DATE OF RENEWAL": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else "",
+                "NAME": r.operator_name or "",
+                "ADDRESS": r.address or "",
+                "MOTOR NO.": r.motor_no or "",
+                "CHASSIS NO.": r.chassis_no or "",
+                "PLATE NO.": r.plate_no or ""
+            })
             
-            # Wrap strings in quotes if they contain commas to prevent CSV breakage
-            name = f'"{r.operator_name}"' if ',' in r.operator_name else r.operator_name
-            address = f'"{r.address}"' if ',' in r.address else r.address
-            motor = f'"{r.motor_no}"' if ',' in r.motor_no else r.motor_no
-            chassis = f'"{r.chassis_no}"' if ',' in r.chassis_no else r.chassis_no
-            plate = f'"{r.plate_no}"' if ',' in r.plate_no else r.plate_no
+        # DEFINITIVE FIX: Converts output directly into a native Excel (.xlsx) file
+        df = pd.DataFrame(csv_data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
+            worksheet = writer.sheets['Masterlist']
+            # Replicate your specific format by placing the record count in the first cell
+            worksheet['A1'] = len(records)
             
-            output.write(f"{sbn},{date},{name},{address},{motor},{chassis},{plate},,,,\n")
-            
+        output.seek(0)
+        
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.csv"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.xlsx"'
         }
-        return Response(content=output.getvalue(), media_type="text/csv", headers=headers)
+        return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
     @app.get("/stats/global")
     def get_global_stats(db: Session = Depends(get_db)):
