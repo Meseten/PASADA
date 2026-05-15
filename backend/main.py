@@ -301,7 +301,7 @@ try:
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========================================================
-    # DEFINITIVE FIX: DATA MERGE AND TRUE UPSERT ENGINE
+    # DATA MERGE AND TRUE UPSERT ENGINE
     # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -397,7 +397,7 @@ try:
                     issue_date = extracted['issue_date'] or datetime(current_time.year, 1, 1)
 
                     if existing_record:
-                        # CRITICAL FIX: Merge the MAKE from the DOCX without skipping
+                        # MERGE: Fills the MAKE field into the Excel record
                         if extracted['make'] and (not existing_record.make or existing_record.make == ""):
                             existing_record.make = extracted['make'].upper()
                         if extracted['address'] and not existing_record.address: existing_record.address = extracted['address'].upper()
@@ -462,7 +462,7 @@ try:
         return train_and_predict(db, route)
 
     # =================================================================
-    # DEFINITIVE FIX: EXACT EXCEL STYLING, LEGENDS, AND TOTALS
+    # EXACT EXCEL STYLING, LEGENDS, AND LIVE COUNTIFS FORMULAS
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -488,40 +488,42 @@ try:
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # We start the data on row 4 to leave room for the Totals on top
-            df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=3)
+            df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
             ws = writer.sheets['Masterlist']
             
+            total_row_count = len(records) + 2
             current_year = get_pht_now().year
-            active_count = sum(1 for r in records if r.is_active and (r.issue_date.year if r.issue_date else 0) > current_year - 2)
 
-            # TOP LEFT: Totals
-            ws['A1'] = "TOTAL OPERATORS:"
-            ws['B1'] = len(records)
-            ws['A2'] = "TOTAL ACTIVE:"
-            ws['B2'] = active_count
+            # TOP LEFT: Cell A1 uses the live COUNTA formula from the original template
+            ws['A1'] = f"=COUNTA(A3:A{total_row_count})"
+            ws['A1'].font = Font(bold=True, size=12)
             
-            ws['A1'].font = Font(bold=True)
-            ws['B1'].font = Font(bold=True)
-            ws['A2'].font = Font(bold=True)
-            ws['B2'].font = Font(bold=True)
-            
-            # TOP RIGHT: Legends
+            # DEFINING TEMPLATE COLORS
             red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
             yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
             green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
             
-            ws['I1'] = "LEGEND:"
-            ws['I1'].font = Font(bold=True)
-            ws['I2'] = "ACTIVE"
-            ws['I2'].fill = green_fill
-            ws['I3'] = "FLAGGED (1 YR PENDING)"
-            ws['I3'].fill = yellow_fill
-            ws['I4'] = "REVOKED / VACANT"
-            ws['I4'].fill = red_fill
+            # TOP RIGHT: Exact Tally and Legend Layout (Columns I and J)
+            ws['I2'] = "LEGEND & TALLY"
+            ws['I2'].font = Font(bold=True)
+            
+            ws['I3'] = "ACTIVE"
+            ws['I3'].fill = green_fill
+            ws['J3'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
+            ws['J3'].font = Font(bold=True)
 
-            # Apply row colors and statuses dynamically
-            for row_num, r in enumerate(records, start=5): # Data starts at row 5
+            ws['I4'] = "FLAGGED"
+            ws['I4'].fill = yellow_fill
+            ws['J4'] = f'=COUNTIF(H3:H{total_row_count}, "FLAGGED")'
+            ws['J4'].font = Font(bold=True)
+
+            ws['I5'] = "VACANT / REVOKED"
+            ws['I5'].fill = red_fill
+            ws['J5'] = f'=COUNTIF(H3:H{total_row_count}, "VACANT / REVOKED")'
+            ws['J5'].font = Font(bold=True)
+
+            # Apply row colors and text statuses exactly mimicking the template
+            for row_num, r in enumerate(records, start=3):
                 issue_year = r.issue_date.year if r.issue_date else 0
                 
                 if not r.is_active or issue_year <= current_year - 2:
@@ -536,14 +538,17 @@ try:
                 
                 ws.cell(row=row_num, column=8, value=status_text)
                 
-                # Color the entire row
+                # Color columns A to H for the specific row
                 for col_num in range(1, 9):
                     ws.cell(row=row_num, column=col_num).fill = fill_color
             
-            # Auto-adjust columns
+            # Formats column widths so the sheet opens cleanly without manual dragging
             for col in ws.columns:
                 max_length = 0
                 column = col[0].column_letter
+                if column in ['I', 'J']: 
+                    ws.column_dimensions[column].width = 22
+                    continue
                 for cell in col:
                     try:
                         if len(str(cell.value)) > max_length:
@@ -557,7 +562,7 @@ try:
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.xlsx"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.xlsx"'
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
