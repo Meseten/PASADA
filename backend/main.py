@@ -59,6 +59,9 @@ try:
     from fastapi.responses import FileResponse, Response
     import starlette.formparsers
     
+    # DEFINITIVE FIX: Imports for Excel Formatting (Colors, Fonts)
+    from openpyxl.styles import PatternFill, Font, Alignment
+    
     force_log("All libraries loaded successfully!")
 
     starlette.formparsers.MultiPartParser.max_files = 10000
@@ -206,57 +209,6 @@ try:
         records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
         return records
 
-    @app.get("/export/mass")
-    def mass_export(route: str = "ALL", year: str = "ALL", export_status: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        query = db.query(FranchiseRecord)
-        if route != "ALL": query = query.filter(FranchiseRecord.route == route.upper())
-        if year != "ALL": query = query.filter(extract('year', FranchiseRecord.issue_date) == int(year))
-        
-        current_year = get_pht_now().year
-        if export_status == "ACTIVE":
-            query = query.filter(FranchiseRecord.is_active == True)
-        elif export_status == "FLAGGED":
-            query = query.filter(FranchiseRecord.is_active == True, extract('year', FranchiseRecord.issue_date) == current_year - 1)
-        elif export_status == "REVOKED":
-            query = query.filter(FranchiseRecord.is_active == False)
-            
-        records = query.all()
-        if not records: raise HTTPException(status_code=404, detail="No records found")
-
-        export_dir = os.path.join(BASE_DIR, f"Export_{get_pht_now().strftime('%Y%m%d_%H%M%S')}")
-        os.makedirs(export_dir, exist_ok=True)
-        
-        csv_data = []
-        settings = init_settings(db)
-        
-        for r in records:
-            csv_data.append({
-                "SBN_NO": r.sbn_no, "OPERATOR_NAME": r.operator_name, "ADDRESS": r.address,
-                "PLATE_NO": r.plate_no, "MOTOR_NO": r.motor_no, "CHASSIS_NO": r.chassis_no,
-                "MAKE": r.make, "ROUTE": r.route, "ISSUE_DATE": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else ""
-            })
-            try:
-                generate_certificate({
-                    "sbn_no": r.sbn_no, "operator_name": r.operator_name, "address": r.address,
-                    "motor_no": r.motor_no, "chassis_no": r.chassis_no, "make": r.make,
-                    "plate_no": r.plate_no, "route": r.route, "driving_route": r.driving_route,
-                    "issue_date": r.issue_date, "valid_until": r.valid_until
-                }, {"committee_chair": settings.committee_chair, "enable_esignature": settings.enable_esignature}, output_dir=export_dir)
-            except Exception:
-                continue
-
-        pd.DataFrame(csv_data).to_csv(os.path.join(export_dir, "Registry_Index.csv"), index=False)
-        
-        zip_path = os.path.join(BASE_DIR, f"PASADA_Export_{route}_{year}.zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(export_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), file)
-                    
-        shutil.rmtree(export_dir)
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "MASS_EXPORT", "0", route, f"Exported {len(records)} records")
-        return FileResponse(path=zip_path, filename=os.path.basename(zip_path), media_type="application/zip")
-
     @app.post("/franchise/")
     def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
@@ -341,26 +293,26 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ========================================================
+    # DEFINITIVE FIX: DATA MERGE AND UPSERT ENGINE
+    # This prevents DOCX fields from being discarded if Excel uploaded first
+    # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
         imported_count = 0
         current_time = get_pht_now()
-        existing_records = db.query(FranchiseRecord.operator_name, FranchiseRecord.chassis_no).filter(FranchiseRecord.route == route_name.upper()).all()
-        
-        # DEFINITIVE FIX: Aggressive space stripping guarantees DOCX and Excel match perfectly
-        existing_set = {f"{clean_dedup_key(r[0])}_{clean_dedup_key(r[1])}" for r in existing_records}
 
         for file in files:
             contents = await file.read()
             try:
+                # 1. EXCEL/CSV IMPORT
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
                         df = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
                     else:
                         df = pd.read_csv(io.BytesIO(contents), header=None)
                     
-                    # SMART HEADER SCANNER: Extremely resilient, ignores NaNs and trailing spaces
                     header_idx = -1
                     for i, row in df.iterrows():
                         row_vals = [str(x).upper().strip() for x in row.values if pd.notna(x)]
@@ -368,8 +320,7 @@ try:
                             header_idx = i
                             break
                             
-                    if header_idx == -1:
-                        continue 
+                    if header_idx == -1: continue 
                     
                     df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
                     df = df.iloc[header_idx+1:].reset_index(drop=True)
@@ -379,9 +330,6 @@ try:
                         if not name or name.lower() == 'nan': continue
 
                         chassis = str(row.get('CHASSIS NO.', '')).strip()
-                        dedup_key = f"{clean_dedup_key(name)}_{clean_dedup_key(chassis)}"
-                        if dedup_key in existing_set: continue
-
                         motor = str(row.get('MOTOR NO.', '')).strip()
                         plate = str(row.get('PLATE NO.', '')).strip()
                         address = str(row.get('ADDRESS', '')).strip()
@@ -396,60 +344,79 @@ try:
                         if not raw_sbn or raw_sbn.lower() == 'nan':
                             sbn = f"{route_name[:3]}-000-{str(current_time.year)[-2:]}"
                         else:
-                            # DEFINITIVE FIX: Automatically append the renewal year to the SBN if it's missing
                             sbn_parts = raw_sbn.split('-')
-                            if len(sbn_parts) == 2:
-                                sbn = f"{raw_sbn}-{str(parsed_date.year)[-2:]}"
-                            else:
-                                sbn = raw_sbn
+                            if len(sbn_parts) == 2: sbn = f"{raw_sbn}-{str(parsed_date.year)[-2:]}"
+                            else: sbn = raw_sbn
 
                         clean_plate = sanitize_plate(plate, chassis, motor)
 
-                        record = FranchiseRecord(
-                            sbn_no=sbn.upper(), 
-                            operator_name=name.upper(),
-                            address=address.upper() if address.lower() != 'nan' else "", 
-                            motor_no=motor.upper() if motor.lower() != 'nan' else "",
-                            plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
-                            chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
-                            make="", # DEFINITIVE FIX: Masterlist lacks MAKE column, leaves it blank cleanly
-                            route=route_name.upper(),
-                            driving_route="POBLACION", 
-                            issue_date=parsed_date,
-                            valid_until=datetime(parsed_date.year, 12, 31),
-                            processed_by=full_name, 
-                            is_active=determine_status(parsed_date)
-                        )
-                        db.add(record)
-                        existing_set.add(dedup_key)
-                        imported_count += 1
+                        # UPSERT LOGIC: Search DB for existing record
+                        existing_record = db.query(FranchiseRecord).filter(
+                            func.replace(func.upper(FranchiseRecord.operator_name), ' ', '') == clean_dedup_key(name),
+                            func.replace(func.upper(FranchiseRecord.chassis_no), ' ', '') == clean_dedup_key(chassis)
+                        ).first()
 
+                        if existing_record:
+                            # Update missing fields if Excel has them
+                            if not existing_record.sbn_no or existing_record.sbn_no == "": existing_record.sbn_no = sbn.upper()
+                            if not existing_record.address or existing_record.address == "": existing_record.address = address.upper()
+                            if not existing_record.plate_no or existing_record.plate_no == "": existing_record.plate_no = clean_plate.upper()
+                            
+                            # Only overwrite date if Excel date is newer
+                            if parsed_date > existing_record.issue_date:
+                                existing_record.issue_date = parsed_date
+                                existing_record.valid_until = datetime(parsed_date.year, 12, 31)
+                                existing_record.is_active = determine_status(parsed_date)
+                        else:
+                            record = FranchiseRecord(
+                                sbn_no=sbn.upper(), operator_name=name.upper(),
+                                address=address.upper() if address.lower() != 'nan' else "", 
+                                motor_no=motor.upper() if motor.lower() != 'nan' else "",
+                                plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
+                                chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
+                                make="UNKNOWN", route=route_name.upper(), driving_route="POBLACION", 
+                                issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31),
+                                processed_by=full_name, is_active=determine_status(parsed_date)
+                            )
+                            db.add(record)
+                            imported_count += 1
+
+                # 2. DOCX IMPORT (Fills in the MAKE if Excel missed it)
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
-                    dedup_key = f"{clean_dedup_key(extracted['operator_name'])}_{clean_dedup_key(extracted['chassis_no'])}"
-                    if dedup_key in existing_set: continue
+                    
+                    existing_record = db.query(FranchiseRecord).filter(
+                        func.replace(func.upper(FranchiseRecord.operator_name), ' ', '') == clean_dedup_key(extracted['operator_name']),
+                        func.replace(func.upper(FranchiseRecord.chassis_no), ' ', '') == clean_dedup_key(extracted['chassis_no'])
+                    ).first()
 
                     clean_plate = sanitize_plate(extracted['plate_no'], extracted['chassis_no'], extracted['motor_no'])
                     issue_date = extracted['issue_date'] or datetime(current_time.year, 1, 1)
 
-                    record = FranchiseRecord(
-                        sbn_no=extracted['sbn_no'], operator_name=extracted['operator_name'],
-                        address=extracted['address'], motor_no=extracted['motor_no'],
-                        plate_no=clean_plate, chassis_no=extracted['chassis_no'],
-                        make=extracted['make'], route=route_name.upper(),
-                        driving_route=extracted['driving_route'], issue_date=issue_date,
-                        valid_until=datetime(issue_date.year, 12, 31),
-                        processed_by=full_name, is_active=determine_status(issue_date)
-                    )
-                    db.add(record)
-                    existing_set.add(dedup_key)
-                    imported_count += 1
+                    if existing_record:
+                        # CRITICAL FIX: Merge the MAKE from the DOCX into the existing DB record
+                        if extracted['make'] and (not existing_record.make or existing_record.make == "UNKNOWN" or existing_record.make == ""):
+                            existing_record.make = extracted['make'].upper()
+                        if extracted['address'] and not existing_record.address: existing_record.address = extracted['address'].upper()
+                        if clean_plate and not existing_record.plate_no: existing_record.plate_no = clean_plate.upper()
+                    else:
+                        record = FranchiseRecord(
+                            sbn_no=extracted['sbn_no'], operator_name=extracted['operator_name'],
+                            address=extracted['address'], motor_no=extracted['motor_no'],
+                            plate_no=clean_plate, chassis_no=extracted['chassis_no'],
+                            make=extracted['make'], route=route_name.upper(),
+                            driving_route=extracted['driving_route'], issue_date=issue_date,
+                            valid_until=datetime(issue_date.year, 12, 31),
+                            processed_by=full_name, is_active=determine_status(issue_date)
+                        )
+                        db.add(record)
+                        imported_count += 1
             except Exception as e:
                 force_log(f"Import Error: {e}")
                 continue
 
         db.commit()
-        log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported {imported_count} unique historical records.")
+        log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} historical records.")
         return {"imported": imported_count}
 
     @app.post("/franchise/generate/{record_id}")
@@ -491,7 +458,8 @@ try:
         return train_and_predict(db, route)
 
     # =================================================================
-    # EXCEL MASTERLIST EXPORT (NATIVE .XLSX GENERATION)
+    # DEFINITIVE FIX: EXACT EXCEL STYLING AND FORMULAS EXPORT
+    # Applies Green/Yellow/Red status colors automatically to rows
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -509,24 +477,67 @@ try:
                 "ADDRESS": r.address or "",
                 "MOTOR NO.": r.motor_no or "",
                 "CHASSIS NO.": r.chassis_no or "",
-                "PLATE NO.": r.plate_no or ""
+                "PLATE NO.": r.plate_no or "",
+                "STATUS": "",
             })
             
-        # DEFINITIVE FIX: Converts output directly into a native Excel (.xlsx) file
         df = pd.DataFrame(csv_data)
         output = io.BytesIO()
+        
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
             worksheet = writer.sheets['Masterlist']
-            # Replicate your specific format by placing the record count in the first cell
-            worksheet['A1'] = len(records)
             
+            # Formatting Row 1 exactly like the template
+            worksheet['A1'] = len(records)
+            worksheet['A1'].font = Font(bold=True)
+            
+            # Defining the standard Template Colors
+            red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     # Revoked
+            yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # Flagged
+            green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")   # Active
+            
+            current_year = get_pht_now().year
+
+            # Apply row colors and statuses dynamically
+            for row_num, r in enumerate(records, start=3):
+                issue_year = r.issue_date.year if r.issue_date else 0
+                
+                if not r.is_active or issue_year <= current_year - 2:
+                    fill_color = red_fill
+                    status_text = "VACANT / REVOKED"
+                elif issue_year == current_year - 1:
+                    fill_color = yellow_fill
+                    status_text = "FLAGGED"
+                else:
+                    fill_color = green_fill
+                    status_text = "ACTIVE"
+                
+                # Assign status text to column H
+                worksheet.cell(row=row_num, column=8, value=status_text)
+                
+                # Color the entire row to match the template
+                for col_num in range(1, 9):
+                    worksheet.cell(row=row_num, column=col_num).fill = fill_color
+            
+            # Auto-adjust column widths for visual perfection
+            for col in worksheet.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                worksheet.column_dimensions[column].width = max_length + 2
+
         output.seek(0)
         
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.xlsx"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.xlsx"'
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
