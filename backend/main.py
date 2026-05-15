@@ -59,7 +59,6 @@ try:
     from fastapi.responses import FileResponse, Response
     import starlette.formparsers
     
-    # DEFINITIVE FIX: Imports for Excel Formatting (Colors, Fonts)
     from openpyxl.styles import PatternFill, Font, Alignment
     
     force_log("All libraries loaded successfully!")
@@ -149,6 +148,14 @@ try:
 
     def clean_dedup_key(text):
         return re.sub(r'\s+', '', str(text).upper())
+
+    # DEFINITIVE FIX: Fuzzy Column Matcher ignores Excel spaces
+    def get_fuzzy_col(df_row, df_columns, target):
+        for col in df_columns:
+            if target in str(col).upper():
+                val = df_row.get(col, "")
+                return str(val).strip() if pd.notna(val) else ""
+        return ""
 
     @app.post("/signup")
     def signup(user: UserCreate, db: Session = Depends(get_db)):
@@ -294,8 +301,7 @@ try:
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========================================================
-    # DEFINITIVE FIX: DATA MERGE AND UPSERT ENGINE
-    # This prevents DOCX fields from being discarded if Excel uploaded first
+    # DEFINITIVE FIX: DATA MERGE AND TRUE UPSERT ENGINE
     # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -306,7 +312,7 @@ try:
         for file in files:
             contents = await file.read()
             try:
-                # 1. EXCEL/CSV IMPORT
+                # 1. EXCEL IMPORT (Fuzzy Columns + Upsert)
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
                         df = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
@@ -326,22 +332,22 @@ try:
                     df = df.iloc[header_idx+1:].reset_index(drop=True)
 
                     for _, row in df.iterrows():
-                        name = str(row.get('NAME', '')).strip()
-                        if not name or name.lower() == 'nan': continue
+                        name = get_fuzzy_col(row, df.columns, "NAME")
+                        if not name: continue
 
-                        chassis = str(row.get('CHASSIS NO.', '')).strip()
-                        motor = str(row.get('MOTOR NO.', '')).strip()
-                        plate = str(row.get('PLATE NO.', '')).strip()
-                        address = str(row.get('ADDRESS', '')).strip()
+                        chassis = get_fuzzy_col(row, df.columns, "CHASSIS")
+                        motor = get_fuzzy_col(row, df.columns, "MOTOR")
+                        plate = get_fuzzy_col(row, df.columns, "PLATE")
+                        address = get_fuzzy_col(row, df.columns, "ADDRESS")
                         
-                        raw_date = row.get('DATE OF RENEWAL', row.get('DATE ISSUED', ''))
+                        raw_date = get_fuzzy_col(row, df.columns, "RENEWAL") or get_fuzzy_col(row, df.columns, "DATE")
                         try:
                             parsed_date = pd.to_datetime(raw_date).to_pydatetime()
                         except:
                             parsed_date = datetime(current_time.year, 1, 1)
 
-                        raw_sbn = str(row.get('SBN NO.', '')).strip()
-                        if not raw_sbn or raw_sbn.lower() == 'nan':
+                        raw_sbn = get_fuzzy_col(row, df.columns, "SBN")
+                        if not raw_sbn:
                             sbn = f"{route_name[:3]}-000-{str(current_time.year)[-2:]}"
                         else:
                             sbn_parts = raw_sbn.split('-')
@@ -350,38 +356,35 @@ try:
 
                         clean_plate = sanitize_plate(plate, chassis, motor)
 
-                        # UPSERT LOGIC: Search DB for existing record
+                        # UPSERT: Search DB for existing record
                         existing_record = db.query(FranchiseRecord).filter(
                             func.replace(func.upper(FranchiseRecord.operator_name), ' ', '') == clean_dedup_key(name),
                             func.replace(func.upper(FranchiseRecord.chassis_no), ' ', '') == clean_dedup_key(chassis)
                         ).first()
 
                         if existing_record:
-                            # Update missing fields if Excel has them
+                            # Update missing fields without deleting anything
                             if not existing_record.sbn_no or existing_record.sbn_no == "": existing_record.sbn_no = sbn.upper()
                             if not existing_record.address or existing_record.address == "": existing_record.address = address.upper()
                             if not existing_record.plate_no or existing_record.plate_no == "": existing_record.plate_no = clean_plate.upper()
-                            
-                            # Only overwrite date if Excel date is newer
                             if parsed_date > existing_record.issue_date:
                                 existing_record.issue_date = parsed_date
                                 existing_record.valid_until = datetime(parsed_date.year, 12, 31)
                                 existing_record.is_active = determine_status(parsed_date)
+                            imported_count += 1
                         else:
                             record = FranchiseRecord(
                                 sbn_no=sbn.upper(), operator_name=name.upper(),
-                                address=address.upper() if address.lower() != 'nan' else "", 
-                                motor_no=motor.upper() if motor.lower() != 'nan' else "",
-                                plate_no=clean_plate.upper() if clean_plate.lower() != 'nan' else "", 
-                                chassis_no=chassis.upper() if chassis.lower() != 'nan' else "",
-                                make="UNKNOWN", route=route_name.upper(), driving_route="POBLACION", 
+                                address=address.upper(), motor_no=motor.upper(),
+                                plate_no=clean_plate.upper(), chassis_no=chassis.upper(),
+                                make="", route=route_name.upper(), driving_route="POBLACION", 
                                 issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31),
                                 processed_by=full_name, is_active=determine_status(parsed_date)
                             )
                             db.add(record)
                             imported_count += 1
 
-                # 2. DOCX IMPORT (Fills in the MAKE if Excel missed it)
+                # 2. DOCX IMPORT (Fills in MAKE perfectly via True Upsert)
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
                     
@@ -394,11 +397,12 @@ try:
                     issue_date = extracted['issue_date'] or datetime(current_time.year, 1, 1)
 
                     if existing_record:
-                        # CRITICAL FIX: Merge the MAKE from the DOCX into the existing DB record
-                        if extracted['make'] and (not existing_record.make or existing_record.make == "UNKNOWN" or existing_record.make == ""):
+                        # CRITICAL FIX: Merge the MAKE from the DOCX without skipping
+                        if extracted['make'] and (not existing_record.make or existing_record.make == ""):
                             existing_record.make = extracted['make'].upper()
                         if extracted['address'] and not existing_record.address: existing_record.address = extracted['address'].upper()
                         if clean_plate and not existing_record.plate_no: existing_record.plate_no = clean_plate.upper()
+                        imported_count += 1
                     else:
                         record = FranchiseRecord(
                             sbn_no=extracted['sbn_no'], operator_name=extracted['operator_name'],
@@ -416,7 +420,7 @@ try:
                 continue
 
         db.commit()
-        log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} historical records.")
+        log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
     @app.post("/franchise/generate/{record_id}")
@@ -458,8 +462,7 @@ try:
         return train_and_predict(db, route)
 
     # =================================================================
-    # DEFINITIVE FIX: EXACT EXCEL STYLING AND FORMULAS EXPORT
-    # Applies Green/Yellow/Red status colors automatically to rows
+    # DEFINITIVE FIX: EXACT EXCEL STYLING, LEGENDS, AND TOTALS
     # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -485,22 +488,40 @@ try:
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
-            worksheet = writer.sheets['Masterlist']
-            
-            # Formatting Row 1 exactly like the template
-            worksheet['A1'] = len(records)
-            worksheet['A1'].font = Font(bold=True)
-            
-            # Defining the standard Template Colors
-            red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")     # Revoked
-            yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")  # Flagged
-            green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")   # Active
+            # We start the data on row 4 to leave room for the Totals on top
+            df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=3)
+            ws = writer.sheets['Masterlist']
             
             current_year = get_pht_now().year
+            active_count = sum(1 for r in records if r.is_active and (r.issue_date.year if r.issue_date else 0) > current_year - 2)
+
+            # TOP LEFT: Totals
+            ws['A1'] = "TOTAL OPERATORS:"
+            ws['B1'] = len(records)
+            ws['A2'] = "TOTAL ACTIVE:"
+            ws['B2'] = active_count
+            
+            ws['A1'].font = Font(bold=True)
+            ws['B1'].font = Font(bold=True)
+            ws['A2'].font = Font(bold=True)
+            ws['B2'].font = Font(bold=True)
+            
+            # TOP RIGHT: Legends
+            red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+            yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+            green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
+            
+            ws['I1'] = "LEGEND:"
+            ws['I1'].font = Font(bold=True)
+            ws['I2'] = "ACTIVE"
+            ws['I2'].fill = green_fill
+            ws['I3'] = "FLAGGED (1 YR PENDING)"
+            ws['I3'].fill = yellow_fill
+            ws['I4'] = "REVOKED / VACANT"
+            ws['I4'].fill = red_fill
 
             # Apply row colors and statuses dynamically
-            for row_num, r in enumerate(records, start=3):
+            for row_num, r in enumerate(records, start=5): # Data starts at row 5
                 issue_year = r.issue_date.year if r.issue_date else 0
                 
                 if not r.is_active or issue_year <= current_year - 2:
@@ -513,15 +534,14 @@ try:
                     fill_color = green_fill
                     status_text = "ACTIVE"
                 
-                # Assign status text to column H
-                worksheet.cell(row=row_num, column=8, value=status_text)
+                ws.cell(row=row_num, column=8, value=status_text)
                 
-                # Color the entire row to match the template
+                # Color the entire row
                 for col_num in range(1, 9):
-                    worksheet.cell(row=row_num, column=col_num).fill = fill_color
+                    ws.cell(row=row_num, column=col_num).fill = fill_color
             
-            # Auto-adjust column widths for visual perfection
-            for col in worksheet.columns:
+            # Auto-adjust columns
+            for col in ws.columns:
                 max_length = 0
                 column = col[0].column_letter
                 for cell in col:
@@ -530,14 +550,14 @@ try:
                             max_length = len(str(cell.value))
                     except:
                         pass
-                worksheet.column_dimensions[column].width = max_length + 2
+                ws.column_dimensions[column].width = max_length + 2
 
         output.seek(0)
         
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.xlsx"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()}_MASTERLIST_2026.xlsx"'
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
