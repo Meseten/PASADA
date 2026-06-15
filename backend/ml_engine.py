@@ -1,97 +1,124 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from sqlalchemy.orm import Session
-from database import FranchiseRecord
-import calendar
+from sqlalchemy import func
+from database import FranchiseRecord, RouteData
 
-def engineer_features(df, total_fleet_size):
-    df = df.sort_values(by=['year', 'month'])
-    df['time_index'] = (df['year'] - df['year'].min()) * 12 + df['month']
-    df['cumulative_renewals'] = df['count'].cumsum()
-    df['remaining_unrenewed'] = total_fleet_size - df['cumulative_renewals']
-    df['is_deadline_month'] = df['month'].apply(lambda x: 1 if x in [1, 2, 12] else 0)
-    df['is_holiday_season'] = df['month'].apply(lambda x: 1 if x in [4, 12] else 0)
-    return df
-
-def train_and_predict(db: Session, target_route: str):
-    if target_route == "ALL":
-        records = db.query(FranchiseRecord).filter(FranchiseRecord.is_active == True).all()
-        total_fleet = db.query(FranchiseRecord).count()
-    else:
-        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == target_route, FranchiseRecord.is_active == True).all()
-        total_fleet = db.query(FranchiseRecord).filter(FranchiseRecord.route == target_route).count()
-        
-    if not records:
-        return []
-
-    df = pd.DataFrame([{"year": r.issue_date.year, "month": r.issue_date.month, "count": 1} for r in records if r.issue_date])
-    if df.empty:
-        return []
-        
-    df = df.groupby(['year', 'month']).sum().reset_index()
+def run_kmeans_clustering(db: Session, target_route: str):
+    """
+    Executes Spatial-Demographic K-Means Clustering to determine TODA route saturation.
+    Uses three factors: Active Fleet (X1), Population (X2), Effective Road Length (X3).
+    """
     
-    # CRITICAL FIX: Prevent Scikit-Learn crash if there is less than 3 months of data
+    # ==============================================================================
+    # STEP 1: DATA EXTRACTION (Pulling X1, X2, X3 from the Database)
+    # ==============================================================================
+    # Fetch Active Fleet Size (X1) per route by counting only active MTOP records
+    fleet_counts = db.query(
+        FranchiseRecord.route, 
+        func.count(FranchiseRecord.id).label('fleet_size')
+    ).filter(FranchiseRecord.is_active == True).group_by(FranchiseRecord.route).all()
+    
+    if not fleet_counts:
+        return []
+
+    data = []
+    for r in fleet_counts:
+        route_name = r.route
+        fleet = r.fleet_size # Factor X1
+        
+        # Fetch Population (X2) and Road Length (X3). Default to 5000 pop / 5km if not set.
+        route_info = db.query(RouteData).filter(RouteData.route_name == route_name).first()
+        pop = route_info.population if route_info else 5000      # Factor X2
+        road = route_info.road_length_km if route_info else 5.0  # Factor X3
+        
+        # Calculate algorithmic Density Score: (Supply / (Demand * Space)) * 1000
+        density = (fleet / (pop * road)) * 1000
+        
+        data.append({
+            "route": route_name,
+            "fleet_size": fleet,
+            "population": pop,
+            "road_length": road,
+            "density": density
+        })
+        
+    df = pd.DataFrame(data)
+    
+    # ==============================================================================
+    # STEP 2: COLD-START PREVENTION (Crucial for Prototype Defense)
+    # K-Means(n_clusters=3) requires at least 3 data points to form 3 groups.
+    # If the database only has 1 or 2 routes right now, we duplicate rows in memory 
+    # just to allow the matrix math to compile without throwing a 500 Server Error.
+    # ==============================================================================
     if len(df) < 3:
-        # Duplicate rows just to allow the Random Forest matrix math to process without a 500 error
         df = pd.concat([df, df, df]).reset_index(drop=True)
 
-    df = engineer_features(df, total_fleet)
-
-    features = ['time_index', 'month', 'remaining_unrenewed', 'is_deadline_month', 'is_holiday_season']
+    # ==============================================================================
+    # STEP 3: FEATURE SCALING (The most important mathematical step)
+    # Population is in the thousands (e.g., 15000), Road is in single digits (e.g., 5).
+    # StandardScaler normalizes these so the algorithm doesn't ignore the Road Length.
+    # ==============================================================================
+    features = ['fleet_size', 'population', 'road_length']
     X = df[features]
-    y = df['count']
-
-    model = RandomForestRegressor(n_estimators=200, max_depth=8, random_state=42)
-    model.fit(X, y)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
     
-    mae_score = 0
-    try:
-        if len(df) >= 4:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
-            test_model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-            test_model.fit(X_train, y_train)
-            preds = test_model.predict(X_test)
-            mae_score = int(round(mean_absolute_error(y_test, preds)))
-    except Exception:
-        mae_score = 0
-
-    importances = model.feature_importances_
-    feature_names = ["Timeline Progression", "Seasonality (Month)", "Remaining Registrations", "Ordinance Deadlines", "Holiday/Peak Proximity"]
-    importance_data = [{"factor": fname, "weight": round(float(imp) * 100, 1)} for fname, imp in zip(feature_names, importances)]
-    importance_data = sorted(importance_data, key=lambda x: x['weight'], reverse=True)
-
-    # Clean Month Formatting (e.g. "Jan '26")
-    historical_trend = [{"month": f"{calendar.month_abbr[int(row['month'])]} '{str(int(row['year']))[-2:]}", "volume": int(row['count'])} for _, row in df.iterrows()]
-
-    latest_year = df['year'].max()
-    latest_month = df[df['year'] == latest_year]['month'].max()
+    # ==============================================================================
+    # STEP 4: K-MEANS CLUSTERING EXECUTION
+    # Group the routes into exactly 3 clusters based on their spatial-demographic similarities.
+    # ==============================================================================
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    df['cluster'] = kmeans.fit_predict(X_scaled)
     
-    next_month = latest_month + 1 if latest_month < 12 else 1
-    next_year = latest_year if latest_month < 12 else latest_year + 1
+    # ==============================================================================
+    # STEP 5: MATHEMATICAL CLUSTER RANKING
+    # The algorithm doesn't know which cluster is "Bad". We must sort the clusters 
+    # by their average Density Score to assign Green (0), Yellow (1), and Red (2).
+    # ==============================================================================
+    cluster_densities = df.groupby('cluster')['density'].mean().sort_values()
+    ranking_map = {cluster_id: rank for rank, (cluster_id, _) in enumerate(cluster_densities.items())}
+    df['severity'] = df['cluster'].map(ranking_map)
     
-    next_time_index = (next_year - df['year'].min()) * 12 + next_month
-    current_unrenewed = df['remaining_unrenewed'].iloc[-1]
-    is_deadline = 1 if next_month in [1, 2, 12] else 0
-    is_holiday = 1 if next_month in [4, 12] else 0
+    # ==============================================================================
+    # STEP 6: TARGET ROUTE EXTRACTION & UI FORMATTING
+    # ==============================================================================
+    target_data = df[df['route'] == target_route]
+    
+    if target_data.empty:
+        severity, fleet_val, pop_val, road_val, density_val = 0, 0, 5000, 5.0, 0
+    else:
+        target_info = target_data.iloc[0]
+        severity = int(target_info['severity'])
+        fleet_val = int(target_info['fleet_size'])
+        pop_val = int(target_info['population'])
+        road_val = float(target_info['road_length'])
+        density_val = float(target_info['density'])
 
-    future_features = pd.DataFrame({
-        'time_index': [next_time_index],
-        'month': [next_month],
-        'remaining_unrenewed': [current_unrenewed],
-        'is_deadline_month': [is_deadline],
-        'is_holiday_season': [is_holiday]
-    })
-
-    prediction = model.predict(future_features)
-    predicted_volume = max(0, int(round(prediction[0])))
+    status_map = {
+        0: "GREEN CLUSTER: Under-saturated (Accept Applications)", 
+        1: "YELLOW CLUSTER: Optimal/Warning", 
+        2: "RED CLUSTER: Over-saturated (Freeze Applications)"
+    }
+    
+    # Normalize features to a 100% scale for the React Frontend Bar Charts
+    max_fleet = df['fleet_size'].max() or 1
+    max_pop = df['population'].max() or 1
+    max_road = df['road_length'].max() or 1
+    
+    importance_data = [
+        {"factor": "Active Fleet Size (Supply X1)", "weight": round((fleet_val / max_fleet) * 100, 1)},
+        {"factor": "Barangay Population (Demand X2)", "weight": round((pop_val / max_pop) * 100, 1)},
+        {"factor": "Road Network Length (Space X3)", "weight": round((road_val / max_road) * 100, 1)},
+        {"factor": "Algorithm Density Score", "weight": round(min(density_val * 10, 100), 1)}
+    ]
 
     return [{
-        "forecast_period": f"{calendar.month_name[next_month]} {next_year}", 
-        "expected_renewals": predicted_volume,
-        "model_confidence": f"± {mae_score} Renewals",
+        "forecast_period": status_map[severity], 
+        "expected_renewals": fleet_val,  
+        "model_confidence": f"Density Score: {round(density_val, 2)}",
         "feature_importances": importance_data,
-        "historical_trend": historical_trend[-8:] 
+        "historical_trend": [] 
     }]

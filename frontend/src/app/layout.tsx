@@ -11,15 +11,23 @@ import { Input } from "@/components/ui/input"
 
 const inter = Inter({ subsets: ["latin"] })
 
-// FIXED: Using localhost bypasses Windows 10/11 WebView2 Loopback Restriction
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
+  const [mounted, setMounted] = useState(false)
+  
+  useEffect(() => setMounted(true), [])
+  if (!mounted) return <div className="w-8 h-8" />
+
   return (
-    <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="p-2 rounded-md hover:bg-accent transition-colors">
-      <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0 text-slate-700" />
-      <Moon className="absolute top-4 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100 text-slate-200" />
+    // DEFINITIVE ICON FIX: Both icons are absolute within a centered relative container
+    <button 
+      onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
+      className="relative flex items-center justify-center w-8 h-8 rounded-md hover:bg-accent transition-colors"
+    >
+      <Sun className="absolute h-4 w-4 transition-all duration-300 rotate-0 scale-100 dark:-rotate-90 dark:scale-0 text-slate-700" />
+      <Moon className="absolute h-4 w-4 transition-all duration-300 rotate-90 scale-0 dark:rotate-0 dark:scale-100 text-slate-200" />
     </button>
   )
 }
@@ -96,7 +104,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="flex h-screen overflow-hidden bg-background">
             <aside className="w-64 border-r bg-card hidden md:flex flex-col">
               <div className="px-4 py-6 flex justify-between items-center border-b border-border">
-                {/* TFRU LOGO INTEGRATION */}
                 <div className="flex items-center gap-3">
                   <img src="/TFRU.png" alt="TFRU" className="w-9 h-9 rounded-full shadow-sm border border-border" />
                   <div className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</div>

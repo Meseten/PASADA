@@ -40,7 +40,6 @@ export default function TodaClient() {
   const [isGeneratingId, setIsGeneratingId] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   
-  // Batch Printing States
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
   const [batchSpecificDate, setBatchSpecificDate] = useState("")
@@ -58,6 +57,13 @@ export default function TodaClient() {
   const [formData, setFormData] = useState({
     id: "", sbn_no: "", operator_name: "", address: "", motor_no: "", chassis_no: "", make: "", plate_no: "", route: safeRouteName, driving_route: ""
   })
+
+  // SAFETY HELPER: Prevents UI crash if Excel provided bad dates
+  const formatSafeDate = (dateStr: string | null | undefined) => {
+    if (!dateStr) return "Unknown";
+    const d = new Date(dateStr);
+    return isNaN(d.getTime()) ? "Invalid Date" : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
 
   const fetchMembers = useCallback(async () => {
     if (!safeRouteName) return
@@ -95,9 +101,6 @@ export default function TodaClient() {
     setIsEditOpen(true)
   }
 
-  // ==========================================
-  // NEW FUNCTION: EXPORT MASTERLIST EXCEL/CSV
-  // ==========================================
   const handleExportMasterlist = async () => {
     setIsExporting(true)
     const token = localStorage.getItem("token")
@@ -183,7 +186,7 @@ export default function TodaClient() {
         const a = document.createElement("a")
         a.style.display = 'none'
         a.href = url
-        a.download = `MTOP_${member.operator_name.replace(/\s+/g, '_')}.docx`
+        a.download = `MTOP_${String(member.operator_name || "Unknown").replace(/\s+/g, '_')}.docx`
         document.body.appendChild(a)
         a.click()
         window.URL.revokeObjectURL(url)
@@ -203,6 +206,8 @@ export default function TodaClient() {
     targetRecords = members.filter(record => {
       if (!record.issue_date) return false
       const recordDateObj = new Date(record.issue_date)
+      if (isNaN(recordDateObj.getTime())) return false; // Prevent batch print crash
+
       const recordDateString = recordDateObj.toISOString().split('T')[0]
       const hour = recordDateObj.getHours()
 
@@ -271,12 +276,13 @@ export default function TodaClient() {
   const filteredMembers = members.filter(m => {
     const term = search.toLowerCase();
     return (
-      m.operator_name?.toLowerCase().includes(term) ||
-      m.sbn_no?.toLowerCase().includes(term) ||
-      m.plate_no?.toLowerCase().includes(term) ||
-      m.motor_no?.toLowerCase().includes(term) ||
-      m.chassis_no?.toLowerCase().includes(term) ||
-      m.address?.toLowerCase().includes(term)
+      // SAFETY HELPER: Wrapping in String() stops a fatal crash if Excel imported numbers instead of text
+      String(m.operator_name || "").toLowerCase().includes(term) ||
+      String(m.sbn_no || "").toLowerCase().includes(term) ||
+      String(m.plate_no || "").toLowerCase().includes(term) ||
+      String(m.motor_no || "").toLowerCase().includes(term) ||
+      String(m.chassis_no || "").toLowerCase().includes(term) ||
+      String(m.address || "").toLowerCase().includes(term)
     )
   })
 
@@ -294,7 +300,6 @@ export default function TodaClient() {
           <p className="text-muted-foreground mt-1 text-sm md:text-base">Comprehensive operator registry and compliance tracking.</p>
         </div>
         <div className="flex items-center gap-3">
-          {/* NEW BUTTON: EXPORT MASTERLIST */}
           <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
             {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
             Export Masterlist
@@ -309,7 +314,6 @@ export default function TodaClient() {
         </div>
       </div>
 
-      {/* BATCH PRINT MODAL */}
       <Dialog open={batchModalOpen} onOpenChange={setBatchModalOpen}>
         <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl">
           <DialogHeader>
@@ -547,7 +551,7 @@ export default function TodaClient() {
                   </TableRow>
                 ) : (
                   paginatedMembers.map((member) => {
-                    const issueYear = new Date(member.issue_date).getFullYear();
+                    const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
                     let rowColor = "hover:bg-muted/30 transition-colors duration-200";
                     let statusBadge = <Badge variant="outline" className="bg-green-500/10 text-green-700 border-green-500/20 dark:text-green-400 font-bold tracking-wide shadow-sm"><CheckCircle className="h-3 w-3 mr-1"/> Active</Badge>;
 
@@ -573,7 +577,7 @@ export default function TodaClient() {
                           }
                         </TableCell>
                         <TableCell className="text-sm font-bold text-muted-foreground">
-                          {new Date(member.issue_date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                          {formatSafeDate(member.issue_date)}
                         </TableCell>
                         <TableCell>{statusBadge}</TableCell>
                         <TableCell className="text-right space-x-1.5 pr-4">

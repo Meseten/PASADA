@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -67,5 +67,13 @@ class SystemSettings(Base):
     id = Column(Integer, primary_key=True, index=True)
     committee_chair = Column(String, default="RODRIGO A. CASTILLO")
     enable_esignature = Column(Boolean, default=False)
+
+# NEW TABLE: To store the demographic factors for K-Means Clustering
+class RouteData(Base):
+    __tablename__ = "route_data"
+    id = Column(Integer, primary_key=True, index=True)
+    route_name = Column(String, unique=True, index=True)
+    population = Column(Integer, default=5000)      # Factor X2
+    road_length_km = Column(Float, default=5.0)     # Factor X3
 
 Base.metadata.create_all(bind=engine)

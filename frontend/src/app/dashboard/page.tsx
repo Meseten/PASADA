@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe } from "lucide-react";
+import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe, MapPin, Settings2 } from "lucide-react";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
 const API_URL = "http://127.0.0.1:43888";
@@ -23,8 +23,12 @@ interface GlobalStats {
 
 export default function Dashboard() {
   const [stats, setStats] = useState<GlobalStats | null>(null);
-  const [activePrediction, setActivePrediction] = useState("GLOBAL SYSTEM");
+  const [activePrediction, setActivePrediction] = useState(""); 
   const [predictionData, setPredictionData] = useState<any>(null);
+  
+  const [population, setPopulation] = useState("");
+  const [roadLength, setRoadLength] = useState("");
+  const [isUpdatingRoute, setIsUpdatingRoute] = useState(false);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -33,35 +37,81 @@ export default function Dashboard() {
         if (res.ok) {
           const data = await res.json();
           setStats(data);
+          
+          setActivePrediction((prev) => {
+            if (prev === "" && data.route_breakdown.length > 0) {
+              return data.route_breakdown[0].route;
+            }
+            return prev; 
+          });
         }
       } catch (e) {}
     };
+    
     fetchStats();
     const interval = setInterval(fetchStats, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const fetchML = async () => {
-      try {
-        const route = activePrediction === "GLOBAL SYSTEM" ? "ALL" : activePrediction;
-        const res = await fetch(`${API_URL}/predict/${route}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.length > 0) {
-            setPredictionData(data[0]); 
-          } else {
-            setPredictionData(null);
-          }
+  const fetchML = async () => {
+    if (!activePrediction) return;
+    try {
+      const res = await fetch(`${API_URL}/predict/${activePrediction}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.length > 0) {
+          setPredictionData(data[0]); 
+        } else {
+          setPredictionData(null);
         }
-      } catch (e) {
-        setPredictionData(null);
       }
-    };
+    } catch (e) {
+      setPredictionData(null);
+    }
+  };
+
+  useEffect(() => {
     fetchML();
+    setPopulation("");
+    setRoadLength("");
   }, [activePrediction]);
 
-  if (!stats) return <div className="p-8 text-muted-foreground animate-pulse font-medium text-lg">Synchronizing Telemetry...</div>;
+  const handleUpdateRouteData = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!population || !roadLength) return;
+    setIsUpdatingRoute(true);
+    const token = localStorage.getItem("token") || "";
+    try {
+      const res = await fetch(`${API_URL}/route_data/${activePrediction}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json', 
+          'Authorization': `Bearer ${token}` 
+        },
+        body: JSON.stringify({ 
+          population: parseInt(population), 
+          road_length_km: parseFloat(roadLength) 
+        })
+      });
+      if (res.ok) {
+        await fetchML();
+        setPopulation("");
+        setRoadLength("");
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsUpdatingRoute(false);
+    }
+  };
+
+  if (!stats) {
+    return (
+      <div className="p-8 text-muted-foreground animate-pulse font-medium text-lg">
+        Synchronizing Telemetry...
+      </div>
+    );
+  }
 
   const compliantCount = stats.total_system_capacity - stats.vacant_slots - stats.flagged_pending;
   const pieData = [
@@ -70,16 +120,34 @@ export default function Dashboard() {
     { name: 'Revoked/Vacant', value: stats.vacant_slots },
   ];
 
-  const activeRoutes = ["GLOBAL SYSTEM", ...stats.route_breakdown.map(r => r.route)];
+  const activeRoutes = stats.route_breakdown.map(r => r.route);
+
+  const statusText = predictionData?.forecast_period || "";
+  let clusterColor = "bg-blue-50/50 border-blue-500/20 text-blue-600 dark:bg-blue-950/20";
+  let textColor = "text-blue-600";
+  
+  if (statusText.includes("GREEN CLUSTER")) {
+    clusterColor = "bg-emerald-50/50 border-emerald-500/30 text-emerald-700 dark:bg-emerald-950/20";
+    textColor = "text-emerald-600";
+  } else if (statusText.includes("YELLOW CLUSTER")) {
+    clusterColor = "bg-amber-50/50 border-amber-500/30 text-amber-700 dark:bg-amber-950/20";
+    textColor = "text-amber-600";
+  } else if (statusText.includes("RED CLUSTER")) {
+    clusterColor = "bg-red-50/50 border-red-500/30 text-red-700 dark:bg-red-950/20";
+    textColor = "text-red-600";
+  }
 
   return (
     <div className="space-y-4 p-4 md:p-6 animate-in fade-in duration-500 bg-background min-h-screen">
       <header className="mb-4">
-        <h1 className="text-2xl md:text-3xl font-black tracking-tight text-foreground">PASADA Administration Dashboard</h1>
-        <p className="text-muted-foreground mt-0.5 text-sm font-medium">Overview of the LGU Franchise Registry.</p>
+        <h1 className="text-2xl md:text-3xl font-black tracking-tight text-foreground">
+          PASADA Administration Dashboard
+        </h1>
+        <p className="text-muted-foreground mt-0.5 text-sm font-medium">
+          Overview of the LGU Franchise Registry.
+        </p>
       </header>
 
-      {/* COMPACT TOP ROW: KPI CARDS */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-card border-l-4 border-l-slate-700 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
@@ -87,8 +155,12 @@ export default function Dashboard() {
             <Database className="text-slate-400" size={16} />
           </div>
           <div>
-            <h3 className="text-2xl font-black text-slate-800 dark:text-slate-100">{stats.total_system_capacity}</h3>
-            <p className="text-[10px] font-semibold text-muted-foreground mt-0.5">Total system-wide records</p>
+            <h3 className="text-2xl font-black text-slate-800 dark:text-slate-100">
+              {stats.total_system_capacity}
+            </h3>
+            <p className="text-[10px] font-semibold text-muted-foreground mt-0.5">
+              Total system-wide records
+            </p>
           </div>
         </div>
 
@@ -98,8 +170,12 @@ export default function Dashboard() {
             <Users className="text-emerald-500/50" size={16} />
           </div>
           <div>
-            <h3 className="text-2xl font-black text-emerald-600">{Math.max(0, compliantCount)}</h3>
-            <p className="text-[10px] font-semibold text-emerald-600/70 mt-0.5">Active for current year</p>
+            <h3 className="text-2xl font-black text-emerald-600">
+              {Math.max(0, compliantCount)}
+            </h3>
+            <p className="text-[10px] font-semibold text-emerald-600/70 mt-0.5">
+              Active for current year
+            </p>
           </div>
         </div>
 
@@ -109,8 +185,12 @@ export default function Dashboard() {
             <AlertTriangle className="text-amber-500/50" size={16} />
           </div>
           <div>
-            <h3 className="text-2xl font-black text-amber-600">{stats.flagged_pending}</h3>
-            <p className="text-[10px] font-semibold text-amber-600/70 mt-0.5">1-Year Non-Renewal Offense</p>
+            <h3 className="text-2xl font-black text-amber-600">
+              {stats.flagged_pending}
+            </h3>
+            <p className="text-[10px] font-semibold text-amber-600/70 mt-0.5">
+              1-Year Non-Renewal Offense
+            </p>
           </div>
         </div>
 
@@ -120,13 +200,16 @@ export default function Dashboard() {
             <ArchiveX className="text-red-500/50" size={16} />
           </div>
           <div>
-            <h3 className="text-2xl font-black text-red-600">{stats.vacant_slots}</h3>
-            <p className="text-[10px] font-semibold text-red-600/70 mt-0.5">Inactive or 2+ Yrs Non-Renewal</p>
+            <h3 className="text-2xl font-black text-red-600">
+              {stats.vacant_slots}
+            </h3>
+            <p className="text-[10px] font-semibold text-red-600/70 mt-0.5">
+              Inactive or 2+ Yrs Non-Renewal
+            </p>
           </div>
         </div>
       </div>
 
-      {/* COMPACT SECOND ROW: VOLUME CARDS */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-start mb-2">
@@ -139,7 +222,13 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={stats.daily_trend}>
                   <XAxis dataKey="name" hide />
-                  <Tooltip labelFormatter={(label) => `${label}`} formatter={(value: any) => [value, ""]} separator="" contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} />
+                  <Tooltip 
+                    labelFormatter={(label) => `${label}`} 
+                    formatter={(value: any) => [value, ""]} 
+                    separator="" 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} 
+                  />
                   <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
                 </LineChart>
               </ResponsiveContainer>
@@ -158,7 +247,13 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={stats.weekly_trend}>
                   <XAxis dataKey="name" hide />
-                  <Tooltip labelFormatter={(label) => `Week of ${label}`} formatter={(value: any) => [value, ""]} separator="" contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} />
+                  <Tooltip 
+                    labelFormatter={(label) => `Week of ${label}`} 
+                    formatter={(value: any) => [value, ""]} 
+                    separator="" 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} 
+                  />
                   <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
                 </LineChart>
               </ResponsiveContainer>
@@ -177,7 +272,13 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={stats.monthly_trend}>
                   <XAxis dataKey="name" hide />
-                  <Tooltip labelFormatter={(label) => `${label}`} formatter={(value: any) => [value, ""]} separator="" contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} cursor={{ fill: 'transparent' }} />
+                  <Tooltip 
+                    labelFormatter={(label) => `${label}`} 
+                    formatter={(value: any) => [value, ""]} 
+                    separator="" 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    cursor={{ fill: 'transparent' }} 
+                  />
                   <Bar dataKey="val" fill="#3b82f6" radius={[2, 2, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -186,7 +287,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* COMPACT THIRD ROW: DONUT & ROUTE BAR CHART */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-stretch">
         <div className="lg:col-span-2 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col">
           <div className="flex flex-col mb-1">
@@ -201,7 +301,11 @@ export default function Dashboard() {
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value: any) => [value, ""]} separator="" contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px', fontWeight: 'bold', border: '1px solid hsl(var(--border))' }} />
+                <Tooltip 
+                  formatter={(value: any) => [value, ""]} 
+                  separator="" 
+                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px', fontWeight: 'bold', border: '1px solid hsl(var(--border))' }} 
+                />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -235,9 +339,11 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* COMPACT FOURTH ROW: ML ENGINE */}
       <div className="bg-card border border-border p-5 rounded-xl shadow-sm">
-        <h3 className="text-sm font-bold flex items-center gap-2 mb-3"><Globe className="w-4 h-4 text-slate-700 dark:text-slate-300" /> Algorithmic Predictive Volume</h3>
+        <h3 className="text-sm font-bold flex items-center gap-2 mb-3">
+          <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" /> 
+          Spatial-Demographic Route Saturation (K-Means)
+        </h3>
         
         <div className="flex flex-wrap gap-1.5 mb-4">
           {activeRoutes.map((toda) => (
@@ -256,61 +362,93 @@ export default function Dashboard() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="col-span-1 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-500/20 rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-inner h-[160px]">
-            <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-1">
-              TARGET FORECAST: {predictionData ? predictionData.forecast_period : "NEXT 30 DAYS"}
+          <div className={`col-span-1 border rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-inner h-[160px] transition-colors duration-500 ${clusterColor}`}>
+            <p className="text-[10px] font-black uppercase tracking-widest mb-1 opacity-80">
+              SATURATION STATUS
             </p>
-            <h2 className="text-5xl font-black text-blue-600 mb-1">
-              {predictionData ? predictionData.expected_renewals : "0"}
+            <h2 className="text-sm md:text-md font-black mb-2 leading-tight px-2">
+              {predictionData ? predictionData.forecast_period : "AWAITING DATA"}
             </h2>
-            <p className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">Expected Renewals</p>
-            <div className="bg-background border border-border px-3 py-1 rounded-md text-[10px] font-bold text-muted-foreground shadow-sm">
-              Accuracy: {predictionData ? predictionData.model_confidence : "± 0 Renewals"}
+            <div className="flex items-center gap-2 mb-1">
+               <h3 className={`text-4xl font-black ${textColor}`}>
+                 {predictionData ? predictionData.expected_renewals : "0"}
+               </h3>
+            </div>
+            <p className="text-[10px] font-bold opacity-80 mb-2">
+              Current Active Tricycles (Supply X1)
+            </p>
+            <div className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm">
+              {predictionData ? predictionData.model_confidence : "Density Score: 0.00"}
             </div>
           </div>
 
           <div className="col-span-2 space-y-4">
-            <div className="grid grid-cols-2 gap-6 h-[160px]">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[160px]">
               <div>
                 <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <Activity size={12} /> AI Feature Weights
+                  <Activity size={12} /> Demographic Feature Weights
                 </h4>
                 <div className="space-y-2 relative group">
                   {predictionData ? predictionData.feature_importances.map((feat: any) => (
                     <div key={feat.factor} className="flex items-center gap-3 relative">
-                      <span className="w-1/2 text-[9px] font-bold text-right text-muted-foreground truncate">{feat.factor}</span>
+                      <span className="w-1/2 text-[9px] font-bold text-right text-muted-foreground truncate">
+                        {feat.factor}
+                      </span>
                       <div className="w-1/2 bg-muted rounded-full h-2.5 overflow-hidden relative cursor-crosshair">
-                        <div className="bg-blue-500 h-2.5 rounded-full transition-all duration-1000" style={{ width: `${feat.weight}%` }}></div>
-                        <div className="absolute inset-0 flex items-center justify-end pr-1.5 opacity-0 hover:opacity-100 transition-opacity">
-                          <span className="text-[8px] font-black text-white bg-black/50 px-1 rounded-sm">{feat.weight}%</span>
-                        </div>
+                        <div 
+                          className={`h-2.5 rounded-full transition-all duration-1000 ${feat.factor.includes('Density') ? 'bg-slate-700 dark:bg-slate-300' : 'bg-blue-500'}`} 
+                          style={{ width: `${feat.weight}%` }}
+                        ></div>
                       </div>
                     </div>
                   )) : (
                     <div className="text-xs font-medium text-muted-foreground italic text-center py-4 bg-muted/30 rounded-lg border border-border">
-                      Insufficient historical data.
+                      Insufficient demographic data.
                     </div>
                   )}
                 </div>
               </div>
 
-              <div>
-                <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2">Time-Series Trend Analysis</h4>
-                <div className="h-[120px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={predictionData ? predictionData.historical_trend : []}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                      <XAxis dataKey="month" stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} />
-                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} />
-                      <Tooltip 
-                        labelFormatter={(label) => `${label}`}
-                        contentStyle={{ fontSize: '10px', backgroundColor: 'hsl(var(--card))', borderRadius: '6px', padding: '4px', fontWeight: 'bold', border: '1px solid hsl(var(--border))' }}
-                        itemStyle={{ color: '#10b981' }}
-                      />
-                      <Line type="monotone" dataKey="volume" stroke="#10b981" strokeWidth={2} dot={{ r: 2, fill: "#10b981" }} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
+              <div className="bg-muted/20 border border-border/50 rounded-lg p-3 flex flex-col justify-between">
+                <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                  <Settings2 size={12} /> Adjust Route Parameters
+                </h4>
+                <form onSubmit={handleUpdateRouteData} className="space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[9px] font-bold w-20 shrink-0 text-foreground">
+                      Population (X2):
+                    </label>
+                    <input 
+                      type="number" 
+                      required 
+                      value={population}
+                      onChange={(e) => setPopulation(e.target.value)}
+                      placeholder="e.g. 5000" 
+                      className="flex-1 h-7 text-xs px-2 rounded-md border border-input bg-background font-mono shadow-sm"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-[9px] font-bold w-20 shrink-0 text-foreground">
+                      Road (km) (X3):
+                    </label>
+                    <input 
+                      type="number" 
+                      step="0.1" 
+                      required 
+                      value={roadLength}
+                      onChange={(e) => setRoadLength(e.target.value)}
+                      placeholder="e.g. 5.5" 
+                      className="flex-1 h-7 text-xs px-2 rounded-md border border-input bg-background font-mono shadow-sm"
+                    />
+                  </div>
+                  <button 
+                    type="submit" 
+                    disabled={isUpdatingRoute}
+                    className="w-full h-7 mt-1 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rounded-md text-[10px] font-bold hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {isUpdatingRoute ? "Recalculating Cluster..." : "Update Spatial Data"}
+                  </button>
+                </form>
               </div>
             </div>
           </div>
