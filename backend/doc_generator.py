@@ -57,17 +57,16 @@ def replace_text_in_paragraph(paragraph, mapping, sig_path=None):
             if base_font_name: run.font.name = base_font_name
             if base_font_size: run.font.size = base_font_size
 
+    # FIX: Insert signature with a strict width of 1.2 Inches so it doesn't bloat the document
     if has_sig and sig_path and os.path.exists(sig_path):
         run = paragraph.add_run()
-        run.add_picture(sig_path, width=Inches(1.5))
-
+        run.add_picture(sig_path, width=Inches(1.2))
 
 def generate_certificate(data: dict, settings: dict, template_path: str = "template.docx", output_dir: str = "exports"):
     out_path = os.path.join(BASE_DIR, output_dir)
     if not os.path.exists(out_path):
         os.makedirs(out_path)
 
-    # Use the resource path finder to grab the template from the EXE
     actual_template_path = get_resource_path(template_path)
     
     try:

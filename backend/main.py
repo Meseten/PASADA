@@ -42,8 +42,13 @@ try:
     from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
     from sqlalchemy.orm import Session, sessionmaker
     from sqlalchemy import func, extract, create_engine
-    from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, get_pht_now, BASE_DIR
-    from ml_engine import train_and_predict
+    
+    # Imports including the new RouteData table
+    from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now, BASE_DIR
+    
+    # Imports the new K-Means Clustering algorithm
+    from ml_engine import run_kmeans_clustering
+    
     from doc_generator import generate_certificate
     from extractor import extract_docx_data
     from sync_engine import start_lan_sync, get_local_ip, PEERS
@@ -122,6 +127,11 @@ try:
     class PasswordUpdate(BaseModel):
         new_password: str
 
+    # Schema for updating K-Means Factors X2 (Population) and X3 (Road Length)
+    class RouteDataUpdate(BaseModel):
+        population: int
+        road_length_km: float
+
     def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
         user = db.query(User).filter(User.username == token).first()
         if not user: raise HTTPException(status_code=401)
@@ -149,7 +159,6 @@ try:
     def clean_dedup_key(text):
         return re.sub(r'\s+', '', str(text).upper())
 
-    # DEFINITIVE FIX: Fuzzy Column Matcher ignores Excel spaces
     def get_fuzzy_col(df_row, df_columns, target):
         for col in df_columns:
             if target in str(col).upper():
@@ -198,6 +207,20 @@ try:
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
         return {"status": "success"}
 
+    # NEW ENDPOINT: Configure spatial-demographic data for K-Means
+    @app.post("/route_data/{route_name}")
+    def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        route_info = db.query(RouteData).filter(RouteData.route_name == route_name.upper()).first()
+        if not route_info:
+            route_info = RouteData(route_name=route_name.upper(), population=payload.population, road_length_km=payload.road_length_km)
+            db.add(route_info)
+        else:
+            route_info.population = payload.population
+            route_info.road_length_km = payload.road_length_km
+        db.commit()
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
+        return {"status": "success", "message": f"Updated demographic data for {route_name.upper()}"}
+
     @app.post("/settings/signature")
     async def upload_signature(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         sig_path = os.path.join(BASE_DIR, "signature.png")
@@ -218,6 +241,19 @@ try:
 
     @app.post("/franchise/")
     def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        # ========================================================
+        # CRITICAL FIX: K-MEANS ALGORITHMIC SATURATION CHECK
+        # Before allowing a new franchise, check if the route is Red.
+        # ========================================================
+        saturation_data = run_kmeans_clustering(db, record.route.upper())
+        if saturation_data:
+            status_text = saturation_data[0]['forecast_period']
+            if "RED CLUSTER" in status_text:
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Action Denied: {record.route.upper()} has reached algorithmic capacity (Over-saturated). Please freeze new applications."
+                )
+
         full_name = f"{current_user.first_name} {current_user.last_name}"
         current_time = get_pht_now()
         sbn_parts = record.sbn_no.split('-')
@@ -300,9 +336,6 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ========================================================
-    # DATA MERGE AND TRUE UPSERT ENGINE
-    # ========================================================
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
@@ -312,7 +345,6 @@ try:
         for file in files:
             contents = await file.read()
             try:
-                # 1. EXCEL IMPORT (Fuzzy Columns + Upsert)
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     if file.filename.endswith(".xlsx"):
                         df = pd.read_excel(io.BytesIO(contents), header=None, engine='openpyxl')
@@ -356,14 +388,12 @@ try:
 
                         clean_plate = sanitize_plate(plate, chassis, motor)
 
-                        # UPSERT: Search DB for existing record
                         existing_record = db.query(FranchiseRecord).filter(
                             func.replace(func.upper(FranchiseRecord.operator_name), ' ', '') == clean_dedup_key(name),
                             func.replace(func.upper(FranchiseRecord.chassis_no), ' ', '') == clean_dedup_key(chassis)
                         ).first()
 
                         if existing_record:
-                            # Update missing fields without deleting anything
                             if not existing_record.sbn_no or existing_record.sbn_no == "": existing_record.sbn_no = sbn.upper()
                             if not existing_record.address or existing_record.address == "": existing_record.address = address.upper()
                             if not existing_record.plate_no or existing_record.plate_no == "": existing_record.plate_no = clean_plate.upper()
@@ -384,7 +414,6 @@ try:
                             db.add(record)
                             imported_count += 1
 
-                # 2. DOCX IMPORT (Fills in MAKE perfectly via True Upsert)
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
                     
@@ -397,7 +426,6 @@ try:
                     issue_date = extracted['issue_date'] or datetime(current_time.year, 1, 1)
 
                     if existing_record:
-                        # MERGE: Fills the MAKE field into the Excel record
                         if extracted['make'] and (not existing_record.make or existing_record.make == ""):
                             existing_record.make = extracted['make'].upper()
                         if extracted['address'] and not existing_record.address: existing_record.address = extracted['address'].upper()
@@ -457,13 +485,11 @@ try:
     def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return db.query(FranchiseRecord).filter(FranchiseRecord.is_active == False).all()
 
+    # UPDATED: Returns K-Means cluster data instead of future regression prediction
     @app.get("/predict/{route}")
     def get_prediction(route: str, db: Session = Depends(get_db)):
-        return train_and_predict(db, route)
+        return run_kmeans_clustering(db, route)
 
-    # =================================================================
-    # EXACT EXCEL STYLING, LEGENDS, AND LIVE COUNTIFS FORMULAS
-    # =================================================================
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
@@ -473,11 +499,12 @@ try:
             
         csv_data = []
         for r in records:
+            # FIX: Swapped ADDRESS for MAKE
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",
                 "DATE OF RENEWAL": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else "",
                 "NAME": r.operator_name or "",
-                "ADDRESS": r.address or "",
+                "MAKE": r.make or "", 
                 "MOTOR NO.": r.motor_no or "",
                 "CHASSIS NO.": r.chassis_no or "",
                 "PLATE NO.": r.plate_no or "",
@@ -494,21 +521,17 @@ try:
             total_row_count = len(records) + 2
             current_year = get_pht_now().year
 
-            # TOP LEFT: Cell A1 uses the live COUNTA formula from the original template
             ws['A1'] = f"=COUNTA(A3:A{total_row_count})"
             ws['A1'].font = Font(bold=True, size=12)
             
-            # DEFINING TEMPLATE COLORS
             red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
             yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
-            green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
             
-            # TOP RIGHT: Exact Tally and Legend Layout (Columns I and J)
             ws['I2'] = "LEGEND & TALLY"
             ws['I2'].font = Font(bold=True)
             
             ws['I3'] = "ACTIVE"
-            ws['I3'].fill = green_fill
+            # FIX: Removed green fill for ACTIVE tally
             ws['J3'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
             ws['J3'].font = Font(bold=True)
 
@@ -522,10 +545,10 @@ try:
             ws['J5'] = f'=COUNTIF(H3:H{total_row_count}, "VACANT / REVOKED")'
             ws['J5'].font = Font(bold=True)
 
-            # Apply row colors and text statuses exactly mimicking the template
             for row_num, r in enumerate(records, start=3):
                 issue_year = r.issue_date.year if r.issue_date else 0
                 
+                fill_color = None
                 if not r.is_active or issue_year <= current_year - 2:
                     fill_color = red_fill
                     status_text = "VACANT / REVOKED"
@@ -533,16 +556,16 @@ try:
                     fill_color = yellow_fill
                     status_text = "FLAGGED"
                 else:
-                    fill_color = green_fill
+                    # FIX: Active rows stay default white
+                    fill_color = None 
                     status_text = "ACTIVE"
                 
                 ws.cell(row=row_num, column=8, value=status_text)
                 
-                # Color columns A to H for the specific row
                 for col_num in range(1, 9):
-                    ws.cell(row=row_num, column=col_num).fill = fill_color
+                    if fill_color:
+                        ws.cell(row=row_num, column=col_num).fill = fill_color
             
-            # Formats column widths so the sheet opens cleanly without manual dragging
             for col in ws.columns:
                 max_length = 0
                 column = col[0].column_letter
