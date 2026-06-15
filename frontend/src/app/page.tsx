@@ -5,16 +5,26 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
-// DEFINITIVE FIX: 127.0.0.1 forces IPv4 connection, completely bypassing the Windows IPv6 localhost trap.
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
+  const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => setMounted(true), []);
+
+  if (!mounted) return <div className="absolute top-6 right-6 w-10 h-10" />;
+
   return (
-    <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="absolute top-6 right-6 p-2 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors">
-      {theme === "dark" ? <Sun size={20} className="text-slate-200" /> : <Moon size={20} className="text-slate-700" />}
+    <button 
+      onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
+      // FIX: Removed 'relative' from here. It is now strictly 'absolute top-6 right-6' so it stays in the corner.
+      className="absolute top-6 right-6 flex items-center justify-center w-10 h-10 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors z-50"
+    >
+      <Sun className={`absolute w-5 h-5 transition-all duration-300 ${theme === "dark" ? "rotate-90 scale-0 opacity-0" : "rotate-0 scale-100 opacity-100"}`} />
+      <Moon className={`absolute w-5 h-5 transition-all duration-300 ${theme === "dark" ? "rotate-0 scale-100 opacity-100" : "-rotate-90 scale-0 opacity-0"}`} />
     </button>
-  )
+  );
 }
 
 export default function Login() {
@@ -25,8 +35,17 @@ export default function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [serverReady, setServerReady] = useState(false);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
 
   useEffect(() => {
+    // INSTANT BYPASS: If you have a token, instantly route to dashboard. No loop.
+    if (typeof window !== "undefined" && localStorage.getItem("token")) {
+      router.replace("/dashboard");
+      return;
+    }
+    
+    setIsCheckingSession(false);
+
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
       try {
@@ -42,7 +61,7 @@ export default function Login() {
     checkServer();
     interval = setInterval(checkServer, 1500);
     return () => clearInterval(interval);
-  }, []);
+  }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,15 +82,13 @@ export default function Login() {
 
       if (res.ok) {
         const data = await res.json();
-        
         localStorage.setItem("pasada_token", data.access_token);
         localStorage.setItem("pasada_full_name", data.full_name);
         localStorage.setItem("pasada_role", data.role || "Clerk");
-        
         localStorage.setItem("token", data.access_token);
         localStorage.setItem("full_name", data.full_name);
         
-        router.push("/dashboard");
+        router.replace("/dashboard"); 
       } else {
         const errData = await res.json();
         setError(errData.detail || "Invalid credentials");
@@ -82,6 +99,8 @@ export default function Login() {
       setLoading(false);
     }
   };
+
+  if (isCheckingSession) return null;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-muted/20 text-foreground p-4 relative">
@@ -99,7 +118,7 @@ export default function Login() {
             <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to local server...</p>
           </div>
         ) : (
-          <form onSubmit={handleLogin} className="space-y-5">
+          <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in">
             {error && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-600 text-sm rounded-lg font-bold text-center">
                 {error}
@@ -126,7 +145,6 @@ export default function Login() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  // DEFINITIVE FIX: [&::-ms-reveal]:hidden securely removes the duplicated Windows Edge eye icon
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
@@ -150,6 +168,7 @@ export default function Login() {
           </form>
         )}
 
+        {/* FIX: I restored the Signup button block that I accidentally deleted last time. */}
         <div className="mt-8 text-center border-t border-border pt-6">
           <p className="text-sm text-muted-foreground font-medium">
             New Administrative Personnel?{" "}
@@ -158,6 +177,7 @@ export default function Login() {
             </button>
           </p>
         </div>
+
       </div>
     </div>
   );
