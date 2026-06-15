@@ -7,15 +7,11 @@ from sqlalchemy import func
 from database import FranchiseRecord, RouteData
 
 def run_kmeans_clustering(db: Session, target_route: str):
-    """
-    Executes Spatial-Demographic K-Means Clustering to determine TODA route saturation.
-    Uses three factors: Active Fleet (X1), Population (X2), Effective Road Length (X3).
-    """
     
     # ==============================================================================
     # STEP 1: DATA EXTRACTION (Pulling X1, X2, X3 from the Database)
     # ==============================================================================
-    # Fetch Active Fleet Size (X1) per route by counting only active MTOP records
+    # kukunin yung  Active Fleet Size (X1) per route by counting active MTOP records only
     fleet_counts = db.query(
         FranchiseRecord.route, 
         func.count(FranchiseRecord.id).label('fleet_size')
@@ -29,12 +25,12 @@ def run_kmeans_clustering(db: Session, target_route: str):
         route_name = r.route
         fleet = r.fleet_size # Factor X1
         
-        # Fetch Population (X2) and Road Length (X3). Default to 5000 pop / 5km if not set.
+        # Population (X2) and Road Length (X3). Default to 5000 pop / 5km pag walang dataset mula PSA and MEO
         route_info = db.query(RouteData).filter(RouteData.route_name == route_name).first()
         pop = route_info.population if route_info else 5000      # Factor X2
         road = route_info.road_length_km if route_info else 5.0  # Factor X3
         
-        # Calculate algorithmic Density Score: (Supply / (Demand * Space)) * 1000
+        # formula ng Density Score: (Supply / (Demand * Space)) * 1000
         density = (fleet / (pop * road)) * 1000
         
         data.append({
@@ -48,43 +44,31 @@ def run_kmeans_clustering(db: Session, target_route: str):
     df = pd.DataFrame(data)
     
     # ==============================================================================
-    # STEP 2: COLD-START PREVENTION (Crucial for Prototype Defense)
-    # K-Means(n_clusters=3) requires at least 3 data points to form 3 groups.
-    # If the database only has 1 or 2 routes right now, we duplicate rows in memory 
-    # just to allow the matrix math to compile without throwing a 500 Server Error.
-    # ==============================================================================
+    # STEP 2: at least 3 datapoints para hidi magfail at makapaggroup yung algo.
     if len(df) < 3:
         df = pd.concat([df, df, df]).reset_index(drop=True)
 
-    # ==============================================================================
-    # STEP 3: FEATURE SCALING (The most important mathematical step)
-    # Population is in the thousands (e.g., 15000), Road is in single digits (e.g., 5).
-    # StandardScaler normalizes these so the algorithm doesn't ignore the Road Length.
-    # ==============================================================================
+
     features = ['fleet_size', 'population', 'road_length']
     X = df[features]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
     # ==============================================================================
-    # STEP 4: K-MEANS CLUSTERING EXECUTION
-    # Group the routes into exactly 3 clusters based on their spatial-demographic similarities.
+    # STEP 4: clustering
     # ==============================================================================
     kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
     df['cluster'] = kmeans.fit_predict(X_scaled)
     
     # ==============================================================================
     # STEP 5: MATHEMATICAL CLUSTER RANKING
-    # The algorithm doesn't know which cluster is "Bad". We must sort the clusters 
+    # The algorithm doesn't know which cluster is "Bad". must sort the clusters 
     # by their average Density Score to assign Green (0), Yellow (1), and Red (2).
     # ==============================================================================
     cluster_densities = df.groupby('cluster')['density'].mean().sort_values()
     ranking_map = {cluster_id: rank for rank, (cluster_id, _) in enumerate(cluster_densities.items())}
     df['severity'] = df['cluster'].map(ranking_map)
     
-    # ==============================================================================
-    # STEP 6: TARGET ROUTE EXTRACTION & UI FORMATTING
-    # ==============================================================================
     target_data = df[df['route'] == target_route]
     
     if target_data.empty:
@@ -103,7 +87,6 @@ def run_kmeans_clustering(db: Session, target_route: str):
         2: "RED CLUSTER: Over-saturated (Freeze Applications)"
     }
     
-    # Normalize features to a 100% scale for the React Frontend Bar Charts
     max_fleet = df['fleet_size'].max() or 1
     max_pop = df['population'].max() or 1
     max_road = df['road_length'].max() or 1
