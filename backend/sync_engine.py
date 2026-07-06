@@ -52,7 +52,7 @@ def listen_for_peers():
 
 def sync_with_peers():
     while True:
-        time.sleep(30)
+        time.sleep(10) # Set to 10 seconds for faster updates
         db = SessionLocal()
         try:
             latest_record = db.query(FranchiseRecord).order_by(FranchiseRecord.updated_at.desc()).first()
@@ -63,7 +63,17 @@ def sync_with_peers():
                     response = requests.get(f"http://{peer}:{API_PORT}/api/sync/pull?since={last_sync_time}", timeout=5)
                     if response.ok:
                         incoming_data = response.json()
-                        for item in incoming_data:
+                        
+                        # 1. SYNC ACCOUNTS (Ensures offline login works)
+                        from database import User # Ensure User is imported at the top of the file
+                        for u_item in incoming_data.get('users', []):
+                            existing_user = db.query(User).filter(User.username == u_item['username']).first()
+                            if not existing_user:
+                                new_user = User(**u_item)
+                                db.add(new_user)
+                        
+                        # 2. SYNC TRICYCLE RECORDS
+                        for item in incoming_data.get('records', []):
                             existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == item['id']).first()
                             if not existing:
                                 new_rec = FranchiseRecord(**item)

@@ -79,6 +79,12 @@ export default function TodaClient() {
     if (safeRouteName) {
       setFormData(prev => ({ ...prev, route: safeRouteName }))
       fetchMembers()
+
+      const intervalId = setInterval(() => {
+        fetchMembers()
+      }, 10000)
+
+      return () => clearInterval(intervalId)
     }
   }, [safeRouteName, fetchMembers])
 
@@ -114,7 +120,7 @@ export default function TodaClient() {
         const a = document.createElement('a')
         a.style.display = 'none'
         a.href = url
-        a.download = `${safeRouteName}_MASTERLIST_2026.csv`
+        a.download = `${safeRouteName}_MASTERLIST_2026.xlsx`
         document.body.appendChild(a)
         a.click()
         setTimeout(() => {
@@ -139,9 +145,17 @@ export default function TodaClient() {
       if (response.ok) {
         const blob = await response.blob()
         const url = window.URL.createObjectURL(blob)
-
+        
         if (blob.type === "application/pdf") {
+          
+          // FIX 1: Find and destroy any lingering print iframes from previous clicks
+          const existingIframe = document.getElementById('pasada-print-frame')
+          if (existingIframe) {
+            document.body.removeChild(existingIframe)
+          }
+
           const iframe = document.createElement('iframe')
+          iframe.id = 'pasada-print-frame' // Assign a specific ID for cleanup
           iframe.style.display = 'none'
           iframe.src = url
           document.body.appendChild(iframe)
@@ -154,8 +168,11 @@ export default function TodaClient() {
               console.error(e)
             }
             setIsGeneratingId(null)
+            
+            // FIX 2: Free up system RAM after the print dialog is called
+            setTimeout(() => window.URL.revokeObjectURL(url), 1000)
           }, 1000)
-
+          
         } else {
           const a = document.createElement('a')
           a.style.display = 'none'
@@ -164,6 +181,12 @@ export default function TodaClient() {
           document.body.appendChild(a)
           a.click()
           setIsGeneratingId(null)
+          
+          // FIX 3: Cleanup memory for document downloads as well
+          setTimeout(() => {
+            document.body.removeChild(a)
+            window.URL.revokeObjectURL(url)
+          }, 1000)
         }
       } else {
         setIsGeneratingId(null)
