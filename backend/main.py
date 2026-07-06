@@ -237,7 +237,11 @@ try:
     def sync_pull(since: str, db: Session = Depends(get_db)):
         target_time = datetime.fromisoformat(since)
         records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
-        return records
+        users = db.query(User).all()
+        return {
+            "records": records,
+            "users": users
+        }
 
     @app.post("/franchise/")
     def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
