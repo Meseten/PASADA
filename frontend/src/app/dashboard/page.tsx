@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe, MapPin, Settings2 } from "lucide-react";
+import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe, MapPin, Settings2, Loader2 } from "lucide-react";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
 const API_URL = "http://127.0.0.1:43888";
@@ -107,8 +107,8 @@ export default function Dashboard() {
 
   if (!stats) {
     return (
-      <div className="p-8 text-muted-foreground animate-pulse font-medium text-lg">
-        Synchronizing Telemetry...
+      <div className="p-8 text-muted-foreground font-medium text-lg flex items-center gap-3">
+        <Loader2 className="w-6 h-6 animate-spin text-blue-600" /> Loading Dashboard Data...
       </div>
     );
   }
@@ -342,7 +342,7 @@ export default function Dashboard() {
       <div className="bg-card border border-border p-5 rounded-xl shadow-sm">
         <h3 className="text-sm font-bold flex items-center gap-2 mb-3">
           <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" /> 
-          Spatial-Demographic Route Saturation (K-Means)
+          Route Saturation Analysis
         </h3>
         
         <div className="flex flex-wrap gap-1.5 mb-4">
@@ -386,7 +386,7 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[160px]">
               <div>
                 <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <Activity size={12} /> Demographic Feature Weights
+                  <Activity size={12} /> Contributing Factors
                 </h4>
                 <div className="space-y-2 relative group">
                   {predictionData ? predictionData.feature_importances.map((feat: any) => (
@@ -446,7 +446,7 @@ export default function Dashboard() {
                     disabled={isUpdatingRoute}
                     className="w-full h-7 mt-1 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rounded-md text-[10px] font-bold hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
-                    {isUpdatingRoute ? "Recalculating Cluster..." : "Update Spatial Data"}
+                    {isUpdatingRoute ? "Updating..." : "Update Route Factors"}
                   </button>
                 </form>
               </div>

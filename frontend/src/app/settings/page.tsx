@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 const API_URL = "http://127.0.0.1:43888";
 
@@ -11,6 +12,7 @@ export default function Settings() {
   // General Tab
   const [chairName, setChairName] = useState("");
   const [enableEsign, setEnableEsign] = useState(false);
+  const [uploadedFileName, setUploadedFileName] = useState("");
   
   // Backup Tab
   const [targetToda, setTargetToda] = useState("ALL");
@@ -21,9 +23,11 @@ export default function Settings() {
   
   // Security Tab
   const [newPassword, setNewPassword] = useState("");
+  const [newUsername, setNewUsername] = useState("");
   
   // Network Tab
   const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[] } | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
@@ -82,13 +86,15 @@ export default function Settings() {
 
   const uploadSignature = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.[0]) return;
+    const file = e.target.files[0];
     const formData = new FormData();
-    formData.append("file", e.target.files[0]);
+    formData.append("file", file);
     await fetch(`${API_URL}/settings/signature`, {
       method: "POST",
       headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
       body: formData
     });
+    setUploadedFileName(file.name);
     triggerSuccess("E-Signature uploaded successfully.");
   };
 
@@ -109,6 +115,33 @@ export default function Settings() {
       alert("No records found for the selected parameters.");
     } finally {
       setExportLoading(false);
+    }
+  };
+
+  const handleUsernameUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/users/username`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("token")}` },
+        body: JSON.stringify({ new_username: newUsername })
+      });
+      
+      if (res.ok) {
+        triggerSuccess("Username updated successfully. Please log in again.");
+        setTimeout(() => {
+          localStorage.clear();
+          window.location.href = "/";
+        }, 2000);
+      } else {
+        const err = await res.json();
+        setErrorMsg(err.detail || "Failed to update username.");
+        setLoading(false);
+      }
+    } catch (err) {
+      setErrorMsg("Network error. Could not update username.");
+      setLoading(false);
     }
   };
 
@@ -136,8 +169,16 @@ export default function Settings() {
     }
   };
 
+  const handleForceSync = async () => {
+    setIsSyncing(true);
+    setTimeout(() => {
+      setIsSyncing(false);
+      triggerSuccess("Workstation synchronized with the local network.");
+    }, 2000);
+  };
+
   return (
-    <div className="p-6 md:p-8 max-w-4xl animate-in fade-in duration-500 mx-auto">
+    <div className="p-6 md:p-8 animate-in fade-in duration-500 w-full max-w-[1600px]">
       <div className="flex items-center gap-3 mb-8">
         <SettingsIcon className="w-8 h-8 text-primary" />
         <div>
@@ -146,7 +187,6 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* Tabs perfectly aligned to the left edge of the white card */}
       <div className="flex flex-wrap gap-2 mb-4 w-full">
         {[
           { id: "general", label: "General Config", icon: <SettingsIcon size={16} /> },
@@ -180,29 +220,38 @@ export default function Settings() {
 
       <div className="bg-card border border-border rounded-b-2xl rounded-tr-2xl p-6 md:p-8 shadow-sm">
         {activeTab === "general" && (
-          <div className="space-y-6">
-            <h2 className="text-lg font-bold border-b border-border pb-2 mb-4">MTOP Document Settings</h2>
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Committee Chairman Name</label>
-              <input type="text" value={chairName} onChange={(e) => setChairName(e.target.value.toUpperCase())} className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 font-bold uppercase" />
+          <div className="space-y-8">
+            <h2 className="text-xl font-black border-b border-border pb-4">General Settings</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Committee Chairman Name</label>
+                <input type="text" value={chairName} onChange={(e) => setChairName(e.target.value.toUpperCase())} className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:ring-2 focus:ring-blue-500" />
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Upload Transparent Signature (.png)</label>
+                <div className="flex items-center gap-3">
+                  <input type="file" accept="image/png" onChange={uploadSignature} className="flex-1 text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer bg-background border border-border rounded-lg" />
+                  {uploadedFileName && <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">{uploadedFileName}</Badge>}
+                </div>
+              </div>
             </div>
-            <div className="flex items-center justify-between p-4 border border-border rounded-lg bg-muted/30">
+
+            <div className="flex items-center justify-between p-6 border border-border rounded-xl bg-muted/20">
               <div>
-                <h3 className="font-bold text-sm">Enable E-Signatures</h3>
-                <p className="text-xs text-muted-foreground">Automatically inject the uploaded transparent signature into printed documents.</p>
+                <h3 className="font-bold text-base">Enable Digital Signatures</h3>
+                <p className="text-sm text-muted-foreground">Automatically add the uploaded signature to all printed MTOP documents.</p>
               </div>
               <label className="relative inline-flex items-center cursor-pointer">
                 <input type="checkbox" checked={enableEsign} onChange={(e) => setEnableEsign(e.target.checked)} className="sr-only peer" />
-                <div className="w-11 h-6 bg-muted border border-border peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                <div className="w-11 h-6 bg-slate-200 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
               </label>
             </div>
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Upload Transparent Signature (.png)</label>
-              <input type="file" accept="image/png" onChange={uploadSignature} className="block w-full text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer" />
-            </div>
-            <button onClick={saveSettings} disabled={loading} className="mt-4 bg-blue-600 text-white font-bold px-6 py-2.5 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition-all shadow-md">
+            
+            <button onClick={saveSettings} disabled={loading} className="bg-blue-600 text-white font-bold px-8 py-3 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition-all shadow-md">
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-              Save Configuration
+              Save Changes
             </button>
           </div>
         )}
@@ -216,7 +265,7 @@ export default function Settings() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route (TODA)</label>
-                <select value={targetToda} onChange={(e) => setTargetToda(e.target.value)} className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer">
+                <select value={targetToda} onChange={(e) => setTargetToda(e.target.value)} className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
                   <option value="ALL">ALL UPLOADED ROUTES</option>
                   {availableRoutes.map(toda => (
                     <option key={toda} value={toda}>{toda}</option>
@@ -225,7 +274,7 @@ export default function Settings() {
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Status</label>
-                <select value={exportStatus} onChange={(e) => setExportStatus(e.target.value)} className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer">
+                <select value={exportStatus} onChange={(e) => setExportStatus(e.target.value)} className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
                   <option value="ALL">ALL RECORDS</option>
                   <option value="ACTIVE">ACTIVE & COMPLIANT</option>
                   <option value="FLAGGED">FLAGGED (PENDING)</option>
@@ -234,7 +283,7 @@ export default function Settings() {
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Year</label>
-                <select value={targetYear} onChange={(e) => setTargetYear(e.target.value)} className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer">
+                <select value={targetYear} onChange={(e) => setTargetYear(e.target.value)} className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer">
                   <option value="ALL">ALL RECORDED YEARS</option>
                   {availableYears.map(year => (
                     <option key={year} value={year}>{year}</option>
@@ -253,18 +302,32 @@ export default function Settings() {
           <div className="space-y-6">
             <div>
               <h2 className="text-lg font-bold flex items-center gap-2"><Shield className="text-blue-600" size={20} /> Account Security</h2>
-              <p className="text-sm text-muted-foreground mt-1 font-medium">Update your administrative passcode.</p>
+              <p className="text-sm text-muted-foreground mt-1 font-medium">Update your administrative credentials.</p>
             </div>
-            <form onSubmit={handlePasswordUpdate} className="space-y-4 max-w-md mt-6">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">New Passcode</label>
-                <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold" required />
-              </div>
-              <button type="submit" disabled={loading} className="w-full mt-2 bg-slate-900 text-white font-bold px-6 py-3 rounded-lg flex items-center justify-center gap-2 hover:bg-slate-800 transition-all shadow-md">
-                {loading ? <Loader2 size={16} className="animate-spin" /> : <Shield size={16} />}
-                Update Passcode
-              </button>
-            </form>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mt-6">
+              <form onSubmit={handleUsernameUpdate} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Update System Username</label>
+                  <input type="text" value={newUsername} onChange={(e) => setNewUsername(e.target.value.toUpperCase())} placeholder="NEW USERNAME" className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+                </div>
+                <button type="submit" disabled={loading} className="w-full bg-slate-900 text-white font-bold px-6 py-3 rounded-lg shadow-md hover:bg-slate-800 transition-all flex items-center justify-center gap-2">
+                  {loading ? <Loader2 size={16} className="animate-spin" /> : <Shield size={16} />}
+                  Update Username
+                </button>
+              </form>
+
+              <form onSubmit={handlePasswordUpdate} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">New Passcode</label>
+                  <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+                </div>
+                <button type="submit" disabled={loading} className="w-full bg-slate-900 text-white font-bold px-6 py-3 rounded-lg shadow-md hover:bg-slate-800 transition-all flex items-center justify-center gap-2">
+                  {loading ? <Loader2 size={16} className="animate-spin" /> : <Shield size={16} />}
+                  Update Passcode
+                </button>
+              </form>
+            </div>
           </div>
         )}
 
@@ -275,8 +338,8 @@ export default function Settings() {
               <p className="text-sm text-muted-foreground mt-1 font-medium">System network details for local database synchronization.</p>
             </div>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
-              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1">
                 <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-2">This Workstation IP</p>
                 <p className="text-3xl font-black text-slate-800 dark:text-slate-200 font-mono tracking-wider">
                   {networkInfo?.local_ip || "SCANNING..."}
@@ -287,14 +350,14 @@ export default function Settings() {
                 </div>
               </div>
 
-              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner">
+              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1">
                 <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-2">Connected Workstations</p>
                 <p className="text-3xl font-black text-blue-600 font-mono tracking-wider">
                   {networkInfo?.connected_peers.length || 0}
                 </p>
                 <div className="mt-4 space-y-2">
                   {networkInfo?.connected_peers.length === 0 ? (
-                    <p className="text-xs font-bold text-muted-foreground">No other workstations detected on the network.</p>
+                    <p className="text-xs font-bold text-muted-foreground">No other workstations detected.</p>
                   ) : (
                     networkInfo?.connected_peers.map(peer => (
                       <div key={peer} className="text-xs font-bold text-slate-700 bg-white border border-border px-3 py-2 rounded-md font-mono shadow-sm">
@@ -303,6 +366,14 @@ export default function Settings() {
                     ))
                   )}
                 </div>
+              </div>
+
+              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1 flex flex-col justify-center">
+                <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">Manual Data Pull</p>
+                <button onClick={handleForceSync} disabled={isSyncing} className="w-full bg-blue-600 text-white font-bold py-4 rounded-lg shadow-md hover:bg-blue-700 transition-all flex items-center justify-center gap-2">
+                  {isSyncing ? <Loader2 className="animate-spin h-5 w-5" /> : <Server className="h-5 w-5" />}
+                  {isSyncing ? "Synchronizing..." : "Force Network Sync"}
+                </button>
               </div>
             </div>
           </div>

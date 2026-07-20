@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams, usePathname, useRouter } from "next/navigation"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
@@ -33,6 +33,7 @@ export default function TodaClient() {
   
   const [members, setMembers] = useState<Member[]>([])
   const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState("ALL")
   
   const [isAddOpen, setIsAddOpen] = useState(false)
   const [isEditOpen, setIsEditOpen] = useState(false)
@@ -58,7 +59,8 @@ export default function TodaClient() {
     id: "", sbn_no: "", operator_name: "", address: "", motor_no: "", chassis_no: "", make: "", plate_no: "", route: safeRouteName, driving_route: ""
   })
 
-  // SAFETY HELPER: Prevents UI crash if Excel provided bad dates
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   const formatSafeDate = (dateStr: string | null | undefined) => {
     if (!dateStr) return "Unknown";
     const d = new Date(dateStr);
@@ -90,7 +92,31 @@ export default function TodaClient() {
 
   useEffect(() => {
     setCurrentPage(1)
-  }, [search])
+  }, [search, statusFilter])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isTyping = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA' || document.activeElement?.tagName === 'SELECT';
+
+      if (e.key === '/' && !isTyping) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+
+      if (e.altKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        handleOpenAdd();
+      }
+
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setBatchModalOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value.toUpperCase() })
@@ -111,7 +137,8 @@ export default function TodaClient() {
     setIsExporting(true)
     const token = localStorage.getItem("token")
     try {
-      const response = await fetch(`${API_URL}/export/masterlist/${safeRouteName}`, {
+      // Pass the selected status filter to the backend for accurate export filtering
+      const response = await fetch(`${API_URL}/export/masterlist/${safeRouteName}?status_filter=${statusFilter}`, {
         headers: { "Authorization": `Bearer ${token}` }
       })
       if (response.ok) {
@@ -120,7 +147,7 @@ export default function TodaClient() {
         const a = document.createElement('a')
         a.style.display = 'none'
         a.href = url
-        a.download = `${safeRouteName}_MASTERLIST_2026.xlsx`
+        a.download = `${safeRouteName}_MASTERLIST_2026${statusFilter !== "ALL" ? `_${statusFilter}` : ""}.xlsx`
         document.body.appendChild(a)
         a.click()
         setTimeout(() => {
@@ -148,14 +175,13 @@ export default function TodaClient() {
         
         if (blob.type === "application/pdf") {
           
-          // FIX 1: Find and destroy any lingering print iframes from previous clicks
           const existingIframe = document.getElementById('pasada-print-frame')
           if (existingIframe) {
             document.body.removeChild(existingIframe)
           }
 
           const iframe = document.createElement('iframe')
-          iframe.id = 'pasada-print-frame' // Assign a specific ID for cleanup
+          iframe.id = 'pasada-print-frame' 
           iframe.style.display = 'none'
           iframe.src = url
           document.body.appendChild(iframe)
@@ -168,8 +194,6 @@ export default function TodaClient() {
               console.error(e)
             }
             setIsGeneratingId(null)
-            
-            // FIX 2: Free up system RAM after the print dialog is called
             setTimeout(() => window.URL.revokeObjectURL(url), 1000)
           }, 1000)
           
@@ -182,7 +206,6 @@ export default function TodaClient() {
           a.click()
           setIsGeneratingId(null)
           
-          // FIX 3: Cleanup memory for document downloads as well
           setTimeout(() => {
             document.body.removeChild(a)
             window.URL.revokeObjectURL(url)
@@ -212,8 +235,10 @@ export default function TodaClient() {
         a.download = `MTOP_${String(member.operator_name || "Unknown").replace(/\s+/g, '_')}.docx`
         document.body.appendChild(a)
         a.click()
-        window.URL.revokeObjectURL(url)
-        document.body.removeChild(a)
+        setTimeout(() => {
+          window.URL.revokeObjectURL(url)
+          document.body.removeChild(a)
+        }, 1000)
       }
     } catch (err) {
       console.error(err)
@@ -229,7 +254,7 @@ export default function TodaClient() {
     targetRecords = members.filter(record => {
       if (!record.issue_date) return false
       const recordDateObj = new Date(record.issue_date)
-      if (isNaN(recordDateObj.getTime())) return false; // Prevent batch print crash
+      if (isNaN(recordDateObj.getTime())) return false; 
 
       const recordDateString = recordDateObj.toISOString().split('T')[0]
       const hour = recordDateObj.getHours()
@@ -296,10 +321,25 @@ export default function TodaClient() {
     } catch (error) {}
   }
 
+  const currentYear = new Date().getFullYear()
+
+  // Dynamic filter combining text search and status classification
   const filteredMembers = members.filter(m => {
+    const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
+    
+    let computedStatus = "ACTIVE";
+    if (m.is_active === false || issueYear <= currentYear - 2) {
+      computedStatus = "REVOKED";
+    } else if (issueYear === currentYear - 1) {
+      computedStatus = "FLAGGED";
+    }
+
+    if (statusFilter !== "ALL" && computedStatus !== statusFilter) {
+      return false;
+    }
+
     const term = search.toLowerCase();
     return (
-      // SAFETY HELPER: Wrapping in String() stops a fatal crash if Excel imported numbers instead of text
       String(m.operator_name || "").toLowerCase().includes(term) ||
       String(m.sbn_no || "").toLowerCase().includes(term) ||
       String(m.plate_no || "").toLowerCase().includes(term) ||
@@ -312,8 +352,7 @@ export default function TodaClient() {
   const totalPages = Math.ceil(filteredMembers.length / rowsPerPage)
   const paginatedMembers = filteredMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage)
 
-  if (!safeRouteName) return <div className="p-8 animate-pulse text-muted-foreground flex items-center h-full justify-center text-lg">Synchronizing Route Data...</div>
-  const currentYear = new Date().getFullYear()
+  if (!safeRouteName) return <div className="p-8 text-muted-foreground flex items-center gap-3 h-full text-lg font-medium"><Loader2 className="w-6 h-6 animate-spin text-blue-600" /> Loading Route Records...</div>
 
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500">
@@ -322,17 +361,31 @@ export default function TodaClient() {
           <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
           <p className="text-muted-foreground mt-1 text-sm md:text-base">Comprehensive operator registry and compliance tracking.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          
+          {/* New Status Filter Dropdown */}
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="h-11 px-4 rounded-lg border border-border/60 bg-background text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+          >
+            <option value="ALL">All Records</option>
+            <option value="ACTIVE">Active Only</option>
+            <option value="FLAGGED">Flagged Only</option>
+            <option value="REVOKED">Revoked Only</option>
+          </select>
+
           <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
             {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
-            Export Masterlist
+            {statusFilter === "ALL" ? "Export Masterlist" : `Export ${statusFilter}`}
           </Button>
 
-          <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600">
+          <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600" title="Alt + P">
             <Printer className="mr-2 h-5 w-5" /> Batch Print (A4)
           </Button>
-          <Button onClick={handleOpenAdd} className="shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white">
-            <PlusCircle className="mr-2 h-5 w-5" /> Process MTOP
+          
+          <Button onClick={handleOpenAdd} className="shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" title="Alt + N">
+            <PlusCircle className="mr-2 h-5 w-5" /> New Application
           </Button>
         </div>
       </div>
@@ -356,10 +409,10 @@ export default function TodaClient() {
                 <p className="text-sm text-muted-foreground font-medium">
                   Processing {batchProgress.current} of {batchProgress.total} records...
                 </p>
-                <div className="w-full bg-muted rounded-full h-2.5 mt-4 overflow-hidden">
+                <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
                   <div 
-                    className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-                    style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                    className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out"
+                    style={{ width: `${Math.max((batchProgress.current / batchProgress.total) * 100, 5)}%` }}
                   ></div>
                 </div>
               </div>
@@ -433,7 +486,7 @@ export default function TodaClient() {
                 }
                 className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
               >
-                <CheckCircle className="mr-2 h-5 w-5" /> Initiate A4 Batch Sequence
+                <CheckCircle className="mr-2 h-5 w-5" /> Start A4 Batch Print
               </Button>
             </DialogFooter>
           )}
@@ -503,8 +556,8 @@ export default function TodaClient() {
         <DialogContent className="sm:max-w-[650px] max-h-[85vh] overflow-hidden flex flex-col p-0 rounded-2xl shadow-2xl">
           <div className="p-6 bg-muted/30 border-b border-border/50 shrink-0">
             <DialogHeader>
-              <DialogTitle className="text-2xl font-bold flex items-center gap-2"><History className="h-5 w-5 text-blue-600" /> Immutable Audit Trail</DialogTitle>
-              <DialogDescription className="mt-1">Cryptographic action log for <span className="font-bold text-foreground">{activeMember?.operator_name}</span></DialogDescription>
+              <DialogTitle className="text-2xl font-bold flex items-center gap-2"><History className="h-5 w-5 text-blue-600" /> Record History</DialogTitle>
+              <DialogDescription className="mt-1">Action history for <span className="font-bold text-foreground">{activeMember?.operator_name}</span></DialogDescription>
             </DialogHeader>
           </div>
           <div className="p-6 overflow-y-auto custom-scrollbar">
@@ -541,7 +594,8 @@ export default function TodaClient() {
             <div className="relative w-full md:w-96 group">
               <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
               <Input 
-                placeholder="Search Operator, Address, Motor, SBN..." 
+                ref={searchInputRef}
+                placeholder="Search Operator, Address, Motor... (Press '/' to focus)" 
                 value={search} 
                 onChange={(e) => setSearch(e.target.value)} 
                 className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium" 
@@ -604,7 +658,7 @@ export default function TodaClient() {
                         </TableCell>
                         <TableCell>{statusBadge}</TableCell>
                         <TableCell className="text-right space-x-1.5 pr-4">
-                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Audit Trail" onClick={() => handleOpenHistory(member)}><History className="h-3.5 w-3.5" /></Button>
+                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}><History className="h-3.5 w-3.5" /></Button>
                           <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Modify Record" onClick={() => handleOpenEdit(member)}><Edit className="h-3.5 w-3.5" /></Button>
                           <Button variant="outline" size="icon" disabled={isGeneratingId === member.id} className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-blue-500/30 shadow-sm" title="Native Browser Print" onClick={() => handleNativePrint(member)}>
                             {isGeneratingId === member.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Printer className="h-3.5 w-3.5 text-blue-600" />}

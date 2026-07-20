@@ -3,6 +3,8 @@ import os
 import traceback
 import re
 from datetime import datetime
+import zipfile
+import threading
 
 # ==========================================
 # 1. THE OS-LEVEL LOGGER
@@ -43,12 +45,8 @@ try:
     from sqlalchemy.orm import Session, sessionmaker
     from sqlalchemy import func, extract, create_engine
     
-    # Imports including the new RouteData table
     from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now, BASE_DIR
-    
-    # Imports the new K-Means Clustering algorithm
     from ml_engine import run_kmeans_clustering
-    
     from doc_generator import generate_certificate
     from extractor import extract_docx_data
     from sync_engine import start_lan_sync, get_local_ip, PEERS
@@ -58,12 +56,10 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     import pandas as pd
     import io
-    import zipfile
     import shutil
     from typing import List, Optional
     from fastapi.responses import FileResponse, Response
     import starlette.formparsers
-    
     from openpyxl.styles import PatternFill, Font, Alignment
     
     force_log("All libraries loaded successfully!")
@@ -82,6 +78,34 @@ try:
         expose_headers=["Content-Disposition"]
     )
 
+    # AUTOMATED DAILY BACKUP THREAD
+    def automated_backup():
+        while True:
+            now = datetime.now()
+            # Executes exactly at 4:45 PM (16:45)
+            if now.hour == 16 and now.minute == 45:
+                backup_dir = os.path.join(BASE_DIR, "backups")
+                if not os.path.exists(backup_dir):
+                    os.makedirs(backup_dir)
+                
+                db_path = os.path.join(BASE_DIR, 'pasada_production.db')
+                if os.path.exists(db_path):
+                    zip_name = os.path.join(backup_dir, f"PASADA_Backup_{now.strftime('%Y-%m-%d')}.zip")
+                    try:
+                        with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            zipf.write(db_path, os.path.basename(db_path))
+                        force_log(f"Automated backup secured: {zip_name}")
+                    except Exception as e:
+                        force_log(f"Backup failed: {e}")
+                
+                # Sleep for 60 seconds so it doesn't trigger multiple times in the same minute
+                time.sleep(60)
+            else:
+                # Check time every 30 seconds
+                time.sleep(30)
+
+    # Start the automated backup alongside the LAN Sync
+    threading.Thread(target=automated_backup, daemon=True).start()
     start_lan_sync()
 
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -127,7 +151,9 @@ try:
     class PasswordUpdate(BaseModel):
         new_password: str
 
-    # Schema for updating K-Means Factors X2 (Population) and X3 (Road Length)
+    class UsernameUpdate(BaseModel):
+        new_username: str
+
     class RouteDataUpdate(BaseModel):
         population: int
         road_length_km: float
@@ -194,6 +220,18 @@ try:
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SECURITY", "0", "SYSTEM", "Updated account password")
         return {"status": "success"}
 
+    @app.put("/users/username")
+    def update_username(payload: UsernameUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        if db.query(User).filter(User.username == payload.new_username.upper()).first():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        old_username = current_user.username
+        current_user.username = payload.new_username.upper()
+        db.commit()
+        
+        log_action(db, current_user.first_name + " " + current_user.last_name, "UPDATE_USERNAME", "0", "SYSTEM", f"Changed username from {old_username} to {payload.new_username.upper()}")
+        return {"status": "success"}
+
     @app.get("/settings")
     def get_settings(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return init_settings(db)
@@ -207,7 +245,6 @@ try:
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
         return {"status": "success"}
 
-    # NEW ENDPOINT: Configure spatial-demographic data for K-Means
     @app.post("/route_data/{route_name}")
     def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         route_info = db.query(RouteData).filter(RouteData.route_name == route_name.upper()).first()
@@ -245,10 +282,6 @@ try:
 
     @app.post("/franchise/")
     def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        # ========================================================
-        # CRITICAL FIX: K-MEANS ALGORITHMIC SATURATION CHECK
-        # Before allowing a new franchise, check if the route is Red.
-        # ========================================================
         saturation_data = run_kmeans_clustering(db, record.route.upper())
         if saturation_data:
             status_text = saturation_data[0]['forecast_period']
@@ -489,21 +522,36 @@ try:
     def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return db.query(FranchiseRecord).filter(FranchiseRecord.is_active == False).all()
 
-    # UPDATED: Returns K-Means cluster data instead of future regression prediction
     @app.get("/predict/{route}")
     def get_prediction(route: str, db: Session = Depends(get_db)):
         return run_kmeans_clustering(db, route)
 
     @app.get("/export/masterlist/{route_name}")
-    def export_toda_masterlist(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
+    def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
         
-        if not records:
-            raise HTTPException(status_code=404, detail="No records found for this route")
+        current_year = get_pht_now().year
+        filtered_records = []
+        
+        # Apply the selected status filter identically to the frontend logic
+        for r in records_query:
+            issue_year = r.issue_date.year if r.issue_date else 0
+            
+            if not r.is_active or issue_year <= current_year - 2:
+                computed_status = "REVOKED"
+            elif issue_year == current_year - 1:
+                computed_status = "FLAGGED"
+            else:
+                computed_status = "ACTIVE"
+                
+            if status_filter == "ALL" or status_filter == computed_status:
+                filtered_records.append(r)
+
+        if not filtered_records:
+            raise HTTPException(status_code=404, detail="No records found matching this filter")
             
         csv_data = []
-        for r in records:
-            # FIX: Swapped ADDRESS for MAKE
+        for r in filtered_records:
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",
                 "DATE OF RENEWAL": r.issue_date.strftime('%Y-%m-%d') if r.issue_date else "",
@@ -522,8 +570,7 @@ try:
             df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
             ws = writer.sheets['Masterlist']
             
-            total_row_count = len(records) + 2
-            current_year = get_pht_now().year
+            total_row_count = len(filtered_records) + 2
 
             ws['A1'] = f"=COUNTA(A3:A{total_row_count})"
             ws['A1'].font = Font(bold=True, size=12)
@@ -535,7 +582,6 @@ try:
             ws['I2'].font = Font(bold=True)
             
             ws['I3'] = "ACTIVE"
-            # FIX: Removed green fill for ACTIVE tally
             ws['J3'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
             ws['J3'].font = Font(bold=True)
 
@@ -549,7 +595,7 @@ try:
             ws['J5'] = f'=COUNTIF(H3:H{total_row_count}, "VACANT / REVOKED")'
             ws['J5'].font = Font(bold=True)
 
-            for row_num, r in enumerate(records, start=3):
+            for row_num, r in enumerate(filtered_records, start=3):
                 issue_year = r.issue_date.year if r.issue_date else 0
                 
                 fill_color = None
@@ -560,7 +606,6 @@ try:
                     fill_color = yellow_fill
                     status_text = "FLAGGED"
                 else:
-                    # FIX: Active rows stay default white
                     fill_color = None 
                     status_text = "ACTIVE"
                 
@@ -586,10 +631,11 @@ try:
 
         output.seek(0)
         
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported Masterlist for {route_name.upper()}")
+        filter_tag = f"_{status_filter}" if status_filter != "ALL" else ""
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported {status_filter} Masterlist for {route_name.upper()}")
         
         headers = {
-            'Content-Disposition': f'attachment; filename="{route_name.upper()} 2026.xlsx"'
+            'Content-Disposition': f'attachment; filename="{route_name.upper()}_2026{filter_tag}.xlsx"'
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
@@ -660,9 +706,6 @@ except Exception as e:
     force_log(f"\n[{datetime.now()}] !!! BOOT FATAL ERROR !!!\n{traceback.format_exc()}")
     sys.exit(1)
 
-# ==========================================
-# 4. SERVER EXECUTION ON PORT 43888
-# ==========================================
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     
