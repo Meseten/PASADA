@@ -6,7 +6,7 @@ import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { ThemeProvider, useTheme } from "next-themes"
 import { useEffect, useState, useCallback } from "react"
-import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut } from "lucide-react"
+import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map } from "lucide-react"
 import { Input } from "@/components/ui/input"
 
 const inter = Inter({ subsets: ["latin"] })
@@ -21,7 +21,6 @@ function ThemeToggle() {
   if (!mounted) return <div className="w-8 h-8" />
 
   return (
-    // DEFINITIVE ICON FIX: Both icons are absolute within a centered relative container
     <button 
       onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
       className="relative flex items-center justify-center w-8 h-8 rounded-md hover:bg-accent transition-colors"
@@ -41,6 +40,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   
   const [userName, setUserName] = useState("System User")
   const [userRole, setUserRole] = useState("Clerk")
+  const [isNetworkOnline, setIsNetworkOnline] = useState(true)
 
   const fetchRoutes = useCallback(async () => {
     try {
@@ -56,6 +56,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true))
     
+    // Check functional network status
+    setIsNetworkOnline(navigator.onLine)
+    const handleOnline = () => setIsNetworkOnline(true)
+    const handleOffline = () => setIsNetworkOnline(false)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    
     const storedName = localStorage.getItem("pasada_full_name") || localStorage.getItem("full_name")
     const storedRole = localStorage.getItem("pasada_role")
     
@@ -67,7 +74,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
 
     window.addEventListener('toda_imported', fetchRoutes)
-    return () => window.removeEventListener('toda_imported', fetchRoutes)
+    
+    return () => {
+      window.removeEventListener('toda_imported', fetchRoutes)
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
   }, [pathname, fetchRoutes])
 
   const handleLogout = () => {
@@ -115,15 +127,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <p className="text-xs text-muted-foreground font-medium">{userRole}</p>
               </div>
               <nav className="flex-1 space-y-1 p-4 overflow-y-auto custom-scrollbar">
-                <Link href="/dashboard" className="flex items-center rounded-md px-3 py-2 text-sm font-bold hover:bg-accent text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">Dashboard</Link>
-                <Link href="/logs" className="flex items-center rounded-md px-3 py-2 text-sm font-bold hover:bg-accent text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">Audit Logs</Link>
-                <Link href="/import" className="flex items-center rounded-md px-3 py-2 text-sm font-bold hover:bg-accent text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors">
+                <Link href="/dashboard" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/dashboard' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <LayoutDashboard className="mr-2 h-4 w-4" /> Dashboard
+                </Link>
+                <Link href="/logs" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/logs' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <ClipboardList className="mr-2 h-4 w-4" /> Audit Logs
+                </Link>
+                <Link href="/import" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/import' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                   <UploadCloud className="mr-2 h-4 w-4" /> Data Migration
                 </Link>
-                <Link href="/inactive" className="flex items-center rounded-md px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-500/10 transition-colors mt-2">
+                
+                {/* Fixed the Inactive Lines Grayish Muted Effect */}
+                <Link href="/inactive" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all mt-2 ${pathname === '/inactive' ? 'bg-muted/70 text-slate-800 dark:text-slate-200 border-l-4 border-slate-500 shadow-sm' : 'text-slate-500 hover:bg-accent hover:text-slate-900'}`}>
                   <ArchiveX className="mr-2 h-4 w-4" /> Inactive Lines
                 </Link>
-                <Link href="/settings" className="flex items-center rounded-md px-3 py-2 text-sm font-bold hover:bg-accent text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors mt-2">
+                
+                <Link href="/settings" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all mt-2 ${pathname === '/settings' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                   <Settings className="mr-2 h-4 w-4" /> Configuration
                 </Link>
                 
@@ -136,7 +155,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                         placeholder="Filter lines..." 
                         value={routeSearch}
                         onChange={(e) => setRouteSearch(e.target.value)}
-                        className="h-8 pl-8 text-xs font-semibold bg-muted/50 focus-visible:ring-1 border-border/60" 
+                        className="h-8 pl-8 text-xs font-semibold bg-background border border-border shadow-sm focus-visible:ring-2 focus-visible:ring-blue-500" 
                       />
                     </div>
                   </div>
@@ -144,8 +163,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 
                 <div className="space-y-1 mt-1">
                   {filteredRoutes.map((route) => (
-                    <Link key={route} href={`/toda/${route}`} className="flex items-center rounded-md px-3 py-2 text-sm font-bold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-accent transition-colors">
-                      {route}
+                    <Link key={route} href={`/toda/${route}`} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === `/toda/${route}` ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                      <Map className="mr-2 h-4 w-4 opacity-50" /> {route}
                     </Link>
                   ))}
                   {activeRoutes.length > 0 && filteredRoutes.length === 0 && (
@@ -154,7 +173,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </div>
               </nav>
               <div className="p-4 border-t border-border space-y-4 bg-muted/10">
-                <p className="text-xs font-bold text-muted-foreground">Status: <span className="text-emerald-500">Online</span></p>
+                <p className="text-xs font-bold text-muted-foreground">
+                  Status: <span className={isNetworkOnline ? "text-emerald-500" : "text-red-500"}>{isNetworkOnline ? "Online & Syncing" : "Offline (Local Mode)"}</span>
+                </p>
                 <button 
                   onClick={handleLogout} 
                   className="w-full flex items-center justify-center gap-2 py-3 bg-card border border-border hover:bg-red-500/10 hover:text-red-600 hover:border-red-500/30 text-muted-foreground rounded-lg text-sm font-black shadow-sm transition-all"

@@ -17,7 +17,6 @@ export default function MassImport() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      // Browsers can handle selecting 10,000 files, we store them instantly in React state
       setFiles(Array.from(e.target.files));
     }
   };
@@ -31,7 +30,6 @@ export default function MassImport() {
 
     try {
       if (isDatabaseFile) {
-        // Handle Direct Database Migration (.db)
         const formData = new FormData();
         formData.append("file", files[0]);
 
@@ -45,7 +43,6 @@ export default function MassImport() {
         const data = await res.json();
         setSuccessMsg(`Database seamlessly merged! Added ${data.imported} new records.`);
       } else {
-        // Handle Standard Legacy Chunks (.docx, .xlsx, .csv)
         if (!selectedRoute.trim()) {
           setErrorMsg("Please provide a valid Target Route.");
           setUploading(false);
@@ -53,8 +50,6 @@ export default function MassImport() {
         }
 
         let importedTotal = 0;
-        
-        //UPGRADED: 500 files per chunk. Handles 10,000 files in just 20 rapid-fire requests.
         const CHUNK_SIZE = 500; 
         const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
         const formattedRoute = selectedRoute.trim().toUpperCase();
@@ -77,7 +72,6 @@ export default function MassImport() {
           setProgress(Math.round(((i + 1) / totalChunks) * 100));
         }
         
-        // Broadcast custom event so the Sidebar instantly refreshes its TODA list
         window.dispatchEvent(new Event('toda_imported'));
         setSuccessMsg(`Successfully extracted and imported ${importedTotal} unique records for ${formattedRoute}.`);
       }
@@ -93,12 +87,12 @@ export default function MassImport() {
   };
 
   return (
-    <div className="p-6 md:p-8 max-w-4xl animate-in fade-in duration-500">
+    <div className="p-6 md:p-8 animate-in fade-in duration-500 w-full max-w-[1600px]">
       <div className="flex items-center gap-3 mb-8">
         <UploadCloud className="w-8 h-8 text-blue-600" />
         <div>
-          <h1 className="text-3xl font-black tracking-tight">System Data Migration</h1>
-          <p className="text-muted-foreground mt-1 font-medium">Extract legacy documents or merge external SQLite databases.</p>
+          <h1 className="text-3xl font-black tracking-tight">Import Records</h1>
+          <p className="text-muted-foreground mt-1 font-medium">Upload legacy municipal files or backup databases to add them to the system.</p>
         </div>
       </div>
 
@@ -122,8 +116,16 @@ export default function MassImport() {
                 type="text"
                 value={selectedRoute} 
                 onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}
-                placeholder="Required for .docx/.csv files"
-                className="w-full bg-input/50 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (files.length > 0 && selectedRoute.trim() && !uploading) {
+                      executeUpload();
+                    }
+                  }
+                }}
+                placeholder="E.g. BATODA (Required for Word/Excel files)"
+                className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all"
               />
             </div>
           )}
@@ -158,13 +160,13 @@ export default function MassImport() {
             <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4">
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
               <div>
-                <p className="text-sm font-bold">{isDatabaseFile ? "Merging Database Integrity..." : "Extracting Data Payload"}</p>
-                <p className="text-xs text-muted-foreground font-medium mt-1">Please do not close this window.</p>
+                <p className="text-sm font-bold">{isDatabaseFile ? "Merging Database Records..." : "Processing Files..."}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-1">Please wait and do not close this window.</p>
               </div>
               {!isDatabaseFile && (
                 <>
-                  <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                    <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                  <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner">
+                    <div className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out" style={{ width: `${Math.max(progress, 5)}%` }}></div>
                   </div>
                   <p className="text-xs font-bold text-blue-600">{progress}% Complete</p>
                 </>
