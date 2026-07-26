@@ -4,11 +4,10 @@ import platform
 import subprocess
 import re
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from datetime import datetime
 from database import BASE_DIR
 
-# DEFINITIVE FIX: Locates template.docx inside the PyInstaller .exe memory
 def get_resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
@@ -49,18 +48,30 @@ def replace_text_in_paragraph(paragraph, mapping, sig_path=None):
                 val = str(mapping[key])
                 run = paragraph.add_run(val)
                 run.bold = True 
+                
+                # ISO FIX: Forcefully clamp the SBN Number to Font Size 12
+                if key in ["[SBN_NO]", "{{SBN_NO}}"]:
+                    run.font.size = Pt(12)
+                elif base_font_size: 
+                    run.font.size = base_font_size
+                    
                 if base_font_name: run.font.name = base_font_name
-                if base_font_size: run.font.size = base_font_size
     else:
         if clean_text:
             run = paragraph.add_run(clean_text)
             if base_font_name: run.font.name = base_font_name
             if base_font_size: run.font.size = base_font_size
 
-    # FIX: Insert signature with a strict width of 1.2 Inches so it doesn't bloat the document
     if has_sig and sig_path and os.path.exists(sig_path):
         run = paragraph.add_run()
         run.add_picture(sig_path, width=Inches(1.2))
+
+# ISO FIX: Strictly return empty strings for invalid legacy data
+def clean_val(v):
+    if not v: return ""
+    s = str(v).strip().upper()
+    if s in ["NAN", "NONE", "N/A", "UNKNOWN", "NULL"]: return ""
+    return s
 
 def generate_certificate(data: dict, settings: dict, template_path: str = "template.docx", output_dir: str = "exports"):
     out_path = os.path.join(BASE_DIR, output_dir)
@@ -78,9 +89,6 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     valid_until_obj = data.get("valid_until", datetime(issue_date_obj.year, 12, 31))
     enable_esign = settings.get("enable_esignature", False)
 
-    plate_val = data.get("plate_no", "").strip()
-    if not plate_val or plate_val.upper() == "NAN": plate_val = "      " 
-
     replacements = {
         "[SBN_NO]": data.get("sbn_no", ""),
         "{{SBN_NO}}": data.get("sbn_no", ""),
@@ -88,14 +96,14 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
         "{{NAME}}": data.get("operator_name", "").upper(),
         "[ADDRESS]": data.get("address", "").upper(),
         "{{ADDRESS}}": data.get("address", "").upper(),
-        "[MOTOR_NO]": data.get("motor_no", ""),
-        "{{MOTOR_NO}}": data.get("motor_no", ""),
-        "[CHASSIS_NO]": data.get("chassis_no", ""),
-        "{{CHASSIS_NO}}": data.get("chassis_no", ""),
-        "[MAKE]": data.get("make", "").upper(),
-        "{{MAKE}}": data.get("make", "").upper(),
-        "[PLATE_NO]": plate_val,
-        "{{PLATE_NO}}": plate_val,
+        "[MOTOR_NO]": clean_val(data.get("motor_no")),
+        "{{MOTOR_NO}}": clean_val(data.get("motor_no")),
+        "[CHASSIS_NO]": clean_val(data.get("chassis_no")),
+        "{{CHASSIS_NO}}": clean_val(data.get("chassis_no")),
+        "[MAKE]": clean_val(data.get("make")),
+        "{{MAKE}}": clean_val(data.get("make")),
+        "[PLATE_NO]": clean_val(data.get("plate_no")),
+        "{{PLATE_NO}}": clean_val(data.get("plate_no")),
         "[ROUTE]": data.get("driving_route", "").upper(),
         "{{ROUTE}}": data.get("driving_route", "").upper(),
         "[ISSUE_DATE]": issue_date_obj.strftime("%B %d, %Y"),
@@ -123,15 +131,29 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     
     doc.save(docx_path)
 
+    # ISO FIX: Fortified Windows COM Dispatcher with un-initialization guarantees
     try:
         if platform.system() == "Windows":
-            from docx2pdf import convert
-            convert(docx_path, pdf_path)
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize() 
+            word = win32com.client.DispatchEx("Word.Application")
+            try:
+                word.Visible = False
+                word.DisplayAlerts = 0
+                doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
+                doc_obj.SaveAs(pdf_path, FileFormat=17)
+                doc_obj.Close()
+            finally:
+                word.Quit()
+                pythoncom.CoUninitialize()
+                
             if os.path.exists(pdf_path): return pdf_path, "application/pdf"
         else:
             subprocess.run(['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path], check=True)
             if os.path.exists(pdf_path): return pdf_path, "application/pdf"
-    except Exception:
+    except Exception as e:
         pass
         
+    # If MS Word is completely missing on the host PC, fallback to docx securely
     return docx_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

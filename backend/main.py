@@ -39,6 +39,7 @@ try:
     import subprocess
     import time
     import calendar
+    import platform
     from datetime import timedelta
     from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
     from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -78,11 +79,9 @@ try:
         expose_headers=["Content-Disposition"]
     )
 
-    # AUTOMATED DAILY BACKUP THREAD
     def automated_backup():
         while True:
             now = datetime.now()
-            # Executes exactly at 4:45 PM (16:45)
             if now.hour == 16 and now.minute == 45:
                 backup_dir = os.path.join(BASE_DIR, "backups")
                 if not os.path.exists(backup_dir):
@@ -97,14 +96,10 @@ try:
                         force_log(f"Automated backup secured: {zip_name}")
                     except Exception as e:
                         force_log(f"Backup failed: {e}")
-                
-                # Sleep for 60 seconds so it doesn't trigger multiple times in the same minute
                 time.sleep(60)
             else:
-                # Check time every 30 seconds
                 time.sleep(30)
 
-    # Start the automated backup alongside the LAN Sync
     threading.Thread(target=automated_backup, daemon=True).start()
     start_lan_sync()
 
@@ -175,7 +170,7 @@ try:
 
     def sanitize_plate(plate: str, chassis: str, motor: str) -> str:
         p, c, m = str(plate).strip().upper(), str(chassis).strip().upper(), str(motor).strip().upper()
-        invalid_markers = ["NAN", "NONE", "N/A", "NO PLATE", "TBA", "FOR REG", "NEW", "UNREGISTERED", "CHASSIS", "MOTOR"]
+        invalid_markers = ["NAN", "NONE", "N/A", "NO PLATE", "TBA", "FOR REG", "NEW", "UNREGISTERED", "CHASSIS", "MOTOR", "UNKNOWN"]
         if not p or any(marker in p for marker in invalid_markers):
             return ""
         if p == c or p == m:
@@ -488,11 +483,13 @@ try:
         log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
+    # ISO FIX: Returns the file so the frontend browser can trigger the Print Dialog Preview
     @app.post("/franchise/generate/{record_id}")
     def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
         if not record: raise HTTPException(status_code=404)
         settings = init_settings(db)
+        
         doc_path, media_type = generate_certificate({
             "sbn_no": record.sbn_no, "operator_name": record.operator_name,
             "address": record.address, "motor_no": record.motor_no,
@@ -501,9 +498,11 @@ try:
             "driving_route": record.driving_route,
             "issue_date": record.issue_date, "valid_until": record.valid_until
         }, {"committee_chair": settings.committee_chair, "enable_esignature": settings.enable_esignature})
+        
         if os.path.exists(doc_path):
             log_action(db, f"{current_user.first_name} {current_user.last_name}", "PRINT_MTOP", record.id, record.route, f"Generated MTOP Document")
             return FileResponse(path=doc_path, filename=os.path.basename(doc_path), media_type=media_type)
+            
         raise HTTPException(status_code=500)
 
     @app.get("/logs/record/{record_id}")
@@ -533,7 +532,6 @@ try:
         current_year = get_pht_now().year
         filtered_records = []
         
-        # Apply the selected status filter identically to the frontend logic
         for r in records_query:
             issue_year = r.issue_date.year if r.issue_date else 0
             
@@ -551,6 +549,7 @@ try:
             raise HTTPException(status_code=404, detail="No records found matching this filter")
             
         csv_data = []
+        # ISO FIX: Strictly formatted columns for export
         for r in filtered_records:
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",

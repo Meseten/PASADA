@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download } from "lucide-react"
 
-const API_URL = "http://127.0.0.1:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 interface Member {
   id: string; sbn_no: string; operator_name: string; address: string; 
@@ -137,7 +137,6 @@ export default function TodaClient() {
     setIsExporting(true)
     const token = localStorage.getItem("token")
     try {
-      // Pass the selected status filter to the backend for accurate export filtering
       const response = await fetch(`${API_URL}/export/masterlist/${safeRouteName}?status_filter=${statusFilter}`, {
         headers: { "Authorization": `Bearer ${token}` }
       })
@@ -164,6 +163,7 @@ export default function TodaClient() {
     }
   }
 
+  // ISO FIX: Uses hidden iframe to trigger Native Print Dialog Box for previewing
   const handleNativePrint = async (member: Member) => {
     setIsGeneratingId(member.id)
     const token = localStorage.getItem("token")
@@ -174,7 +174,6 @@ export default function TodaClient() {
         const url = window.URL.createObjectURL(blob)
         
         if (blob.type === "application/pdf") {
-          
           const existingIframe = document.getElementById('pasada-print-frame')
           if (existingIframe) {
             document.body.removeChild(existingIframe)
@@ -186,17 +185,18 @@ export default function TodaClient() {
           iframe.src = url
           document.body.appendChild(iframe)
           
-          setTimeout(() => {
-            try {
-              iframe.contentWindow?.focus()
-              iframe.contentWindow?.print()
-            } catch (e) {
-              console.error(e)
-            }
-            setIsGeneratingId(null)
-            setTimeout(() => window.URL.revokeObjectURL(url), 1000)
-          }, 1000)
-          
+          iframe.onload = () => {
+              setTimeout(() => {
+                try {
+                  iframe.contentWindow?.focus()
+                  iframe.contentWindow?.print()
+                } catch (e) {
+                  console.error(e)
+                }
+                setIsGeneratingId(null)
+                setTimeout(() => window.URL.revokeObjectURL(url), 1000)
+              }, 500)
+          }
         } else {
           const a = document.createElement('a')
           a.style.display = 'none'
@@ -219,6 +219,7 @@ export default function TodaClient() {
     }
   }
 
+  // ISO FIX: Standard fallback for downloading batch documents without triggering 50 print dialogs
   const downloadBatchDocument = async (member: Member) => {
     const token = localStorage.getItem("token")
     try {
@@ -323,7 +324,6 @@ export default function TodaClient() {
 
   const currentYear = new Date().getFullYear()
 
-  // Dynamic filter combining text search and status classification
   const filteredMembers = members.filter(m => {
     const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
     
@@ -363,7 +363,6 @@ export default function TodaClient() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           
-          {/* New Status Filter Dropdown */}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
@@ -407,7 +406,7 @@ export default function TodaClient() {
               <div className="space-y-2 w-full">
                 <p className="font-bold text-lg">Compiling A4 Documents</p>
                 <p className="text-sm text-muted-foreground font-medium">
-                  Processing {batchProgress.current} of {batchProgress.total} records...
+                  Preparing {batchProgress.current} of {batchProgress.total} records...
                 </p>
                 <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
                   <div 
@@ -470,7 +469,7 @@ export default function TodaClient() {
               <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-500/20 p-4 rounded-xl flex items-start gap-3">
                 <FileText className="text-blue-600 mt-0.5 shrink-0" size={18} />
                 <p className="text-xs text-blue-600 dark:text-blue-400 font-semibold leading-relaxed">
-                  Batch printing securely generates exact .docx files formatted specifically for A4 paper. This process runs sequentially without interrupting LAN synchronization.
+                  Batch printing natively routes document processing directly to the OS print spooler. Ensure your default printer is active.
                 </p>
               </div>
             </div>
@@ -660,7 +659,7 @@ export default function TodaClient() {
                         <TableCell className="text-right space-x-1.5 pr-4">
                           <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}><History className="h-3.5 w-3.5" /></Button>
                           <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Modify Record" onClick={() => handleOpenEdit(member)}><Edit className="h-3.5 w-3.5" /></Button>
-                          <Button variant="outline" size="icon" disabled={isGeneratingId === member.id} className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-blue-500/30 shadow-sm" title="Native Browser Print" onClick={() => handleNativePrint(member)}>
+                          <Button variant="outline" size="icon" disabled={isGeneratingId === member.id} className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-blue-500/30 shadow-sm" title="Print Document" onClick={() => handleNativePrint(member)}>
                             {isGeneratingId === member.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Printer className="h-3.5 w-3.5 text-blue-600" />}
                           </Button>
                         </TableCell>
