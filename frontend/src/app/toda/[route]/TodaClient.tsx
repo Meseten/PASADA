@@ -39,6 +39,7 @@ export default function TodaClient() {
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [isGeneratingId, setIsGeneratingId] = useState<string | null>(null)
+  const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
@@ -163,7 +164,41 @@ export default function TodaClient() {
     }
   }
 
-  // ABSOLUTE FIX: Off-screen rendered iframe + setTimeout to bypass Linux PDF plugin 'onload' blocks.
+  // NEW: Download the Raw Word Document without PDF conversion
+  const handleDownloadWord = async (member: Member) => {
+    if (isDownloadingId) return;
+    setIsDownloadingId(member.id);
+    const token = localStorage.getItem("token");
+
+    try {
+      const response = await fetch(`${API_URL}/franchise/download/word/${member.id}`, { 
+        method: 'POST', 
+        headers: { "Authorization": `Bearer ${token}` } 
+      });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        const safeName = String(member.operator_name || "Unknown").replace(/\s+/g, '_');
+        a.download = `MTOP_${safeName}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        
+        setTimeout(() => {
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 1000);
+      }
+    } catch (error) {
+      console.error("Download Error", error);
+    } finally {
+      setIsDownloadingId(null);
+    }
+  }
+
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return; 
     setIsGeneratingId(member.id);
@@ -182,7 +217,6 @@ export default function TodaClient() {
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
           
-          // CRITICAL: Cannot be 0px or display none. Must be physically rendered but hidden off-screen.
           iframe.style.position = 'fixed';
           iframe.style.right = '-2000px';
           iframe.style.bottom = '-2000px';
@@ -191,8 +225,6 @@ export default function TodaClient() {
           iframe.src = url;
           document.body.appendChild(iframe);
 
-          // Bypassing 'onload' entirely with a hard timeout. 
-          // Instantly unlocks the UI for continuous printing immediately after.
           setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
@@ -201,12 +233,11 @@ export default function TodaClient() {
               console.error(e);
             }
             setIsGeneratingId(null);
-            
             setTimeout(() => window.URL.revokeObjectURL(url), 300000);
           }, 1500); 
 
         } else {
-          // docx fallback
+          // docx fallback if libreoffice fails
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
@@ -224,7 +255,6 @@ export default function TodaClient() {
     }
   }
 
-  // Same logic applied cleanly to batch printing.
   const downloadBatchDocument = async (member: Member) => {
     const token = localStorage.getItem("token");
     try {
@@ -399,7 +429,7 @@ export default function TodaClient() {
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="h-11 px-4 rounded-lg border border-border/60 bg-background text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+            className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] pr-10 h-11 px-4 rounded-lg border border-border/60 bg-background text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
           >
             <option value="ALL">All Records</option>
             <option value="ACTIVE">Active Only</option>
@@ -458,7 +488,7 @@ export default function TodaClient() {
                 <select
                   value={batchFilterType}
                   onChange={(e) => setBatchFilterType(e.target.value)}
-                  className="flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
                 >
                   <option value="TODAY_ALL">Today - Full Day Processing</option>
                   <option value="TODAY_MORNING">Today - Morning Session (12AM - 11:59AM)</option>
@@ -690,10 +720,17 @@ export default function TodaClient() {
                         </TableCell>
                         <TableCell>{statusBadge}</TableCell>
                         <TableCell className="text-right space-x-1.5 pr-4">
-                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}><History className="h-3.5 w-3.5" /></Button>
-                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Modify Record" onClick={() => handleOpenEdit(member)}><Edit className="h-3.5 w-3.5" /></Button>
+                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Modify Record" onClick={() => handleOpenEdit(member)}>
+                            <Edit className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button variant="outline" size="icon" disabled={isDownloadingId === member.id} className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Download Word File" onClick={() => handleDownloadWord(member)}>
+                            {isDownloadingId === member.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5 text-blue-600" />}
+                          </Button>
                           <Button variant="outline" size="icon" disabled={isGeneratingId === member.id} className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-blue-500/30 shadow-sm" title="Print Document" onClick={() => handleNativePrint(member)}>
                             {isGeneratingId === member.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Printer className="h-3.5 w-3.5 text-blue-600" />}
+                          </Button>
+                          <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}>
+                            <History className="h-3.5 w-3.5" />
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -714,7 +751,7 @@ export default function TodaClient() {
                 <select 
                   value={rowsPerPage} 
                   onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                  className="h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:16px_16px] h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer pr-8"
                 >
                   <option value={50}>50</option>
                   <option value={100}>100</option>

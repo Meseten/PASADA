@@ -2,17 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 
-const API_URL = "http://127.0.0.1:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState("general");
   
-  // General Tab
+  // General Tab (E-Signature completely removed)
   const [chairName, setChairName] = useState("");
-  const [enableEsign, setEnableEsign] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState("");
   
   // Backup Tab
   const [targetToda, setTargetToda] = useState("ALL");
@@ -47,7 +44,6 @@ export default function Settings() {
       .then(res => res.json())
       .then(data => {
         setChairName(data.committee_chair || "");
-        setEnableEsign(data.enable_esignature || false);
       });
 
     fetch(`${API_URL}/stats/global`)
@@ -57,7 +53,7 @@ export default function Settings() {
           setAvailableRoutes(data.route_breakdown.map((r: any) => r.route));
         }
       });
-  }, []);
+  }, [currentYear]);
 
   useEffect(() => {
     if (activeTab === "network") {
@@ -78,24 +74,11 @@ export default function Settings() {
     await fetch(`${API_URL}/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("token")}` },
-      body: JSON.stringify({ committee_chair: chairName, enable_esignature: enableEsign })
+      // E-signature variable removed from payload
+      body: JSON.stringify({ committee_chair: chairName })
     });
     setLoading(false);
     triggerSuccess("Configuration saved successfully.");
-  };
-
-  const uploadSignature = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files?.[0]) return;
-    const file = e.target.files[0];
-    const formData = new FormData();
-    formData.append("file", file);
-    await fetch(`${API_URL}/settings/signature`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-      body: formData
-    });
-    setUploadedFileName(file.name);
-    triggerSuccess("E-Signature uploaded successfully.");
   };
 
   const handleMassExport = async () => {
@@ -220,38 +203,26 @@ export default function Settings() {
 
       <div className="bg-card border border-border rounded-b-2xl rounded-tr-2xl p-6 md:p-8 shadow-sm">
         {activeTab === "general" && (
-          <div className="space-y-8">
+          <div className="space-y-8 max-w-2xl">
             <h2 className="text-xl font-black border-b border-border pb-4">General Settings</h2>
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Committee Chairman Name</label>
-                <input type="text" value={chairName} onChange={(e) => setChairName(e.target.value.toUpperCase())} className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:ring-2 focus:ring-blue-500" />
-              </div>
-              
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Upload Transparent Signature (.png)</label>
-                <div className="flex items-center gap-3">
-                  <input type="file" accept="image/png" onChange={uploadSignature} className="flex-1 text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer bg-background border border-border rounded-lg" />
-                  {uploadedFileName && <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">{uploadedFileName}</Badge>}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between p-6 border border-border rounded-xl bg-muted/20">
-              <div>
-                <h3 className="font-bold text-base">Enable Digital Signatures</h3>
-                <p className="text-sm text-muted-foreground">Automatically add the uploaded signature to all printed MTOP documents.</p>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" checked={enableEsign} onChange={(e) => setEnableEsign(e.target.checked)} className="sr-only peer" />
-                <div className="w-11 h-6 bg-slate-200 rounded-full peer peer-checked:bg-blue-600 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
-              </label>
+            <div className="space-y-3">
+              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Committee Chairman Name</label>
+              <input 
+                type="text" 
+                value={chairName} 
+                onChange={(e) => setChairName(e.target.value.toUpperCase())} 
+                className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:ring-2 focus:ring-blue-500" 
+                placeholder="e.g. RODRIGO A. CASTILLO"
+              />
+              <p className="text-xs text-muted-foreground font-medium">
+                This text will replace the `[CHAIRMAN_NAME]` or `{"{{CHAIRMAN_NAME}}"}` tag in your document templates.
+              </p>
             </div>
             
-            <button onClick={saveSettings} disabled={loading} className="bg-blue-600 text-white font-bold px-8 py-3 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition-all shadow-md">
+            <button onClick={saveSettings} disabled={loading} className="bg-blue-600 text-white font-bold px-8 py-3 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition-all shadow-md w-max">
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-              Save Changes
+              Save Configuration
             </button>
           </div>
         )}

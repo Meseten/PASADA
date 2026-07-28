@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe, MapPin, Settings2, Loader2 } from "lucide-react";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
-const API_URL = "http://127.0.0.1:43888";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 const COLORS = ['#10b981', '#f59e0b', '#ef4444']; 
 
 interface GlobalStats {
@@ -226,7 +226,8 @@ export default function Dashboard() {
                     labelFormatter={(label) => `${label}`} 
                     formatter={(value: any) => [value, ""]} 
                     separator="" 
-                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold', backgroundColor: '#1e293b', color: '#f8fafc', border: 'none' }}
+                    itemStyle={{ color: '#60a5fa' }}
                     cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} 
                   />
                   <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
@@ -251,7 +252,8 @@ export default function Dashboard() {
                     labelFormatter={(label) => `Week of ${label}`} 
                     formatter={(value: any) => [value, ""]} 
                     separator="" 
-                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold', backgroundColor: '#1e293b', color: '#f8fafc', border: 'none' }}
+                    itemStyle={{ color: '#60a5fa' }}
                     cursor={{ stroke: 'rgba(59, 130, 246, 0.2)' }} 
                   />
                   <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
@@ -276,7 +278,8 @@ export default function Dashboard() {
                     labelFormatter={(label) => `${label}`} 
                     formatter={(value: any) => [value, ""]} 
                     separator="" 
-                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold' }} 
+                    contentStyle={{ fontSize: '10px', borderRadius: '4px', padding: '2px 6px', fontWeight: 'bold', backgroundColor: '#1e293b', color: '#f8fafc', border: 'none' }}
+                    itemStyle={{ color: '#60a5fa' }}
                     cursor={{ fill: 'transparent' }} 
                   />
                   <Bar dataKey="val" fill="#3b82f6" radius={[2, 2, 0, 0]} />
@@ -304,12 +307,14 @@ export default function Dashboard() {
                 <Tooltip 
                   formatter={(value: any) => [value, ""]} 
                   separator="" 
-                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px', fontWeight: 'bold', border: '1px solid hsl(var(--border))' }} 
+                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px 8px', fontWeight: 'bold', border: 'none', backgroundColor: '#1e293b', color: '#f8fafc' }}
+                  itemStyle={{ color: '#60a5fa' }}
                 />
               </PieChart>
             </ResponsiveContainer>
           </div>
-          <div className="flex justify-center gap-3 text-[9px] font-bold">
+          {/* FIX: Forced the PieChart text below to stand out in dark mode */}
+          <div className="flex justify-center gap-3 text-[9px] font-bold text-slate-700 dark:text-slate-200">
             <div className="flex items-center gap-1"><div className="w-2 h-2 bg-emerald-500 rounded-sm"></div> Active</div>
             <div className="flex items-center gap-1"><div className="w-2 h-2 bg-amber-500 rounded-sm"></div> Pending</div>
             <div className="flex items-center gap-1"><div className="w-2 h-2 bg-red-500 rounded-sm"></div> Revoked</div>
@@ -325,11 +330,13 @@ export default function Dashboard() {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={stats.route_breakdown}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={8} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
-                <YAxis fontSize={9} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
+                {/* ABSOLUTE FIX: Stripped variable inheritance, forced hardcoded Slate-400 Hex for SVG visibility */}
+                <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={8} tickLine={false} axisLine={false} tick={{ fill: '#94a3b8' }} />
+                <YAxis fontSize={9} tickLine={false} axisLine={false} tick={{ fill: '#94a3b8' }} />
                 <Tooltip 
                   cursor={{ fill: 'transparent' }} 
-                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px 8px', fontWeight: 'bold', border: '1px solid hsl(var(--border))' }}
+                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px 8px', fontWeight: 'bold', border: 'none', backgroundColor: '#1e293b', color: '#f8fafc' }}
+                  itemStyle={{ color: '#60a5fa' }}
                   formatter={(value: any) => [value, "Ops"]}
                 />
                 <Bar dataKey="count" fill="#3b82f6" radius={[3, 3, 0, 0]} />
@@ -350,10 +357,11 @@ export default function Dashboard() {
             <button
               key={toda}
               onClick={() => setActivePrediction(toda)}
+              // FIX: Guaranteed pure white text on the active darkmode button
               className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all border shadow-sm ${
                 activePrediction === toda 
-                  ? "bg-slate-900 text-white border-slate-900 dark:bg-slate-100 dark:text-slate-900" 
-                  : "bg-background text-muted-foreground hover:bg-muted border-border"
+                  ? "bg-slate-900 text-white border-slate-900 dark:bg-blue-600 dark:text-white dark:border-blue-600" 
+                  : "bg-background text-slate-700 dark:text-slate-200 border-border hover:bg-slate-100 dark:hover:bg-slate-800"
               }`}
             >
               {toda}

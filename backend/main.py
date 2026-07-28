@@ -59,6 +59,8 @@ try:
     from fastapi.responses import FileResponse, Response
     import starlette.formparsers
     from openpyxl.styles import PatternFill, Font, Alignment
+    # FIX: Safely import get_column_letter to prevent MergedCell crashes
+    from openpyxl.utils import get_column_letter
     
     force_log("All libraries loaded successfully!")
 
@@ -138,7 +140,7 @@ try:
 
     class SettingsUpdate(BaseModel):
         committee_chair: str
-        enable_esignature: bool
+        enable_esignature: Optional[bool] = False 
 
     class PasswordUpdate(BaseModel):
         new_password: str
@@ -232,7 +234,6 @@ try:
     def update_settings(settings: SettingsUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         sys_settings = init_settings(db)
         sys_settings.committee_chair = settings.committee_chair
-        sys_settings.enable_esignature = settings.enable_esignature
         db.commit()
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
         return {"status": "success"}
@@ -249,14 +250,6 @@ try:
         db.commit()
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
         return {"status": "success", "message": f"Updated demographic data for {route_name.upper()}"}
-
-    @app.post("/settings/signature")
-    async def upload_signature(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        sig_path = os.path.join(BASE_DIR, "signature.png")
-        with open(sig_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SIGNATURE", "0", "SYSTEM", "Uploaded new E-Signature")
-        return {"status": "success"}
 
     @app.get("/system/network")
     def get_network_status():
@@ -480,6 +473,27 @@ try:
         log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
+    @app.post("/franchise/download/word/{record_id}")
+    def download_word_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
+        if not record: raise HTTPException(status_code=404)
+        settings = init_settings(db)
+        
+        doc_path, media_type = generate_certificate({
+            "sbn_no": record.sbn_no, "operator_name": record.operator_name,
+            "address": record.address, "motor_no": record.motor_no,
+            "chassis_no": record.chassis_no, "make": record.make,
+            "plate_no": record.plate_no, "route": record.route,
+            "driving_route": record.driving_route,
+            "issue_date": record.issue_date, "valid_until": record.valid_until
+        }, {"committee_chair": settings.committee_chair}, return_format="docx")
+        
+        if os.path.exists(doc_path):
+            log_action(db, f"{current_user.first_name} {current_user.last_name}", "DOWNLOAD_DOCX", record.id, record.route, f"Downloaded raw MTOP Word Document")
+            return FileResponse(path=doc_path, filename=os.path.basename(doc_path), media_type=media_type)
+            
+        raise HTTPException(status_code=500)
+
     @app.post("/franchise/generate/{record_id}")
     def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
@@ -493,7 +507,7 @@ try:
             "plate_no": record.plate_no, "route": record.route,
             "driving_route": record.driving_route,
             "issue_date": record.issue_date, "valid_until": record.valid_until
-        }, {"committee_chair": settings.committee_chair, "enable_esignature": settings.enable_esignature})
+        }, {"committee_chair": settings.committee_chair}, return_format="pdf")
         
         if os.path.exists(doc_path):
             log_action(db, f"{current_user.first_name} {current_user.last_name}", "PRINT_MTOP", record.id, record.route, f"Generated MTOP Document")
@@ -566,28 +580,45 @@ try:
             
             total_row_count = len(filtered_records) + 2
 
-            ws['A1'] = f"=COUNTA(A3:A{total_row_count})"
-            ws['A1'].font = Font(bold=True, size=12)
+            ws.merge_cells('A1:B1')
+            ws['A1'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
+            ws['A1'].font = Font(bold=True, size=16)
+            ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+            
+            for col_num in range(1, 9):
+                cell = ws.cell(row=2, column=col_num)
+                cell.font = Font(bold=True, size=11)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
             
             red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
             yellow_fill = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
             
-            ws['I2'] = "LEGEND & TALLY"
-            ws['I2'].font = Font(bold=True)
+            ws['J2'] = "LEGEND & TALLY"
+            ws['J2'].font = Font(bold=True, size=11)
+            ws['J2'].alignment = Alignment(horizontal='center', vertical='center')
+            ws.merge_cells('J2:K2')
             
-            ws['I3'] = "ACTIVE"
-            ws['J3'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
-            ws['J3'].font = Font(bold=True)
+            ws['J3'] = "ACTIVE"
+            ws['J3'].font = Font(bold=True, size=11)
+            ws['K3'] = f'=COUNTIF(H3:H{total_row_count}, "ACTIVE")'
+            ws['K3'].font = Font(bold=True, size=11)
+            ws['K3'].alignment = Alignment(horizontal='center', vertical='center')
 
-            ws['I4'] = "FLAGGED"
-            ws['I4'].fill = yellow_fill
-            ws['J4'] = f'=COUNTIF(H3:H{total_row_count}, "FLAGGED")'
-            ws['J4'].font = Font(bold=True)
+            ws['J4'] = "FLAGGED"
+            ws['J4'].font = Font(bold=True, size=11)
+            ws['J4'].fill = yellow_fill
+            ws['K4'] = f'=COUNTIF(H3:H{total_row_count}, "FLAGGED")'
+            ws['K4'].font = Font(bold=True, size=11)
+            ws['K4'].fill = yellow_fill
+            ws['K4'].alignment = Alignment(horizontal='center', vertical='center')
 
-            ws['I5'] = "VACANT / REVOKED"
-            ws['I5'].fill = red_fill
-            ws['J5'] = f'=COUNTIF(H3:H{total_row_count}, "VACANT / REVOKED")'
-            ws['J5'].font = Font(bold=True)
+            ws['J5'] = "VACANT / REVOKED"
+            ws['J5'].font = Font(bold=True, size=11)
+            ws['J5'].fill = red_fill
+            ws['K5'] = f'=COUNTIF(H3:H{total_row_count}, "VACANT / REVOKED")'
+            ws['K5'].font = Font(bold=True, size=11)
+            ws['K5'].fill = red_fill
+            ws['K5'].alignment = Alignment(horizontal='center', vertical='center')
 
             for row_num, r in enumerate(filtered_records, start=3):
                 issue_year = r.issue_date.year if r.issue_date else 0
@@ -606,22 +637,26 @@ try:
                 ws.cell(row=row_num, column=8, value=status_text)
                 
                 for col_num in range(1, 9):
+                    cell = ws.cell(row=row_num, column=col_num)
                     if fill_color:
-                        ws.cell(row=row_num, column=col_num).fill = fill_color
+                        cell.fill = fill_color
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
             
-            for col in ws.columns:
-                max_length = 0
-                column = col[0].column_letter
-                if column in ['I', 'J']: 
-                    ws.column_dimensions[column].width = 22
+            # FIX: Safely calculate max column widths using get_column_letter to avoid MergedCell crash
+            for col_idx in range(1, ws.max_column + 1):
+                col_letter = get_column_letter(col_idx)
+                if col_letter in ['J', 'K']:
+                    ws.column_dimensions[col_letter].width = 20
                     continue
-                for cell in col:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                ws.column_dimensions[column].width = max_length + 2
+                
+                max_length = 0
+                for row_idx in range(1, ws.max_row + 1):
+                    cell_value = ws.cell(row=row_idx, column=col_idx).value
+                    if cell_value:
+                        length = len(str(cell_value))
+                        if length > max_length:
+                            max_length = length
+                ws.column_dimensions[col_letter].width = max_length + 2
 
         output.seek(0)
         
