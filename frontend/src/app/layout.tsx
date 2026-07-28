@@ -1,6 +1,5 @@
 "use client"
 
-import { Inter } from "next/font/google"
 import "./globals.css"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
@@ -8,8 +7,6 @@ import { ThemeProvider, useTheme } from "next-themes"
 import { useEffect, useState, useCallback } from "react"
 import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map } from "lucide-react"
 import { Input } from "@/components/ui/input"
-
-const inter = Inter({ subsets: ["latin"] })
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
@@ -98,7 +95,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   if (isAuthPage) {
     return (
       <html lang="en" suppressHydrationWarning>
-        <body className={inter.className}>
+        <body className="font-sans antialiased text-foreground bg-background">
           <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
             {children}
           </ThemeProvider>
@@ -111,7 +108,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={inter.className}>
+      <body className="font-sans antialiased text-foreground bg-background">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
           <div className="flex h-screen overflow-hidden bg-background">
             <aside className="w-64 border-r bg-card hidden md:flex flex-col">
@@ -137,7 +134,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   <UploadCloud className="mr-2 h-4 w-4" /> Data Migration
                 </Link>
                 
-                {/* Fixed the Inactive Lines Grayish Muted Effect */}
                 <Link href="/inactive" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all mt-2 ${pathname === '/inactive' ? 'bg-muted/70 text-slate-800 dark:text-slate-200 border-l-4 border-slate-500 shadow-sm' : 'text-slate-500 hover:bg-accent hover:text-slate-900'}`}>
                   <ArchiveX className="mr-2 h-4 w-4" /> Inactive Lines
                 </Link>
