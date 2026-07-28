@@ -6,9 +6,6 @@ from datetime import datetime
 import zipfile
 import threading
 
-# ==========================================
-# 1. THE OS-LEVEL LOGGER
-# ==========================================
 user_folder = os.path.expanduser('~')
 crash_log_path = os.path.join(user_folder, "PASADA_CRASH_LOG.txt")
 
@@ -483,7 +480,6 @@ try:
         log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
-    # ISO FIX: Returns the file so the frontend browser can trigger the Print Dialog Preview
     @app.post("/franchise/generate/{record_id}")
     def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
@@ -549,7 +545,6 @@ try:
             raise HTTPException(status_code=404, detail="No records found matching this filter")
             
         csv_data = []
-        # ISO FIX: Strictly formatted columns for export
         for r in filtered_records:
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",
