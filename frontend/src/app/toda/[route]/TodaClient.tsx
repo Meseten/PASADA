@@ -163,86 +163,119 @@ export default function TodaClient() {
     }
   }
 
-  // ISO FIX: Uses hidden iframe to trigger Native Print Dialog Box for previewing
+  // ABSOLUTE FIX: Off-screen rendered iframe + setTimeout to bypass Linux PDF plugin 'onload' blocks.
   const handleNativePrint = async (member: Member) => {
-    setIsGeneratingId(member.id)
-    const token = localStorage.getItem("token")
-    try {
-      const response = await fetch(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST', headers: { "Authorization": `Bearer ${token}` } })
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = window.URL.createObjectURL(blob)
-        
-        if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame')
-          if (existingIframe) {
-            document.body.removeChild(existingIframe)
-          }
+    if (isGeneratingId) return; 
+    setIsGeneratingId(member.id);
+    const token = localStorage.getItem("token");
 
-          const iframe = document.createElement('iframe')
-          iframe.id = 'pasada-print-frame' 
-          iframe.style.display = 'none'
-          iframe.src = url
-          document.body.appendChild(iframe)
+    try {
+      const response = await fetch(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST', headers: { "Authorization": `Bearer ${token}` } });
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+
+        if (blob.type === "application/pdf") {
+          const existingIframe = document.getElementById('pasada-print-frame');
+          if (existingIframe) document.body.removeChild(existingIframe);
+
+          const iframe = document.createElement('iframe');
+          iframe.id = 'pasada-print-frame';
           
-          iframe.onload = () => {
-              setTimeout(() => {
-                try {
-                  iframe.contentWindow?.focus()
-                  iframe.contentWindow?.print()
-                } catch (e) {
-                  console.error(e)
-                }
-                setIsGeneratingId(null)
-                setTimeout(() => window.URL.revokeObjectURL(url), 1000)
-              }, 500)
-          }
-        } else {
-          const a = document.createElement('a')
-          a.style.display = 'none'
-          a.href = url
-          a.download = `MTOP_${member.sbn_no || member.plate_no}.docx`
-          document.body.appendChild(a)
-          a.click()
-          setIsGeneratingId(null)
-          
+          // CRITICAL: Cannot be 0px or display none. Must be physically rendered but hidden off-screen.
+          iframe.style.position = 'fixed';
+          iframe.style.right = '-2000px';
+          iframe.style.bottom = '-2000px';
+          iframe.style.width = '500px';
+          iframe.style.height = '500px';
+          iframe.src = url;
+          document.body.appendChild(iframe);
+
+          // Bypassing 'onload' entirely with a hard timeout. 
+          // Instantly unlocks the UI for continuous printing immediately after.
           setTimeout(() => {
-            document.body.removeChild(a)
-            window.URL.revokeObjectURL(url)
-          }, 1000)
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (e) {
+              console.error(e);
+            }
+            setIsGeneratingId(null);
+            
+            setTimeout(() => window.URL.revokeObjectURL(url), 300000);
+          }, 1500); 
+
+        } else {
+          // docx fallback
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          a.download = `MTOP_${member.sbn_no || member.plate_no}.docx`;
+          document.body.appendChild(a);
+          a.click();
+          setIsGeneratingId(null);
+          setTimeout(() => document.body.removeChild(a), 100);
         }
       } else {
-        setIsGeneratingId(null)
+        setIsGeneratingId(null);
       }
     } catch (error) {
-      setIsGeneratingId(null)
+      setIsGeneratingId(null);
     }
   }
 
-  // ISO FIX: Standard fallback for downloading batch documents without triggering 50 print dialogs
+  // Same logic applied cleanly to batch printing.
   const downloadBatchDocument = async (member: Member) => {
-    const token = localStorage.getItem("token")
+    const token = localStorage.getItem("token");
     try {
       const res = await fetch(`${API_URL}/franchise/generate/${member.id}`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${token}` }
-      })
+      });
       if (res.ok) {
-        const blob = await res.blob()
-        const url = window.URL.createObjectURL(blob)
-        const a = document.createElement("a")
-        a.style.display = 'none'
-        a.href = url
-        a.download = `MTOP_${String(member.operator_name || "Unknown").replace(/\s+/g, '_')}.docx`
-        document.body.appendChild(a)
-        a.click()
-        setTimeout(() => {
-          window.URL.revokeObjectURL(url)
-          document.body.removeChild(a)
-        }, 1000)
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        
+        if (blob.type === "application/pdf") {
+          const iframe = document.createElement('iframe');
+          iframe.style.position = 'fixed';
+          iframe.style.right = '-2000px';
+          iframe.style.bottom = '-2000px';
+          iframe.style.width = '500px';
+          iframe.style.height = '500px';
+          iframe.src = url;
+          document.body.appendChild(iframe);
+          
+          return new Promise<void>((resolve) => {
+            setTimeout(() => {
+              try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+              } catch (e) {
+                console.error(e);
+              }
+              setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(iframe);
+                resolve();
+              }, 1000);
+            }, 1500);
+          });
+        } else {
+          const a = document.createElement("a");
+          a.style.display = 'none';
+          a.href = url;
+          a.download = `MTOP_${String(member.operator_name || "Unknown").replace(/\s+/g, '_')}.docx`;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+          }, 1000);
+        }
       }
     } catch (err) {
-      console.error(err)
+      console.error(err);
     }
   }
 
@@ -396,7 +429,7 @@ export default function TodaClient() {
               <Printer className="h-6 w-6 text-blue-600" /> Print Documents (A4)
             </DialogTitle>
             <DialogDescription>
-              Select temporal parameters for mass document generation. Output is strictly formatted for standard A4 Municipal Paper.
+              Select temporal parameters for mass document generation.
             </DialogDescription>
           </DialogHeader>
 
@@ -406,7 +439,7 @@ export default function TodaClient() {
               <div className="space-y-2 w-full">
                 <p className="font-bold text-lg">Compiling A4 Documents</p>
                 <p className="text-sm text-muted-foreground font-medium">
-                  Preparing {batchProgress.current} of {batchProgress.total} records...
+                  Opening Print Dialog {batchProgress.current} of {batchProgress.total}...
                 </p>
                 <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
                   <div 
@@ -469,7 +502,7 @@ export default function TodaClient() {
               <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-500/20 p-4 rounded-xl flex items-start gap-3">
                 <FileText className="text-blue-600 mt-0.5 shrink-0" size={18} />
                 <p className="text-xs text-blue-600 dark:text-blue-400 font-semibold leading-relaxed">
-                  Batch printing natively routes document processing directly to the OS print spooler. Ensure your default printer is active.
+                  Batch printing will sequentially load each document into a background frame and open the native Print Dialog box.
                 </p>
               </div>
             </div>

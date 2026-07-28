@@ -5,6 +5,7 @@ import subprocess
 import re
 from docx import Document
 from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from datetime import datetime
 from database import BASE_DIR
 
@@ -49,7 +50,6 @@ def replace_text_in_paragraph(paragraph, mapping, sig_path=None):
                 run = paragraph.add_run(val)
                 run.bold = True 
                 
-                # ISO FIX: Forcefully clamp the SBN Number to Font Size 12
                 if key in ["[SBN_NO]", "{{SBN_NO}}"]:
                     run.font.size = Pt(12)
                 elif base_font_size: 
@@ -63,10 +63,26 @@ def replace_text_in_paragraph(paragraph, mapping, sig_path=None):
             if base_font_size: run.font.size = base_font_size
 
     if has_sig and sig_path and os.path.exists(sig_path):
+        # ABSOLUTE FIX: Break the template's strict line-height constraint so the image isn't sliced off
+        paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        
+        # Strip all hidden template indents to guarantee absolute horizontal centering
+        paragraph.paragraph_format.left_indent = None
+        paragraph.paragraph_format.right_indent = None
+        paragraph.paragraph_format.first_line_indent = None
+        
+        # Pull text tightly together to simulate the wet-ink overlap
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        
+        # Force dead-center alignment
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
         run = paragraph.add_run()
-        run.add_picture(sig_path, width=Inches(1.2))
+        
+        # Inject the signature at a massive 2.2 inches wide
+        run.add_picture(sig_path, width=Inches(2.2))
 
-# ISO FIX: Strictly return empty strings for invalid legacy data
 def clean_val(v):
     if not v: return ""
     s = str(v).strip().upper()
@@ -131,7 +147,6 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     
     doc.save(docx_path)
 
-    # ISO FIX: Fortified Windows COM Dispatcher with un-initialization guarantees
     try:
         if platform.system() == "Windows":
             import pythoncom
@@ -155,5 +170,4 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     except Exception as e:
         pass
         
-    # If MS Word is completely missing on the host PC, fallback to docx securely
     return docx_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
