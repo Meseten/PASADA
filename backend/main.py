@@ -163,7 +163,7 @@ try:
         db.commit()
 
     def determine_status(issue_date):
-        if not issue_date: return True
+        if not issue_date: return False
         current_year = get_pht_now().year
         return False if issue_date.year <= current_year - 2 else True
 
@@ -179,7 +179,6 @@ try:
     def clean_dedup_key(text):
         return re.sub(r'\s+', '', str(text).upper())
 
-    # Improved robust dictionary extraction for importing
     def get_fuzzy_col_dict(row_dict, target):
         for col, val in row_dict.items():
             if target in str(col).upper():
@@ -196,17 +195,110 @@ try:
             return match.group(1)
         return sbn
 
+    def get_record_year(dt):
+        if dt and isinstance(dt, datetime):
+            return dt.year
+        elif dt and hasattr(dt, 'year'):
+            return dt.year
+        return 0
+
     # RULE 3: STRICT SBN INTEGER EXTRACTION FOR NUMERICAL SORTING (Lowest to Highest)
     def extract_sbn_integer(sbn):
-        sbn = str(sbn).strip().upper()
-        match = re.search(r'\d+', sbn)
-        if match:
-            return int(match.group())
+        base_sbn = get_base_sbn(sbn)
+        nums = re.findall(r'\d+', base_sbn)
+        if nums:
+            return int(nums[-1])
         return None 
         
     def get_sbn_sort_key(record):
         val = extract_sbn_integer(record.sbn_no)
         return val if val is not None else 999999
+
+    # DEDUPLICATE BY BASE SBN IN MEMORY
+    def deduplicate_records_by_base_sbn(records):
+        unique_map = {}
+        for r in records:
+            base_id = get_base_sbn(r.sbn_no)
+            r.sbn_no = base_id
+            if base_id not in unique_map:
+                unique_map[base_id] = r
+            else:
+                curr_existing = unique_map[base_id]
+                curr_year = get_record_year(curr_existing.issue_date)
+                new_year = get_record_year(r.issue_date)
+                if new_year > curr_year:
+                    unique_map[base_id] = r
+                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr_existing.operator_name).strip()):
+                    unique_map[base_id] = r
+        return list(unique_map.values())
+
+    def get_all_deduplicated_records(db: Session):
+        all_records = db.query(FranchiseRecord).all()
+        unique_map = {}
+        for r in all_records:
+            base_id = get_base_sbn(r.sbn_no)
+            r.sbn_no = base_id
+            route_key = (r.route, base_id)
+            if route_key not in unique_map:
+                unique_map[route_key] = r
+            else:
+                curr_existing = unique_map[route_key]
+                curr_year = get_record_year(curr_existing.issue_date)
+                new_year = get_record_year(r.issue_date)
+                if new_year > curr_year:
+                    unique_map[route_key] = r
+                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr_existing.operator_name).strip()):
+                    unique_map[route_key] = r
+        return list(unique_map.values())
+
+    # RULE 1: ONE-CLICK DATABASE CLEANUP & REFRESH ENDPOINT
+    @app.post("/admin/refresh-db")
+    def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        all_records = db.query(FranchiseRecord).all()
+        route_sbn_map = {}
+        deleted_count = 0
+        updated_count = 0
+        
+        for r in all_records:
+            clean_sbn = get_base_sbn(r.sbn_no)
+            if r.sbn_no != clean_sbn:
+                r.sbn_no = clean_sbn
+                updated_count += 1
+            
+            is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+            if is_vacant:
+                if r.is_active != False or r.issue_date is not None:
+                    r.is_active = False
+                    r.issue_date = None
+                    r.valid_until = None
+                    updated_count += 1
+            
+            key = (r.route, clean_sbn)
+            if key not in route_sbn_map:
+                route_sbn_map[key] = r
+            else:
+                existing = route_sbn_map[key]
+                existing_year = get_record_year(existing.issue_date)
+                current_year_val = get_record_year(r.issue_date)
+                
+                if current_year_val > existing_year:
+                    db.delete(existing)
+                    route_sbn_map[key] = r
+                    deleted_count += 1
+                elif current_year_val == existing_year and (r.operator_name and str(r.operator_name).strip() and not str(existing.operator_name).strip()):
+                    db.delete(existing)
+                    route_sbn_map[key] = r
+                    deleted_count += 1
+                else:
+                    db.delete(r)
+                    deleted_count += 1
+        
+        db.commit()
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, set vacant records, and removed {deleted_count} duplicates.")
+        return {
+            "status": "success",
+            "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
+        }
 
     @app.post("/signup")
     def signup(user: UserCreate, db: Session = Depends(get_db)):
@@ -389,7 +481,7 @@ try:
         for file in files:
             contents = await file.read()
             try:
-                # RULE 1: PERFECT ROW-BY-ROW EXTRACTION USING OPENPYXL
+                # RULE 2: PERFECT ROW-BY-ROW EXTRACTION USING OPENPYXL
                 if file.filename.endswith(".xlsx"):
                     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
                     sheet = wb.active
@@ -405,7 +497,6 @@ try:
                             
                     if header_idx == -1: continue 
 
-                    # Iterating down to max_row to guarantee zero missing vacant lines
                     for r_idx in range(header_idx + 1, sheet.max_row + 1):
                         row_dict = {}
                         for c_idx in range(1, sheet.max_column + 1):
@@ -422,21 +513,27 @@ try:
                         address = get_fuzzy_col_dict(row_dict, "ADDRESS")
                         make = get_fuzzy_col_dict(row_dict, "MAKE")
 
+                        # RULE 1: Vacant Records must NEVER be Active and NEVER have Dates
+                        is_vacant = not name or str(name).strip() == ""
+
                         raw_date = None
-                        for col, val in row_dict.items():
-                            if "RENEWAL" in str(col).upper() or "DATE" in str(col).upper():
-                                raw_date = val
-                                break
+                        if not is_vacant:
+                            for col, val in row_dict.items():
+                                if "RENEWAL" in str(col).upper() or "DATE" in str(col).upper():
+                                    raw_date = val
+                                    break
 
                         try:
-                            if isinstance(raw_date, datetime):
+                            if is_vacant:
+                                parsed_date = None
+                            elif isinstance(raw_date, datetime):
                                 parsed_date = raw_date
                             else:
                                 parsed_date = pd.to_datetime(str(raw_date)).to_pydatetime()
                         except:
-                            parsed_date = datetime(current_time.year, 1, 1)
+                            parsed_date = datetime(current_time.year, 1, 1) if not is_vacant else None
 
-                        # RULE 1 & 2: Deduplicate strictly by clean Base SBN (no name matching)
+                        # RULE 2: Deduplicate strictly by clean Base SBN (no name matching)
                         incoming_base_sbn = get_base_sbn(raw_sbn)
                         clean_plate = sanitize_plate(plate, chassis, motor)
                         
@@ -448,26 +545,26 @@ try:
 
                         if existing_record:
                             # Year Precedence Rule: Overwrite ONLY if incoming year >= existing record's year
-                            if parsed_date.year >= existing_record.issue_date.year:
+                            if get_record_year(parsed_date) >= get_record_year(existing_record.issue_date):
                                 existing_record.sbn_no = incoming_base_sbn
-                                existing_record.operator_name = name.upper()
-                                existing_record.address = address.upper()
-                                existing_record.make = make.upper()
-                                existing_record.plate_no = clean_plate.upper()
-                                existing_record.chassis_no = chassis.upper()
-                                existing_record.motor_no = motor.upper()
+                                existing_record.operator_name = name.upper() if name else ""
+                                existing_record.address = address.upper() if address else ""
+                                existing_record.make = make.upper() if make else ""
+                                existing_record.plate_no = clean_plate.upper() if clean_plate else ""
+                                existing_record.chassis_no = chassis.upper() if chassis else ""
+                                existing_record.motor_no = motor.upper() if motor else ""
                                 existing_record.issue_date = parsed_date
-                                existing_record.valid_until = datetime(parsed_date.year, 12, 31)
-                                existing_record.is_active = determine_status(parsed_date)
+                                existing_record.valid_until = datetime(parsed_date.year, 12, 31) if parsed_date else None
+                                existing_record.is_active = False if is_vacant else determine_status(parsed_date)
                                 imported_count += 1
                         else:
                             record = FranchiseRecord(
-                                sbn_no=incoming_base_sbn, operator_name=name.upper(),
-                                address=address.upper(), motor_no=motor.upper(),
-                                plate_no=clean_plate.upper(), chassis_no=chassis.upper(),
-                                make=make.upper(), route=route_name.upper(), driving_route="POBLACION", 
-                                issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31),
-                                processed_by=full_name, is_active=determine_status(parsed_date)
+                                sbn_no=incoming_base_sbn, operator_name=name.upper() if name else "",
+                                address=address.upper() if address else "", motor_no=motor.upper() if motor else "",
+                                plate_no=clean_plate.upper() if clean_plate else "", chassis_no=chassis.upper() if chassis else "",
+                                make=make.upper() if make else "", route=route_name.upper(), driving_route="POBLACION", 
+                                issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31) if parsed_date else None,
+                                processed_by=full_name, is_active=False if is_vacant else determine_status(parsed_date)
                             )
                             db.add(record)
                             existing_route_records.append(record)
@@ -501,16 +598,22 @@ try:
                         address = get_fuzzy_col_dict(row_dict, "ADDRESS")
                         make = get_fuzzy_col_dict(row_dict, "MAKE")
 
+                        is_vacant = not name or str(name).strip() == ""
+
                         raw_date = None
-                        for col, val in row_dict.items():
-                            if "RENEWAL" in str(col).upper() or "DATE" in str(col).upper():
-                                raw_date = val
-                                break
+                        if not is_vacant:
+                            for col, val in row_dict.items():
+                                if "RENEWAL" in str(col).upper() or "DATE" in str(col).upper():
+                                    raw_date = val
+                                    break
 
                         try:
-                            parsed_date = pd.to_datetime(str(raw_date)).to_pydatetime()
+                            if is_vacant:
+                                parsed_date = None
+                            else:
+                                parsed_date = pd.to_datetime(str(raw_date)).to_pydatetime()
                         except:
-                            parsed_date = datetime(current_time.year, 1, 1)
+                            parsed_date = datetime(current_time.year, 1, 1) if not is_vacant else None
 
                         incoming_base_sbn = get_base_sbn(raw_sbn)
                         clean_plate = sanitize_plate(plate, chassis, motor)
@@ -522,26 +625,26 @@ try:
                                 break
 
                         if existing_record:
-                            if parsed_date.year >= existing_record.issue_date.year:
+                            if get_record_year(parsed_date) >= get_record_year(existing_record.issue_date):
                                 existing_record.sbn_no = incoming_base_sbn
-                                existing_record.operator_name = name.upper()
-                                existing_record.address = address.upper()
-                                existing_record.make = make.upper()
-                                existing_record.plate_no = clean_plate.upper()
-                                existing_record.chassis_no = chassis.upper()
-                                existing_record.motor_no = motor.upper()
+                                existing_record.operator_name = name.upper() if name else ""
+                                existing_record.address = address.upper() if address else ""
+                                existing_record.make = make.upper() if make else ""
+                                existing_record.plate_no = clean_plate.upper() if clean_plate else ""
+                                existing_record.chassis_no = chassis.upper() if chassis else ""
+                                existing_record.motor_no = motor.upper() if motor else ""
                                 existing_record.issue_date = parsed_date
-                                existing_record.valid_until = datetime(parsed_date.year, 12, 31)
-                                existing_record.is_active = determine_status(parsed_date)
+                                existing_record.valid_until = datetime(parsed_date.year, 12, 31) if parsed_date else None
+                                existing_record.is_active = False if is_vacant else determine_status(parsed_date)
                                 imported_count += 1
                         else:
                             record = FranchiseRecord(
-                                sbn_no=incoming_base_sbn, operator_name=name.upper(),
-                                address=address.upper(), motor_no=motor.upper(),
-                                plate_no=clean_plate.upper(), chassis_no=chassis.upper(),
-                                make=make.upper(), route=route_name.upper(), driving_route="POBLACION", 
-                                issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31),
-                                processed_by=full_name, is_active=determine_status(parsed_date)
+                                sbn_no=incoming_base_sbn, operator_name=name.upper() if name else "",
+                                address=address.upper() if address else "", motor_no=motor.upper() if motor else "",
+                                plate_no=clean_plate.upper() if clean_plate else "", chassis_no=chassis.upper() if chassis else "",
+                                make=make.upper() if make else "", route=route_name.upper(), driving_route="POBLACION", 
+                                issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31) if parsed_date else None,
+                                processed_by=full_name, is_active=False if is_vacant else determine_status(parsed_date)
                             )
                             db.add(record)
                             existing_route_records.append(record)
@@ -549,7 +652,8 @@ try:
 
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
-                    issue_date = extracted['issue_date'] or datetime(current_time.year, 1, 1)
+                    is_vacant = not extracted['operator_name'] or str(extracted['operator_name']).strip() == ""
+                    issue_date = (extracted['issue_date'] or datetime(current_time.year, 1, 1)) if not is_vacant else None
                     clean_plate = sanitize_plate(extracted['plate_no'], extracted['chassis_no'], extracted['motor_no'])
                     incoming_base_sbn = get_base_sbn(extracted['sbn_no'])
                     
@@ -560,27 +664,27 @@ try:
                             break
 
                     if existing_record:
-                        if issue_date.year >= existing_record.issue_date.year:
+                        if get_record_year(issue_date) >= get_record_year(existing_record.issue_date):
                             existing_record.sbn_no = incoming_base_sbn
-                            existing_record.operator_name = extracted['operator_name'].upper()
+                            existing_record.operator_name = extracted['operator_name'].upper() if extracted['operator_name'] else ""
                             if extracted['make']: existing_record.make = extracted['make'].upper()
                             if extracted['address']: existing_record.address = extracted['address'].upper()
                             if clean_plate: existing_record.plate_no = clean_plate.upper()
                             if extracted['chassis_no']: existing_record.chassis_no = extracted['chassis_no'].upper()
                             if extracted['motor_no']: existing_record.motor_no = extracted['motor_no'].upper()
                             existing_record.issue_date = issue_date
-                            existing_record.valid_until = datetime(issue_date.year, 12, 31)
-                            existing_record.is_active = determine_status(issue_date)
+                            existing_record.valid_until = datetime(issue_date.year, 12, 31) if issue_date else None
+                            existing_record.is_active = False if is_vacant else determine_status(issue_date)
                             imported_count += 1
                     else:
                         record = FranchiseRecord(
-                            sbn_no=incoming_base_sbn, operator_name=extracted['operator_name'],
-                            address=extracted['address'], motor_no=extracted['motor_no'],
-                            plate_no=clean_plate, chassis_no=extracted['chassis_no'],
-                            make=extracted['make'], route=route_name.upper(),
+                            sbn_no=incoming_base_sbn, operator_name=extracted['operator_name'] if extracted['operator_name'] else "",
+                            address=extracted['address'] if extracted['address'] else "", motor_no=extracted['motor_no'] if extracted['motor_no'] else "",
+                            plate_no=clean_plate, chassis_no=extracted['chassis_no'] if extracted['chassis_no'] else "",
+                            make=extracted['make'] if extracted['make'] else "", route=route_name.upper(),
                             driving_route=extracted['driving_route'], issue_date=issue_date,
-                            valid_until=datetime(issue_date.year, 12, 31),
-                            processed_by=full_name, is_active=determine_status(issue_date)
+                            valid_until=datetime(issue_date.year, 12, 31) if issue_date else None,
+                            processed_by=full_name, is_active=False if is_vacant else determine_status(issue_date)
                         )
                         db.add(record)
                         existing_route_records.append(record)
@@ -646,26 +750,16 @@ try:
     @app.get("/franchise/route/{route_name}")
     def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name).all()
-        # Collapse any legacy SQLite duplicates down by unique Base SBN (keeping latest issue_date)
-        unique_records_map = {}
-        for r in records_query:
-            base_id = get_base_sbn(r.sbn_no)
-            r.sbn_no = base_id
-            if base_id not in unique_records_map:
-                unique_records_map[base_id] = r
-            else:
-                if (r.issue_date or datetime.min) > (unique_records_map[base_id].issue_date or datetime.min):
-                    unique_records_map[base_id] = r
+        deduped = deduplicate_records_by_base_sbn(records_query)
         # RULE 3: Strict Numerical Sorting applied
-        return sorted(unique_records_map.values(), key=get_sbn_sort_key)
+        return sorted(deduped, key=get_sbn_sort_key)
 
     @app.get("/franchise/status/inactive")
     def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records = db.query(FranchiseRecord).filter(FranchiseRecord.is_active == False).all()
-        for r in records:
-            r.sbn_no = get_base_sbn(r.sbn_no)
+        deduped = deduplicate_records_by_base_sbn(records)
         # RULE 3: Strict Numerical Sorting applied
-        return sorted(records, key=get_sbn_sort_key)
+        return sorted(deduped, key=get_sbn_sort_key)
 
     @app.get("/predict/{route}")
     def get_prediction(route: str, db: Session = Depends(get_db)):
@@ -675,25 +769,21 @@ try:
     def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
         
-        # RULE 1: Deduplicate strictly by Base SBN to eliminate legacy year duplicate rows (278/278 rows)
-        unique_records_map = {}
-        for r in records_query:
-            base_id = get_base_sbn(r.sbn_no)
-            r.sbn_no = base_id
-            if base_id not in unique_records_map:
-                unique_records_map[base_id] = r
-            else:
-                if (r.issue_date or datetime.min) > (unique_records_map[base_id].issue_date or datetime.min):
-                    unique_records_map[base_id] = r
+        # RULE 2: Deduplicate strictly by Base SBN to eliminate legacy year duplicate rows
+        records_query = deduplicate_records_by_base_sbn(records_query)
                     
         # RULE 3: Ensure Masterlist is perfectly sorted numerically
-        records_query = sorted(unique_records_map.values(), key=get_sbn_sort_key)
+        records_query = sorted(records_query, key=get_sbn_sort_key)
         current_year = get_pht_now().year
         
         filtered_records = []
         for r in records_query:
-            issue_year = r.issue_date.year if r.issue_date else 0
-            if not r.is_active or issue_year <= current_year - 2:
+            is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+            issue_year = r.issue_date.year if (r.issue_date and not is_vacant) else 0
+            
+            if is_vacant:
+                computed_filter_status = "VACANT"
+            elif not r.is_active or issue_year <= current_year - 2:
                 computed_filter_status = "REVOKED"
             elif issue_year == current_year - 1:
                 computed_filter_status = "FLAGGED"
@@ -708,15 +798,16 @@ try:
             
         csv_data = []
         for r in filtered_records:
-            # RULE 4: Strict 7 Column format (No STATUS column, MAKE replaces ADDRESS)
+            is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+            # RULE 1 & 4: Vacant rows have empty date cells (None), and MAKE replaces ADDRESS (7 columns)
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",
-                "DATE OF RENEWAL": r.issue_date if r.issue_date else None,
-                "NAME": r.operator_name or "",
-                "MAKE": r.make or "", 
-                "MOTOR NO.": r.motor_no or "",
-                "CHASSIS NO.": r.chassis_no or "",
-                "PLATE NO.": r.plate_no or ""
+                "DATE OF RENEWAL": None if is_vacant else r.issue_date,
+                "NAME": "" if is_vacant else str(r.operator_name).strip(),
+                "MAKE": str(r.make).strip() if r.make else "", 
+                "MOTOR NO.": str(r.motor_no).strip() if r.motor_no else "",
+                "CHASSIS NO.": str(r.chassis_no).strip() if r.chassis_no else "",
+                "PLATE NO.": str(r.plate_no).strip() if r.plate_no else ""
             })
             
         df = pd.DataFrame(csv_data)
@@ -743,9 +834,9 @@ try:
                     cell.font = calibri_11
 
             total_row_count = len(filtered_records) + 2
-            current_year_short = str(current_year)[-2:]
+            current_year_short = str(current_year - 1)[-2:]
 
-            # RULE 4: Top Counter configuration
+            # RULE 4: Top Counter formula counting ONLY ACTIVE records (excludes Vacant rows automatically)
             ws.merge_cells('A1:B1')
             ws['A1'] = f'=COUNTIF(B3:B{total_row_count}, ">=01-Jan-{current_year_short}")'
             ws['A1'].font = calibri_16_bold
@@ -850,25 +941,31 @@ try:
         today_str = current_time.strftime('%Y-%m-%d')
         start_of_week = (current_time - timedelta(days=current_time.weekday())).strftime('%Y-%m-%d')
         
-        total_system_capacity = db.query(func.count(FranchiseRecord.id)).scalar()
-        vacant_slots = db.query(func.count(FranchiseRecord.id)).filter(FranchiseRecord.is_active == False).scalar()
+        # RULE 2: Deduplicate system-wide records by Base SBN so total is exactly 6,137
+        deduped_all = get_all_deduplicated_records(db)
+        total_system_capacity = len(deduped_all)
+        vacant_slots = sum(1 for r in deduped_all if not r.is_active or not r.operator_name or str(r.operator_name).strip() == "")
         
-        daily_apps = db.query(func.count(FranchiseRecord.id)).filter(func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) == today_str).scalar()
-        weekly_apps = db.query(func.count(FranchiseRecord.id)).filter(func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) >= start_of_week).scalar()
-        monthly_apps = db.query(func.count(FranchiseRecord.id)).filter(extract('year', FranchiseRecord.issue_date) == current_year, extract('month', FranchiseRecord.issue_date) == current_month).scalar()
-        yearly_apps = db.query(func.count(FranchiseRecord.id)).filter(extract('year', FranchiseRecord.issue_date) == current_year).scalar()
-        flagged_pending = db.query(func.count(FranchiseRecord.id)).filter(extract('year', FranchiseRecord.issue_date) == current_year - 1).scalar()
+        daily_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.strftime('%Y-%m-%d') == today_str)
+        weekly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.strftime('%Y-%m-%d') >= start_of_week)
+        monthly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year and r.issue_date.month == current_month)
+        yearly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year)
+        flagged_pending = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year - 1)
 
-        routes = db.query(FranchiseRecord.route, func.count(FranchiseRecord.id)).filter(FranchiseRecord.is_active == True).group_by(FranchiseRecord.route).all()
-        route_data = [{"route": r[0], "count": r[1]} for r in routes]
+        route_counts = {}
+        for r in deduped_all:
+            if r.is_active and r.operator_name and str(r.operator_name).strip() != "":
+                route_counts[r.route] = route_counts.get(r.route, 0) + 1
+        route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
 
         days_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat'}
         daily_trend_dict = {d: 0 for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}
         
-        day_records = db.query(func.strftime('%w', FranchiseRecord.issue_date), func.count(FranchiseRecord.id)).group_by(func.strftime('%w', FranchiseRecord.issue_date)).all()
-        for day_idx, count in day_records:
-            if day_idx and day_idx in days_map:
-                daily_trend_dict[days_map[day_idx]] = count
+        for r in deduped_all:
+            if r.issue_date:
+                day_idx = r.issue_date.strftime('%w')
+                if day_idx in days_map:
+                    daily_trend_dict[days_map[day_idx]] += 1
                 
         daily_trend = [{"name": k, "val": v} for k, v in daily_trend_dict.items()]
             
@@ -877,10 +974,7 @@ try:
             target_date = current_time - timedelta(days=current_time.weekday() + (i * 7))
             start_str = target_date.strftime('%Y-%m-%d')
             end_str = (target_date + timedelta(days=6)).strftime('%Y-%m-%d')
-            count = db.query(func.count(FranchiseRecord.id)).filter(
-                func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) >= start_str,
-                func.strftime('%Y-%m-%d', FranchiseRecord.issue_date) <= end_str
-            ).scalar()
+            count = sum(1 for r in deduped_all if r.issue_date and start_str <= r.issue_date.strftime('%Y-%m-%d') <= end_str)
             weekly_trend.append({"name": target_date.strftime('%b %d'), "val": count})
 
         monthly_trend = []
@@ -891,7 +985,7 @@ try:
                 target_month += 12
                 target_year -= 1
             month_name = calendar.month_abbr[target_month]
-            count = db.query(func.count(FranchiseRecord.id)).filter(extract('year', FranchiseRecord.issue_date) == target_year, extract('month', FranchiseRecord.issue_date) == target_month).scalar()
+            count = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == target_year and r.issue_date.month == target_month)
             monthly_trend.append({"name": month_name, "val": count})
 
         return {
