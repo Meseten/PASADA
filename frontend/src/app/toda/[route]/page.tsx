@@ -8,7 +8,7 @@ export function generateStaticParams() {
     { route: 'MALATODA' }, { route: 'MMGTODA' }, { route: 'MMTODA' },
     { route: 'NCTODA' }, { route: 'NPTODA' },{ route: 'PAL1TODA' }, 
     { route: 'PAL2TODA' }, { route: 'SABANGTODA' }, { route: 'SMSTODA' },
-    { route: 'VASTODA' }, { route: 'VISTODA' }
+    { route: 'TCTODA' }, { route: 'VASTODA' }, { route: 'VISTODA' }
   ]
 }
 
