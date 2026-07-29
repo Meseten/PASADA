@@ -12,11 +12,14 @@
   "app": {
     "windows": [
       {
-        "title": "PASADA Administration (TFRU)",
-        "width": 800,
-        "height": 600,
+        "title": "PASADA",
+        "width": 1280,
+        "height": 720,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "center": true,
+        "maximized": true,
+        "visible": true
       }
     ],
     "security": {
