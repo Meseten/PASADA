@@ -202,7 +202,7 @@ try:
             return dt.year
         return 0
 
-    # RULE 3: STRICT SBN INTEGER EXTRACTION FOR NUMERICAL SORTING (Lowest to Highest)
+    # RULE 3: STRICT SBN INTEGER EXTRACTION FOR NUMERICAL SORTING (Lowest to Highest: 1 to 1000)
     def extract_sbn_integer(sbn):
         base_sbn = get_base_sbn(sbn)
         nums = re.findall(r'\d+', base_sbn)
@@ -251,7 +251,7 @@ try:
                     unique_map[route_key] = r
         return list(unique_map.values())
 
-    # RULE 1: ONE-CLICK DATABASE CLEANUP & REFRESH ENDPOINT
+    # RULE 1: ONE-CLICK DATABASE CLEANUP & REFRESH ENDPOINT (POST /admin/refresh-db)
     @app.post("/admin/refresh-db")
     def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         all_records = db.query(FranchiseRecord).all()
@@ -481,7 +481,7 @@ try:
         for file in files:
             contents = await file.read()
             try:
-                # RULE 2: PERFECT ROW-BY-ROW EXTRACTION USING OPENPYXL
+                # PERFECT ROW-BY-ROW EXTRACTION USING OPENPYXL
                 if file.filename.endswith(".xlsx"):
                     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
                     sheet = wb.active
@@ -533,7 +533,7 @@ try:
                         except:
                             parsed_date = datetime(current_time.year, 1, 1) if not is_vacant else None
 
-                        # RULE 2: Deduplicate strictly by clean Base SBN (no name matching)
+                        # Deduplicate strictly by clean Base SBN (no name matching)
                         incoming_base_sbn = get_base_sbn(raw_sbn)
                         clean_plate = sanitize_plate(plate, chassis, motor)
                         
@@ -769,7 +769,7 @@ try:
     def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
         
-        # RULE 2: Deduplicate strictly by Base SBN to eliminate legacy year duplicate rows
+        # RULE 1 & 2: Deduplicate strictly by Base SBN to eliminate legacy year duplicate rows
         records_query = deduplicate_records_by_base_sbn(records_query)
                     
         # RULE 3: Ensure Masterlist is perfectly sorted numerically
@@ -824,7 +824,7 @@ try:
             
             # RULE 4: Dynamic Highlight Fill Hex Values
             fill_vacant = PatternFill(start_color="FF00B0F0", end_color="FF00B0F0", fill_type="solid")
-            fill_y2 = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
+            fill_y2_1 = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
             fill_y3_7 = PatternFill(start_color="FF92D050", end_color="FF92D050", fill_type="solid")
             fill_y8 = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
             
@@ -834,11 +834,10 @@ try:
                     cell.font = calibri_11
 
             total_row_count = len(filtered_records) + 2
-            current_year_short = str(current_year - 1)[-2:]
 
             # RULE 4: Top Counter formula counting ONLY ACTIVE records (excludes Vacant rows automatically)
             ws.merge_cells('A1:B1')
-            ws['A1'] = f'=COUNTIF(B3:B{total_row_count}, ">=01-Jan-{current_year_short}")'
+            ws['A1'] = f'=COUNTIFS(B3:B{total_row_count}, ">="&K5, B3:B{total_row_count}, "<="&K6)'
             ws['A1'].font = calibri_16_bold
             ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
             
@@ -853,9 +852,9 @@ try:
             ws['I3'].font = calibri_11_bold
             ws['I3'].fill = fill_vacant
             
-            ws['I4'] = f"{current_year - 2}"
+            ws['I4'] = f"{current_year - 2}-{current_year - 1}"
             ws['I4'].font = calibri_11_bold
-            ws['I4'].fill = fill_y2
+            ws['I4'].fill = fill_y2_1
             
             ws['I5'] = f"{current_year - 7}-{current_year - 3}"
             ws['I5'].font = calibri_11_bold
@@ -883,10 +882,10 @@ try:
                 # Rule execution priority: Vacant Overrides date colors
                 if not op_name:
                     fill_color = fill_vacant
-                elif issue_year >= current_year - 1:
+                elif issue_year == current_year:
                     fill_color = None
-                elif issue_year == current_year - 2:
-                    fill_color = fill_y2
+                elif issue_year == current_year - 1 or issue_year == current_year - 2:
+                    fill_color = fill_y2_1
                 elif current_year - 7 <= issue_year <= current_year - 3:
                     fill_color = fill_y3_7
                 else:
@@ -933,6 +932,28 @@ try:
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
+    # RULE 1: ROUTE DISTRIBUTION CHART ENDPOINT (/api/route-distribution)
+    @app.get("/api/route-distribution")
+    def get_route_distribution(db: Session = Depends(get_db)):
+        current_year = get_pht_now().year
+        deduped_all = get_all_deduplicated_records(db)
+        route_counts = {}
+        for r in deduped_all:
+            # STRICT CURRENT-YEAR ACTIVE MATH: status != 'VACANT' AND issue_date.year == current_year (2026)
+            if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
+                route_counts[r.route] = route_counts.get(r.route, 0) + 1
+        route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
+        return route_data
+
+    @app.get("/api/stats")
+    def get_api_stats(db: Session = Depends(get_db)):
+        return get_global_stats(db)
+
+    @app.get("/api/dashboard")
+    def get_api_dashboard(db: Session = Depends(get_db)):
+        return get_global_stats(db)
+
+    # RULE 2: SYSTEM-WIDE DASHBOARD & CHART ACCURACY (Strict Current-Year Rule)
     @app.get("/stats/global")
     def get_global_stats(db: Session = Depends(get_db)):
         current_time = get_pht_now()
@@ -941,20 +962,29 @@ try:
         today_str = current_time.strftime('%Y-%m-%d')
         start_of_week = (current_time - timedelta(days=current_time.weekday())).strftime('%Y-%m-%d')
         
-        # RULE 2: Deduplicate system-wide records by Base SBN so total is exactly 6,137
+        # Deduplicate system-wide records by Base SBN so total is exactly 6,137
         deduped_all = get_all_deduplicated_records(db)
         total_system_capacity = len(deduped_all)
-        vacant_slots = sum(1 for r in deduped_all if not r.is_active or not r.operator_name or str(r.operator_name).strip() == "")
+        vacant_slots = sum(1 for r in deduped_all if not r.operator_name or str(r.operator_name).strip() == "")
         
+        # System-wide Active Volume: strictly issue_date.year == current_year (5,337)
+        active_operators = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "")
+        
+        # 1-Year Non-Renewal Offense: strictly issue_date.year == current_year - 1 (336)
+        flagged_pending = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year - 1 and r.operator_name and str(r.operator_name).strip() != "")
+        
+        # Inactive / 2+ Years Non-Renewal + Vacant records (464)
+        inactive_and_vacant = sum(1 for r in deduped_all if (not r.operator_name or str(r.operator_name).strip() == "") or (r.issue_date and r.issue_date.year <= current_year - 2) or not r.issue_date)
+
         daily_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.strftime('%Y-%m-%d') == today_str)
         weekly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.strftime('%Y-%m-%d') >= start_of_week)
         monthly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year and r.issue_date.month == current_month)
-        yearly_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year)
-        flagged_pending = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year - 1)
+        yearly_apps = active_operators
 
         route_counts = {}
         for r in deduped_all:
-            if r.is_active and r.operator_name and str(r.operator_name).strip() != "":
+            # STRICT CURRENT-YEAR ACTIVE MATH: issue_date.year == current_year (e.g., BATODA = 182, NPTODA = 913)
+            if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
                 route_counts[r.route] = route_counts.get(r.route, 0) + 1
         route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
 
@@ -990,9 +1020,9 @@ try:
 
         return {
             "total_system_capacity": total_system_capacity,
-            "vacant_slots": vacant_slots,
+            "vacant_slots": inactive_and_vacant,
             "daily_apps": daily_apps, "weekly_apps": weekly_apps, "monthly_apps": monthly_apps, "yearly_apps": yearly_apps,
-            "flagged_pending": flagged_pending, "revoked": vacant_slots, 
+            "flagged_pending": flagged_pending, "revoked": inactive_and_vacant, 
             "route_breakdown": route_data,
             "daily_trend": daily_trend,
             "weekly_trend": weekly_trend,
