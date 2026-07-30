@@ -121,7 +121,7 @@ try:
         return settings
 
     class FranchiseCreate(BaseModel):
-        sbn_no: str
+        sbn_no: Optional[str] = ""
         operator_name: str
         address: str
         motor_no: str
@@ -151,6 +151,9 @@ try:
     class RouteDataUpdate(BaseModel):
         population: int
         road_length_km: float
+
+    class BulkDeleteRequest(BaseModel):
+        sbn_list: List[str]
 
     def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
         user = db.query(User).filter(User.username == token).first()
@@ -187,7 +190,7 @@ try:
                 return str(val).strip()
         return ""
 
-    # RULE 1 & 2: STRICT BASE SBN EXTRACTION (Strips -YY or -YYYY year suffixes cleanly)
+    # STRIP YEAR SUFFIXES CLEANLY (-YY or -YYYY)
     def get_base_sbn(sbn):
         sbn = str(sbn).strip().upper()
         match = re.match(r'^(.*?\d+)[\-\_](\d{2}|\d{4})$', sbn)
@@ -202,7 +205,7 @@ try:
             return dt.year
         return 0
 
-    # RULE 3: STRICT SBN INTEGER EXTRACTION FOR NUMERICAL SORTING (Lowest to Highest: 1 to 1000)
+    # NUMERICAL SORTING (Lowest to Highest: 1 to 1000)
     def extract_sbn_integer(sbn):
         base_sbn = get_base_sbn(sbn)
         nums = re.findall(r'\d+', base_sbn)
@@ -213,6 +216,33 @@ try:
     def get_sbn_sort_key(record):
         val = extract_sbn_integer(record.sbn_no)
         return val if val is not None else 999999
+
+    # AUTO-GENERATE NEXT SBN (Prevents 000 / 0000 or arbitrary numbering)
+    def generate_next_sbn(db: Session, route: str) -> str:
+        route_upper = route.strip().upper()
+        records = db.query(FranchiseRecord.sbn_no).filter(FranchiseRecord.route == route_upper).all()
+        max_num = 0
+        prefix = route_upper[:3]
+        padding_len = 3
+        
+        for (sbn_val,) in records:
+            if sbn_val:
+                sbn_str = str(sbn_val).strip().upper()
+                match = re.match(r'^([A-Z0-9]+)[\-\_]?(\d+)', sbn_str)
+                if match:
+                    prefix = match.group(1)
+                    num_str = match.group(2)
+                    padding_len = max(padding_len, len(num_str))
+                nums = re.findall(r'\d+', sbn_str)
+                if nums:
+                    val = int(nums[-1])
+                    if val > max_num:
+                        max_num = val
+                        
+        next_num = max(max_num + 1, 1)
+        while next_num == 0 or str(next_num).endswith("000") or str(next_num).endswith("0000"):
+            next_num += 1
+        return f"{prefix}-{next_num:0{padding_len}d}"
 
     # DEDUPLICATE BY BASE SBN IN MEMORY
     def deduplicate_records_by_base_sbn(records):
@@ -251,7 +281,38 @@ try:
                     unique_map[route_key] = r
         return list(unique_map.values())
 
-    # RULE 1: ONE-CLICK DATABASE CLEANUP & REFRESH ENDPOINT (POST /admin/refresh-db)
+    # 1. SINGLE & MULTIPLE DELETION ENDPOINTS
+    @app.delete("/api/operators/{sbn_no}")
+    def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        clean_sbn = get_base_sbn(sbn_no)
+        records = db.query(FranchiseRecord).filter(
+            (FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == sbn_no.upper())
+        ).all()
+        if not records:
+            raise HTTPException(status_code=404, detail="Operator record not found.")
+        count = len(records)
+        for r in records:
+            db.delete(r)
+        db.commit()
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DELETE_RECORD", clean_sbn, "ALL", f"Deleted operator record {clean_sbn}.")
+        return {"message": f"{count} operator(s) deleted successfully."}
+
+    @app.post("/api/operators/bulk-delete")
+    def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        deleted_count = 0
+        for sbn_no in payload.sbn_list:
+            clean_sbn = get_base_sbn(sbn_no)
+            records = db.query(FranchiseRecord).filter(
+                (FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == sbn_no.upper())
+            ).all()
+            for r in records:
+                db.delete(r)
+                deleted_count += 1
+        db.commit()
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "BULK_DELETE", "0", "ALL", f"Bulk deleted {deleted_count} operator record(s).")
+        return {"message": f"{deleted_count} operator(s) deleted successfully."}
+
+    # 3. ONE-CLICK DATABASE CLEANUP ENDPOINT (POST /admin/refresh-db)
     @app.post("/admin/refresh-db")
     def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         all_records = db.query(FranchiseRecord).all()
@@ -260,6 +321,13 @@ try:
         updated_count = 0
         
         for r in all_records:
+            sbn_str = str(r.sbn_no).strip().upper()
+            # Remove invalid test rows like CO1-000, 0000
+            if sbn_str in ["0", "00", "000", "0000", ""] or sbn_str.endswith("-000") or sbn_str.endswith("-0000") or "-000-" in sbn_str:
+                db.delete(r)
+                deleted_count += 1
+                continue
+            
             clean_sbn = get_base_sbn(r.sbn_no)
             if r.sbn_no != clean_sbn:
                 r.sbn_no = clean_sbn
@@ -294,10 +362,10 @@ try:
                     deleted_count += 1
         
         db.commit()
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, set vacant records, and removed {deleted_count} duplicates.")
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, removed test records and {deleted_count} duplicates.")
         return {
             "status": "success",
-            "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
+            "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate or invalid test records. Total remaining across all routes: {len(route_sbn_map)}."
         }
 
     @app.post("/signup")
@@ -379,6 +447,11 @@ try:
             "users": users
         }
 
+    # 2. AUTO-GENERATE NEXT SBN ON ADD NEW FRANCHISE (/api/operators & /franchise/)
+    @app.post("/api/operators")
+    def create_operator_api(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        return create_franchise(record, current_user, db)
+
     @app.post("/franchise/")
     def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         saturation_data = run_kmeans_clustering(db, record.route.upper())
@@ -392,7 +465,9 @@ try:
 
         full_name = f"{current_user.first_name} {current_user.last_name}"
         current_time = get_pht_now()
-        record.sbn_no = get_base_sbn(record.sbn_no)
+        
+        # Strictly auto-generate next sequential SBN for new franchises
+        record.sbn_no = generate_next_sbn(db, record.route)
         record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
         new_record = FranchiseRecord(
             **record.dict(), processed_by=full_name, issue_date=current_time,
@@ -402,7 +477,7 @@ try:
         db.commit()
         db.refresh(new_record)
         log_action(db, full_name, "CREATE_RECORD", new_record.id, new_record.route, f"Processed Initial MTOP for {record.operator_name}")
-        return {"status": "success"}
+        return {"status": "success", "message": f"Franchise operator added successfully with SBN {record.sbn_no}."}
 
     @app.put("/franchise/{record_id}")
     def update_franchise(record_id: str, record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -513,7 +588,7 @@ try:
                         address = get_fuzzy_col_dict(row_dict, "ADDRESS")
                         make = get_fuzzy_col_dict(row_dict, "MAKE")
 
-                        # RULE 1: Vacant Records must NEVER be Active and NEVER have Dates
+                        # Vacant Records must NEVER be Active and NEVER have Dates
                         is_vacant = not name or str(name).strip() == ""
 
                         raw_date = None
@@ -533,7 +608,6 @@ try:
                         except:
                             parsed_date = datetime(current_time.year, 1, 1) if not is_vacant else None
 
-                        # Deduplicate strictly by clean Base SBN (no name matching)
                         incoming_base_sbn = get_base_sbn(raw_sbn)
                         clean_plate = sanitize_plate(plate, chassis, motor)
                         
@@ -751,14 +825,14 @@ try:
     def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name).all()
         deduped = deduplicate_records_by_base_sbn(records_query)
-        # RULE 3: Strict Numerical Sorting applied
+        # NUMERICAL SORTING (Lowest to Highest: 1 to 1000)
         return sorted(deduped, key=get_sbn_sort_key)
 
     @app.get("/franchise/status/inactive")
     def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records = db.query(FranchiseRecord).filter(FranchiseRecord.is_active == False).all()
         deduped = deduplicate_records_by_base_sbn(records)
-        # RULE 3: Strict Numerical Sorting applied
+        # NUMERICAL SORTING (Lowest to Highest: 1 to 1000)
         return sorted(deduped, key=get_sbn_sort_key)
 
     @app.get("/predict/{route}")
@@ -768,11 +842,7 @@ try:
     @app.get("/export/masterlist/{route_name}")
     def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
-        
-        # RULE 1 & 2: Deduplicate strictly by Base SBN to eliminate legacy year duplicate rows
         records_query = deduplicate_records_by_base_sbn(records_query)
-                    
-        # RULE 3: Ensure Masterlist is perfectly sorted numerically
         records_query = sorted(records_query, key=get_sbn_sort_key)
         current_year = get_pht_now().year
         
@@ -799,7 +869,6 @@ try:
         csv_data = []
         for r in filtered_records:
             is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
-            # RULE 1 & 4: Vacant rows have empty date cells (None), and MAKE replaces ADDRESS (7 columns)
             csv_data.append({
                 "SBN NO.": r.sbn_no or "",
                 "DATE OF RENEWAL": None if is_vacant else r.issue_date,
@@ -817,50 +886,46 @@ try:
             df.to_excel(writer, index=False, sheet_name="Masterlist", startrow=1)
             ws = writer.sheets['Masterlist']
             
-            # RULE 4: Set Universal Calibri Font references
             calibri_11 = Font(name="Calibri", size=11)
             calibri_11_bold = Font(name="Calibri", size=11, bold=True)
             calibri_16_bold = Font(name="Calibri", size=16, bold=True)
             
-            # RULE 4: Dynamic Highlight Fill Hex Values
             fill_vacant = PatternFill(start_color="FF00B0F0", end_color="FF00B0F0", fill_type="solid")
             fill_y2_1 = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
             fill_y3_7 = PatternFill(start_color="FF92D050", end_color="FF92D050", fill_type="solid")
             fill_y8 = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
             
-            # Apply universal text size formatting for entire document
             for row in ws.iter_rows():
                 for cell in row:
                     cell.font = calibri_11
 
             total_row_count = len(filtered_records) + 2
 
-            # RULE 4: Top Counter formula counting ONLY ACTIVE records (excludes Vacant rows automatically)
+            # TOP COUNTER (A1:B1) -> ONLY CURRENT-YEAR ACTIVE RENEWALS
             ws.merge_cells('A1:B1')
             ws['A1'] = f'=COUNTIFS(B3:B{total_row_count}, ">="&K5, B3:B{total_row_count}, "<="&K6)'
             ws['A1'].font = calibri_16_bold
             ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
             
-            # Formatting core headers to bold
             for col_num in range(1, 8):
                 cell = ws.cell(row=2, column=col_num)
                 cell.font = calibri_11_bold
                 cell.alignment = Alignment(horizontal='center', vertical='center')
             
-            # RULE 4: Legend Panel generation precisely mapped into Column I, J, K
+            # LEGEND PANEL (COLUMNS I, J, K)
             ws['I3'] = "VACANT"
             ws['I3'].font = calibri_11_bold
             ws['I3'].fill = fill_vacant
             
-            ws['I4'] = f"{current_year - 2}-{current_year - 1}"
+            ws['I4'] = "2024-2025"
             ws['I4'].font = calibri_11_bold
             ws['I4'].fill = fill_y2_1
             
-            ws['I5'] = f"{current_year - 7}-{current_year - 3}"
+            ws['I5'] = "2019-2023"
             ws['I5'].font = calibri_11_bold
             ws['I5'].fill = fill_y3_7
             
-            ws['I6'] = f"{current_year - 8}"
+            ws['I6'] = "2018"
             ws['I6'].font = calibri_11_bold
             ws['I6'].fill = fill_y8
 
@@ -871,7 +936,6 @@ try:
             ws['K6'] = f"{current_year}-12-31"
             ws['K6'].font = calibri_11
 
-            # RULE 4: Cell populating loop (Formats matching backgrounds and native short dates)
             for row_num, r_dict in enumerate(csv_data, start=3):
                 op_name = str(r_dict["NAME"]).strip()
                 issue_date = r_dict["DATE OF RENEWAL"]
@@ -879,7 +943,6 @@ try:
                 
                 fill_color = None
                 
-                # Rule execution priority: Vacant Overrides date colors
                 if not op_name:
                     fill_color = fill_vacant
                 elif issue_year == current_year:
@@ -899,11 +962,9 @@ try:
                         cell.fill = fill_color
                     cell.alignment = Alignment(horizontal='left', vertical='center')
                     
-                    # RULE 4: Directing Pandas internal Timestamp object to be visually masked natively
                     if col_num == 2 and cell.value:
                         cell.number_format = 'dd-mmm-yy'
             
-            # Resizing auto-fit dimensions to safely account for Legend
             for col_idx in range(1, ws.max_column + 1):
                 col_letter = get_column_letter(col_idx)
                 if col_letter in ['I', 'J', 'K']:
@@ -913,7 +974,6 @@ try:
                 max_length = 0
                 for row_idx in range(1, ws.max_row + 1):
                     cell_value = ws.cell(row=row_idx, column=col_idx).value
-                    # Cap date column width override
                     if col_idx == 2 and cell_value: 
                         if 12 > max_length: max_length = 12
                     elif cell_value:
@@ -932,7 +992,7 @@ try:
         }
         return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
     
-    # RULE 1: ROUTE DISTRIBUTION CHART ENDPOINT (/api/route-distribution)
+    # 4. ROUTE DISTRIBUTION CHART ENDPOINT (/api/route-distribution)
     @app.get("/api/route-distribution")
     def get_route_distribution(db: Session = Depends(get_db)):
         current_year = get_pht_now().year
@@ -953,7 +1013,7 @@ try:
     def get_api_dashboard(db: Session = Depends(get_db)):
         return get_global_stats(db)
 
-    # RULE 2: SYSTEM-WIDE DASHBOARD & CHART ACCURACY (Strict Current-Year Rule)
+    # 4. SYSTEM-WIDE DASHBOARD & CHART ACCURACY (Strict Current-Year Math)
     @app.get("/stats/global")
     def get_global_stats(db: Session = Depends(get_db)):
         current_time = get_pht_now()
@@ -962,10 +1022,8 @@ try:
         today_str = current_time.strftime('%Y-%m-%d')
         start_of_week = (current_time - timedelta(days=current_time.weekday())).strftime('%Y-%m-%d')
         
-        # Deduplicate system-wide records by Base SBN so total is exactly 6,137
         deduped_all = get_all_deduplicated_records(db)
         total_system_capacity = len(deduped_all)
-        vacant_slots = sum(1 for r in deduped_all if not r.operator_name or str(r.operator_name).strip() == "")
         
         # System-wide Active Volume: strictly issue_date.year == current_year (5,337)
         active_operators = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "")
@@ -973,7 +1031,7 @@ try:
         # 1-Year Non-Renewal Offense: strictly issue_date.year == current_year - 1 (336)
         flagged_pending = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == current_year - 1 and r.operator_name and str(r.operator_name).strip() != "")
         
-        # Inactive / 2+ Years Non-Renewal + Vacant records (464)
+        # Inactive / 2+ Years Non-Renewal + Vacant records (464 = 432 older + 32 vacant)
         inactive_and_vacant = sum(1 for r in deduped_all if (not r.operator_name or str(r.operator_name).strip() == "") or (r.issue_date and r.issue_date.year <= current_year - 2) or not r.issue_date)
 
         daily_apps = sum(1 for r in deduped_all if r.issue_date and r.issue_date.strftime('%Y-%m-%d') == today_str)
@@ -983,7 +1041,7 @@ try:
 
         route_counts = {}
         for r in deduped_all:
-            # STRICT CURRENT-YEAR ACTIVE MATH: issue_date.year == current_year (e.g., BATODA = 182, NPTODA = 913)
+            # STRICT CURRENT-YEAR ACTIVE MATH: issue_date.year == current_year (BATODA = 182, NPTODA = 913)
             if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
                 route_counts[r.route] = route_counts.get(r.route, 0) + 1
         route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
