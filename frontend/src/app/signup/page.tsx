@@ -8,12 +8,12 @@ import { useTheme } from "next-themes";
 const API_URL = "http://127.0.0.1:43888";
 
 function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
+  const { theme, setTheme } = useTheme();
   return (
     <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="absolute top-6 right-6 p-2 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors">
       {theme === "dark" ? <Sun size={20} className="text-slate-200" /> : <Moon size={20} className="text-slate-700" />}
     </button>
-  )
+  );
 }
 
 export default function Signup() {
@@ -45,7 +45,6 @@ export default function Signup() {
     return () => clearInterval(interval);
   }, []);
 
-  // DEFINITIVE FIX: Auto-generates Username based on trimmed names
   useEffect(() => {
     const autoGen = `${firstName.trim()} ${lastName.trim()}`.trim();
     setUsername(autoGen);
@@ -56,13 +55,11 @@ export default function Signup() {
     if (!serverReady) return;
     
     if (password.length < 8) {
-      setError("Passcode must be at least 8 characters.");
+      setError("Password must be at least 8 characters.");
       return;
     }
-
     setLoading(true);
     setError("");
-
     try {
       const res = await fetch(`${API_URL}/signup`, {
         method: "POST",
@@ -75,15 +72,14 @@ export default function Signup() {
           role: "Clerk", 
         }),
       });
-
       if (res.ok) {
         router.push("/");
       } else {
         const errData = await res.json();
-        setError(errData.detail || "Registration failed. Username may be taken.");
+        setError(errData.detail || "Registration failed. Username may already be taken.");
       }
     } catch (err) {
-      setError("Server connection failed. Ensure backend is running.");
+      setError("Cannot connect to server. Ensure the backend is running.");
     } finally {
       setLoading(false);
     }
@@ -96,13 +92,13 @@ export default function Signup() {
         <div className="flex flex-col items-center mb-8">
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border bg-white" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
-          <p className="text-muted-foreground mt-1 text-sm font-medium">New Administrative Registration</p>
+          <p className="text-muted-foreground mt-1 text-sm font-medium">Register New Account</p>
         </div>
 
         {!serverReady ? (
           <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />
-            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to local server...</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>
           </div>
         ) : (
           <form onSubmit={handleSignup} className="space-y-5">
@@ -111,7 +107,6 @@ export default function Signup() {
                 {error}
               </div>
             )}
-
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">First Name</label>
@@ -136,9 +131,8 @@ export default function Signup() {
                 />
               </div>
             </div>
-
             <div className="space-y-1.5">
-              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">System Username</label>
+              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Full Username</label>
               <input
                 type="text"
                 value={username}
@@ -146,16 +140,14 @@ export default function Signup() {
                 className="w-full bg-muted/60 border border-border rounded-lg px-4 py-3 text-sm font-bold text-slate-500 dark:text-slate-400 cursor-not-allowed uppercase"
               />
             </div>
-
             <div className="space-y-1.5 relative">
-              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Secure Passcode (Min. 8)</label>
+              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Password (8+ Characters)</label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  // DEFINITIVE FIX: Removes the duplicated Windows Edge eye icon
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
@@ -168,7 +160,6 @@ export default function Signup() {
                 </button>
               </div>
             </div>
-
             <button
               type="submit"
               disabled={loading}
@@ -178,12 +169,11 @@ export default function Signup() {
             </button>
           </form>
         )}
-
         <div className="mt-8 text-center border-t border-border pt-6">
           <p className="text-sm text-muted-foreground font-medium">
             Return to {" "}
             <button onClick={() => router.push("/")} className="text-slate-900 dark:text-white hover:underline font-bold">
-              Secure Login
+              Log In
             </button>
           </p>
         </div>
