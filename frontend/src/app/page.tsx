@@ -10,15 +10,13 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-
+  
   useEffect(() => setMounted(true), []);
-
   if (!mounted) return <div className="absolute top-6 right-6 w-10 h-10" />;
-
+  
   return (
     <button 
       onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
-      // FIX: Removed 'relative' from here. It is now strictly 'absolute top-6 right-6' so it stays in the corner.
       className="absolute top-6 right-6 flex items-center justify-center w-10 h-10 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors z-50"
     >
       <Sun className={`absolute w-5 h-5 transition-all duration-300 ${theme === "dark" ? "rotate-90 scale-0 opacity-0" : "rotate-0 scale-100 opacity-100"}`} />
@@ -38,14 +36,12 @@ export default function Login() {
   const [isCheckingSession, setIsCheckingSession] = useState(true);
 
   useEffect(() => {
-    // INSTANT BYPASS: If you have a token, instantly route to dashboard. No loop.
     if (typeof window !== "undefined" && localStorage.getItem("token")) {
       router.replace("/dashboard");
       return;
     }
     
     setIsCheckingSession(false);
-
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
       try {
@@ -68,18 +64,17 @@ export default function Login() {
     if (!serverReady) return;
     setLoading(true);
     setError("");
-
     try {
       const formData = new URLSearchParams();
       formData.append("username", username);
       formData.append("password", password);
-
+      
       const res = await fetch(`${API_URL}/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: formData.toString(),
       });
-
+      
       if (res.ok) {
         const data = await res.json();
         localStorage.setItem("pasada_token", data.access_token);
@@ -87,14 +82,13 @@ export default function Login() {
         localStorage.setItem("pasada_role", data.role || "Clerk");
         localStorage.setItem("token", data.access_token);
         localStorage.setItem("full_name", data.full_name);
-        
         router.replace("/dashboard"); 
       } else {
         const errData = await res.json();
-        setError(errData.detail || "Invalid credentials");
+        setError(errData.detail || "Invalid login credentials.");
       }
     } catch (err) {
-      setError("Server connection failed. Ensure backend is running.");
+      setError("Cannot connect to server. Ensure the backend is running.");
     } finally {
       setLoading(false);
     }
@@ -109,13 +103,13 @@ export default function Login() {
         <div className="flex flex-col items-center mb-8">
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>
-          <p className="text-muted-foreground mt-1 text-sm font-medium">Predictive Franchise Administration System</p>
+          <p className="text-muted-foreground mt-1 text-sm font-medium">Franchise Registry System</p>
         </div>
 
         {!serverReady ? (
           <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />
-            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to local server...</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>
           </div>
         ) : (
           <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in">
@@ -126,7 +120,7 @@ export default function Login() {
             )}
             
             <div className="space-y-1.5">
-              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Authorized Full Name</label>
+              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Full Name</label>
               <input
                 type="text"
                 value={username}
@@ -138,7 +132,7 @@ export default function Login() {
             </div>
 
             <div className="space-y-1.5 relative">
-              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Secure Passcode</label>
+              <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Password</label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -163,21 +157,19 @@ export default function Login() {
               disabled={loading}
               className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 mt-2 shadow-md"
             >
-              {loading ? <Loader2 size={18} className="animate-spin" /> : "Secure Login"}
+              {loading ? <Loader2 size={18} className="animate-spin" /> : "Log In"}
             </button>
           </form>
         )}
 
-        {/* FIX: I restored the Signup button block that I accidentally deleted last time. */}
         <div className="mt-8 text-center border-t border-border pt-6">
           <p className="text-sm text-muted-foreground font-medium">
-            New Administrative Personnel?{" "}
+            No account yet?{" "}
             <button onClick={() => router.push("/signup")} className="text-slate-900 dark:text-white hover:underline font-bold">
               Register Account
             </button>
           </p>
         </div>
-
       </div>
     </div>
   );

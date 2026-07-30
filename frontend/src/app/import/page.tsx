@@ -25,30 +25,25 @@ export default function MassImport() {
     setUploading(true);
     setSuccessMsg("");
     setErrorMsg("");
-
     const token = localStorage.getItem("pasada_token") || localStorage.getItem("token");
-
     try {
       if (isDatabaseFile) {
         const formData = new FormData();
         formData.append("file", files[0]);
-
         const res = await fetch(`${API_URL}/upload/database`, {
           method: "POST",
           headers: { "Authorization": `Bearer ${token}` },
           body: formData
         });
-
-        if (!res.ok) throw new Error("Database migration failed");
+        if (!res.ok) throw new Error("Database import failed");
         const data = await res.json();
-        setSuccessMsg(`Database seamlessly merged! Added ${data.imported} new records.`);
+        setSuccessMsg(`Database imported! Added ${data.imported} new records.`);
       } else {
         if (!selectedRoute.trim()) {
-          setErrorMsg("Please provide a valid Target Route.");
+          setErrorMsg("Please enter a valid route name.");
           setUploading(false);
           return;
         }
-
         let importedTotal = 0;
         const CHUNK_SIZE = 500; 
         const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
@@ -58,28 +53,25 @@ export default function MassImport() {
           const chunk = files.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
           const formData = new FormData();
           chunk.forEach(f => formData.append("files", f));
-
           const res = await fetch(`${API_URL}/upload/bulk/${formattedRoute}`, {
             method: "POST",
             headers: { "Authorization": `Bearer ${token}` },
             body: formData
           });
-
-          if (!res.ok) throw new Error("Chunk failed to upload");
+          if (!res.ok) throw new Error("File upload failed");
           const data = await res.json();
           importedTotal += data.imported;
-          
           setProgress(Math.round(((i + 1) / totalChunks) * 100));
         }
         
         window.dispatchEvent(new Event('toda_imported'));
-        setSuccessMsg(`Successfully extracted and imported ${importedTotal} unique records for ${formattedRoute}.`);
+        setSuccessMsg(`Successfully imported ${importedTotal} records for ${formattedRoute}.`);
       }
       
       setFiles([]);
       setSelectedRoute("");
     } catch (err) {
-      setErrorMsg("Data ingestion interrupted. Server connection failed during upload.");
+      setErrorMsg("Upload failed. Ensure the server is connected.");
     } finally {
       setUploading(false);
       setProgress(0);
@@ -92,7 +84,7 @@ export default function MassImport() {
         <UploadCloud className="w-8 h-8 text-blue-600" />
         <div>
           <h1 className="text-3xl font-black tracking-tight">Import Records</h1>
-          <p className="text-muted-foreground mt-1 font-medium">Upload legacy municipal files or backup databases to add them to the system.</p>
+          <p className="text-muted-foreground mt-1 font-medium">Upload Excel spreadsheets, Word files, or backup databases.</p>
         </div>
       </div>
 
@@ -111,7 +103,7 @@ export default function MassImport() {
         <div className="space-y-6">
           {!isDatabaseFile && (
             <div className="space-y-2 animate-in fade-in">
-              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route Assignment (E.g. BATODA)</label>
+              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route (e.g., BATODA)</label>
               <input 
                 type="text"
                 value={selectedRoute} 
@@ -124,7 +116,7 @@ export default function MassImport() {
                     }
                   }
                 }}
-                placeholder="E.g. BATODA (Required for Word/Excel files)"
+                placeholder="E.g. BATODA (Required for Excel/Word files)"
                 className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all"
               />
             </div>
@@ -134,14 +126,14 @@ export default function MassImport() {
             <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3 animate-in fade-in">
               <Database className="text-blue-600" size={24} />
               <div>
-                <p className="text-sm font-bold text-blue-600">Database Migration File Detected</p>
-                <p className="text-xs text-blue-600/80 font-semibold">The system will automatically parse and merge all new records.</p>
+                <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>
+                <p className="text-xs text-blue-600/80 font-semibold">The system will import all records from this backup file.</p>
               </div>
             </div>
           )}
 
           <div className="space-y-2">
-            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Upload Files (.docx, .xlsx, .csv, .db)</label>
+            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db)</label>
             <div className="border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 hover:bg-muted/50 transition-colors relative">
               <input 
                 type="file" 
@@ -151,8 +143,8 @@ export default function MassImport() {
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               />
               <FileText className="w-10 h-10 text-slate-400 mx-auto mb-3" />
-              <p className="text-sm font-bold text-slate-700 dark:text-slate-300">Click or Drag & Drop municipal files here</p>
-              <p className="text-xs text-muted-foreground mt-1 font-medium">{files.length.toLocaleString()} files currently queued for extraction</p>
+              <p className="text-sm font-bold text-slate-700 dark:text-slate-300">Click or drag files here</p>
+              <p className="text-xs text-muted-foreground mt-1 font-medium">{files.length.toLocaleString()} files ready to upload</p>
             </div>
           </div>
 
@@ -160,8 +152,8 @@ export default function MassImport() {
             <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4">
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
               <div>
-                <p className="text-sm font-bold">{isDatabaseFile ? "Merging Database Records..." : "Processing Files..."}</p>
-                <p className="text-xs text-muted-foreground font-medium mt-1">Please wait and do not close this window.</p>
+                <p className="text-sm font-bold">{isDatabaseFile ? "Importing Database..." : "Processing Files..."}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-1">Please wait until the import completes.</p>
               </div>
               {!isDatabaseFile && (
                 <>
@@ -178,7 +170,7 @@ export default function MassImport() {
               disabled={files.length === 0 || (!isDatabaseFile && !selectedRoute.trim())}
               className="w-full bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-blue-700 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 shadow-md"
             >
-              <UploadCloud size={18} /> Execute Data Integration
+              <UploadCloud size={18} /> Import Files
             </button>
           )}
         </div>

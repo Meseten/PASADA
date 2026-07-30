@@ -8,58 +8,57 @@ import { useRouter } from "next/navigation"
 const API_URL = "http://127.0.0.1:43888";
 
 interface LogEntry {
-  id: number
-  timestamp: string
-  clerk_username: string
-  action: string
-  target_record: string
-  details: string
+  id: number;
+  timestamp: string;
+  clerk_username: string;
+  action: string;
+  target_record: string;
+  details: string;
 }
 
 export default function AuditLogsPage() {
-  const [logs, setLogs] = useState<LogEntry[]>([])
-  const router = useRouter()
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const router = useRouter();
 
   useEffect(() => {
     const fetchLogs = async () => {
-      const token = localStorage.getItem("pasada_token")
+      const token = localStorage.getItem("pasada_token");
       if (!token) {
-        router.push("/")
-        return
+        router.push("/");
+        return;
       }
-
       try {
         const response = await fetch(`${API_URL}/logs`, {
           headers: {
             "Authorization": `Bearer ${token}`
           }
-        })
+        });
         if (response.ok) {
-          const data = await response.json()
-          setLogs(data)
+          const data = await response.json();
+          setLogs(data);
         }
       } catch (error) {
-        console.error(error)
+        console.error(error);
       }
-    }
-    fetchLogs()
-  }, [router])
+    };
+    fetchLogs();
+  }, [router]);
 
   return (
     <div className="flex-1 space-y-4 p-8 pt-6">
-      <h2 className="text-3xl font-bold tracking-tight">System Audit Logs</h2>
+      <h2 className="text-3xl font-bold tracking-tight">Activity History</h2>
       <Card>
         <CardHeader>
-          <CardTitle>Non-Repudiation Trail</CardTitle>
+          <CardTitle>System Action Log</CardTitle>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Timestamp</TableHead>
-                <TableHead>Clerk ID</TableHead>
+                <TableHead>User</TableHead>
                 <TableHead>Action</TableHead>
-                <TableHead>Target</TableHead>
+                <TableHead>Target Record</TableHead>
                 <TableHead>Details</TableHead>
               </TableRow>
             </TableHeader>
@@ -78,5 +77,5 @@ export default function AuditLogsPage() {
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }
