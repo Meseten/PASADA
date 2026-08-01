@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { UploadCloud, CheckCircle, Loader2, FileText, AlertTriangle, Database } from "lucide-react";
 
 const API_URL = "http://127.0.0.1:43888";
@@ -12,6 +12,7 @@ export default function MassImport() {
   const [progress, setProgress] = useState(0);
   const [successMsg, setSuccessMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const progressInterval = useRef<NodeJS.Timeout | null>(null);
 
   const isDatabaseFile = files.length === 1 && files[0].name.endsWith(".db");
 
@@ -21,13 +22,43 @@ export default function MassImport() {
     }
   };
 
+  // Fluid simulated progress bar logic
+  const startFluidProgress = (estimatedSeconds: number) => {
+    setProgress(0);
+    const intervalMs = 50; // High resolution for smooth animation
+    const totalSteps = (estimatedSeconds * 1000) / intervalMs;
+    let currentStep = 0;
+
+    progressInterval.current = setInterval(() => {
+      currentStep++;
+      // Easing function: fast at first, then slows down, capping at 95%
+      const percentage = 95 * (1 - Math.pow(1 - currentStep / totalSteps, 3));
+      
+      setProgress((prev) => {
+        const next = Math.min(percentage, 95);
+        return next > prev ? next : prev;
+      });
+    }, intervalMs);
+  };
+
+  const stopFluidProgress = () => {
+    if (progressInterval.current) {
+      clearInterval(progressInterval.current);
+    }
+    setProgress(100);
+  };
+
   const executeUpload = async () => {
     setUploading(true);
     setSuccessMsg("");
     setErrorMsg("");
     const token = localStorage.getItem("pasada_token") || localStorage.getItem("token");
+    
     try {
       if (isDatabaseFile) {
+        // Database import is usually very fast
+        startFluidProgress(1.5);
+        
         const formData = new FormData();
         formData.append("file", files[0]);
         const res = await fetch(`${API_URL}/upload/database`, {
@@ -35,8 +66,11 @@ export default function MassImport() {
           headers: { "Authorization": `Bearer ${token}` },
           body: formData
         });
+        
         if (!res.ok) throw new Error("Database import failed");
         const data = await res.json();
+        
+        stopFluidProgress();
         setSuccessMsg(`Database imported! Added ${data.imported} new records.`);
       } else {
         if (!selectedRoute.trim()) {
@@ -44,37 +78,50 @@ export default function MassImport() {
           setUploading(false);
           return;
         }
+        
         let importedTotal = 0;
         const CHUNK_SIZE = 500; 
         const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
         const formattedRoute = selectedRoute.trim().toUpperCase();
 
+        // Estimate time based on file count (roughly 0.1s per file)
+        const estimatedSeconds = Math.max(files.length * 0.1, 2);
+        startFluidProgress(estimatedSeconds);
+
         for (let i = 0; i < totalChunks; i++) {
           const chunk = files.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
           const formData = new FormData();
           chunk.forEach(f => formData.append("files", f));
+          
           const res = await fetch(`${API_URL}/upload/bulk/${formattedRoute}`, {
             method: "POST",
             headers: { "Authorization": `Bearer ${token}` },
             body: formData
           });
+          
           if (!res.ok) throw new Error("File upload failed");
           const data = await res.json();
           importedTotal += data.imported;
-          setProgress(Math.round(((i + 1) / totalChunks) * 100));
         }
         
+        stopFluidProgress();
         window.dispatchEvent(new Event('toda_imported'));
         setSuccessMsg(`Successfully imported ${importedTotal} records for ${formattedRoute}.`);
       }
       
-      setFiles([]);
-      setSelectedRoute("");
+      // Small delay before resetting the UI completely
+      setTimeout(() => {
+        setFiles([]);
+        setSelectedRoute("");
+        setUploading(false);
+        setProgress(0);
+      }, 1500);
+
     } catch (err) {
-      setErrorMsg("Upload failed. Ensure the server is connected.");
-    } finally {
-      setUploading(false);
+      if (progressInterval.current) clearInterval(progressInterval.current);
       setProgress(0);
+      setUploading(false);
+      setErrorMsg("Upload failed. Ensure the server is connected.");
     }
   };
 
@@ -116,8 +163,9 @@ export default function MassImport() {
                     }
                   }
                 }}
+                disabled={uploading}
                 placeholder="E.g. BATODA (Required for Excel/Word files)"
-                className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all"
+                className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all disabled:opacity-60"
               />
             </div>
           )}
@@ -134,13 +182,14 @@ export default function MassImport() {
 
           <div className="space-y-2">
             <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db)</label>
-            <div className="border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 hover:bg-muted/50 transition-colors relative">
+            <div className={`border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 transition-colors relative ${uploading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-muted/50'}`}>
               <input 
                 type="file" 
                 multiple 
                 accept=".docx,.xlsx,.csv,.db" 
                 onChange={handleFileChange}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                disabled={uploading}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
               />
               <FileText className="w-10 h-10 text-slate-400 mx-auto mb-3" />
               <p className="text-sm font-bold text-slate-700 dark:text-slate-300">Click or drag files here</p>
@@ -149,20 +198,25 @@ export default function MassImport() {
           </div>
 
           {uploading ? (
-            <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4">
+            <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4 animate-in fade-in zoom-in-95">
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
               <div>
-                <p className="text-sm font-bold">{isDatabaseFile ? "Importing Database..." : "Processing Files..."}</p>
-                <p className="text-xs text-muted-foreground font-medium mt-1">Please wait until the import completes.</p>
+                <p className="text-sm font-bold">{isDatabaseFile ? "Importing Database..." : "Processing & Merging Files..."}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-1">Please do not close this window.</p>
               </div>
-              {!isDatabaseFile && (
-                <>
-                  <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner">
-                    <div className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out" style={{ width: `${Math.max(progress, 5)}%` }}></div>
-                  </div>
-                  <p className="text-xs font-bold text-blue-600">{progress}% Complete</p>
-                </>
-              )}
+              <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner relative">
+                <div 
+                  className="bg-blue-600 h-3 rounded-full absolute left-0 top-0 bottom-0" 
+                  style={{ 
+                    width: `${Math.max(progress, 2)}%`,
+                    transition: progress === 100 ? 'width 0.2s ease-out' : 'width 0.1s linear' // Smooth real-time transition
+                  }}
+                >
+                  {/* Subtle shimmer effect on the loading bar */}
+                  <div className="absolute inset-0 bg-white/20 w-full h-full animate-[shimmer_1s_infinite]"></div>
+                </div>
+              </div>
+              <p className="text-xs font-bold text-blue-600">{Math.round(progress)}% Complete</p>
             </div>
           ) : (
             <button 
