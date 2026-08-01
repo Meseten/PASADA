@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, ArrowUpDown, Shield } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, ArrowUpDown, Shield, RefreshCw } from "lucide-react"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
@@ -59,6 +59,7 @@ export default function TodaClient() {
   const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false) // NEW STATE FOR REFRESH BUTTON
   const [selectedSbns, setSelectedSbns] = useState<string[]>([])
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
@@ -147,26 +148,36 @@ export default function TodaClient() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // NEW SMART PREFIX EXTRACTOR
   const getNextSbnPreview = (route: string, list: Member[]): string => {
-    const prefix = route.substring(0, 3).toUpperCase();
+    let prefix = "";
     let maxNum = 0;
+    let padding = 3;
     
     list.forEach(m => {
       const sbnStr = String(m.sbn_no || "").toUpperCase();
-      const match = sbnStr.match(/\d+/g);
-      if (match && match.length > 0) {
-        const val = parseInt(match[match.length - 1], 10);
+      const match = sbnStr.match(/^([A-Z0-9]+)[\-\_](\d+)/);
+      if (match) {
+        if (!prefix) prefix = match[1]; 
+        const numStr = match[2];
+        const val = parseInt(numStr, 10);
         if (!isNaN(val) && val > maxNum) {
-          maxNum = val;
+          maxNum = val; 
         }
+        if (numStr.length > padding) padding = numStr.length;
       }
     });
+
+    if (!prefix) {
+      const cleanRoute = route.replace(/TODA/g, '').trim();
+      prefix = cleanRoute.length <= 4 ? cleanRoute : cleanRoute.substring(0, 3);
+    }
 
     let nextNum = maxNum + 1;
     while (nextNum === 0 || String(nextNum).endsWith("000") || String(nextNum).endsWith("0000")) {
       nextNum += 1;
     }
-    const padding = maxNum >= 1000 ? 4 : 3;
+    
     return `${prefix}-${String(nextNum).padStart(padding, '0')}`;
   };
 
@@ -186,7 +197,7 @@ export default function TodaClient() {
       make: "", 
       plate_no: "", 
       route: safeRouteName, 
-      driving_route: "" // Removed default "POBLACION" fallback here
+      driving_route: "" 
     })
     setIsAddOpen(true)
   }
@@ -200,6 +211,33 @@ export default function TodaClient() {
     setViewMember(member)
     setIsViewOpen(true)
   }
+
+  // REFRESH DB HANDLER (Fixes Ghost Dates & Erroneous "Poblacion" routes)
+  const handleRefreshDatabase = async () => {
+    const confirmRefresh = window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?");
+    if (!confirmRefresh) return;
+
+    setIsRefreshing(true);
+    const token = localStorage.getItem("token") || localStorage.getItem("pasada_token");
+    try {
+      const res = await fetch(`${API_URL}/admin/refresh-db`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const result = await res.json();
+        alert(result.message || "Database refreshed successfully!");
+        fetchMembers(); // Instantly update the table tally!
+      } else {
+        const err = await res.json();
+        alert(err.detail || "Failed to refresh database.");
+      }
+    } catch (err) {
+      alert("Network error while trying to refresh the database.");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleDeleteOne = async (member: Member) => {
     const confirmDelete = window.confirm(`Are you sure you want to delete operator ${member.sbn_no} (${member.operator_name || "VACANT"})?`);
@@ -499,7 +537,6 @@ export default function TodaClient() {
     e.preventDefault()
     const token = localStorage.getItem("token")
     try {
-      // Prioritize explicit driving_route, otherwise allow it to remain blank and inherit route
       const finalDrivingRoute = formData.driving_route.trim() !== "" ? formData.driving_route : formData.route;
       const payload = { ...formData, driving_route: finalDrivingRoute, route: safeRouteName }
       
@@ -629,6 +666,12 @@ export default function TodaClient() {
             <option value="VACANT">Vacant Slots</option>
           </select>
 
+          {/* ADDED: REFRESH DATABASE BUTTON */}
+          <Button variant="outline" onClick={handleRefreshDatabase} disabled={isRefreshing} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-4 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
+            {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
+            Refresh DB
+          </Button>
+
           <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
             {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
             Export Excel
@@ -690,7 +733,6 @@ export default function TodaClient() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-bold text-muted-foreground uppercase">Route Assignment</span>
-                  {/* Graceful fallback to the parent route (e.g. BATODA) if the slot is vacant/revoked with no specific driving_route */}
                   <Badge className="font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
                     {viewMember.driving_route || viewMember.route}
                   </Badge>
@@ -840,12 +882,14 @@ export default function TodaClient() {
           <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
-                <Label className="font-semibold">SBN No. <span className="text-xs text-blue-600 font-normal">(Auto-Generated)</span></Label>
+                <Label className="font-semibold flex justify-between">
+                  SBN No. <span className="text-xs text-blue-600 font-normal">(Auto-Generated, Editable)</span>
+                </Label>
                 <Input 
                   name="sbn_no" 
                   value={formData.sbn_no} 
-                  readOnly 
-                  className="font-mono bg-muted/60 border-border/50 shadow-inner h-11 text-slate-500 font-bold cursor-not-allowed" 
+                  onChange={handleInputChange}
+                  className="font-mono bg-background border-border/50 shadow-inner h-11 font-bold" 
                 />
               </div>
               <div className="space-y-2">
@@ -863,7 +907,7 @@ export default function TodaClient() {
             </div>
             <div className="grid grid-cols-2 gap-4">
                <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit TODA route" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
@@ -895,7 +939,7 @@ export default function TodaClient() {
             <div className="space-y-2"><Label className="font-semibold">Address</Label><Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" /></div>
             <div className="grid grid-cols-2 gap-4">
                <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit TODA route" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
