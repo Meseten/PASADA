@@ -191,7 +191,6 @@ try:
                 return str(val).strip()
         return ""
 
-    # SAFE DATE PARSING (Prevents pd.NaT / NaN SQLite Crash)
     def parse_safe_date(raw_date, fallback_year):
         if raw_date is None or pd.isna(raw_date) or str(raw_date).strip().lower() in ["nan", "nat", "none", ""]:
             return None
@@ -205,7 +204,6 @@ try:
         except:
             return None
 
-    # STRICT BASE SBN EXTRACTION (Requires hyphens before digits & year suffix)
     def get_base_sbn(sbn):
         sbn = str(sbn).strip().upper()
         match = re.match(r'^([A-Z0-9]+[\-\_]\d+)[\-\_](\d{2}|\d{4})$', sbn)
@@ -213,18 +211,33 @@ try:
             return match.group(1)
         return sbn
 
-    # NORMALIZE BASE SBN PADDING (e.g. BA-1 -> BA-001)
     def normalize_base_sbn(sbn):
-        base = get_base_sbn(sbn)
-        match = re.match(r'^([A-Z0-9]+)[\-\_](\d+)$', base)
+        if pd.isna(sbn) or not sbn: return ""
+        sbn = str(sbn).strip().upper()
+        
+        match = re.match(r'^(.*?)[\s\-\_]+(\d{2}|\d{4})$', sbn)
+        if match:
+            base = match.group(1)
+        else:
+            base = sbn
+            
+        match = re.match(r'^(.*?)[\s\-\_]+(\d+)$', base)
+        if match:
+            prefix = re.sub(r'[^A-Z0-9]', '', match.group(1))
+            num_str = match.group(2)
+            padding = 4 if int(num_str) >= 1000 else 3
+            return f"{prefix}-{int(num_str):0{padding}d}"
+
+        clean_base = re.sub(r'[^A-Z0-9]', '', base)
+        match = re.match(r'^([A-Z]+)(\d+)$', clean_base)
         if match:
             prefix = match.group(1)
             num_str = match.group(2)
             padding = 4 if int(num_str) >= 1000 else 3
             return f"{prefix}-{int(num_str):0{padding}d}"
-        return base
 
-    # DYNAMIC -YY YEAR SUFFIX INJECTION (e.g. BA-001 -> BA-001-26)
+        return base.replace(" ", "")
+
     def format_sbn_with_year(sbn, issue_date, is_vacant=False):
         base_sbn = normalize_base_sbn(sbn)
         if is_vacant or not issue_date:
@@ -244,13 +257,11 @@ try:
             return dt.year
         return 0
 
-    # NON-DESTRUCTIVE MERGING: ONLY OVERWRITE WHEN EXISTING DB VALUE IS BLANK
     def set_if_blank(curr_val, new_val):
         if (not curr_val or not str(curr_val).strip()) and new_val:
             return str(new_val).strip().upper()
         return curr_val
 
-    # STRICT SBN INTEGER EXTRACTION FOR NUMERICAL SORTING (1 to 1000)
     def extract_sbn_integer(sbn):
         base_sbn = get_base_sbn(sbn)
         nums = re.findall(r'\d+', base_sbn)
@@ -262,12 +273,11 @@ try:
         val = extract_sbn_integer(record.sbn_no)
         return val if val is not None else 999999
 
-    # AUTO-GENERATE NEXT SBN (Prevents 000 / 0000 or arbitrary numbering)
     def generate_next_sbn(db: Session, route: str) -> str:
         route_upper = route.strip().upper()
         records = db.query(FranchiseRecord.sbn_no).filter(FranchiseRecord.route == route_upper).all()
         max_num = 0
-        prefix = route_upper[:3]
+        prefix = ""
         padding_len = 3
         
         for (sbn_val,) in records:
@@ -276,21 +286,27 @@ try:
                 base = get_base_sbn(sbn_str)
                 match = re.match(r'^([A-Z0-9]+)[\-\_]?(\d+)', base)
                 if match:
-                    prefix = match.group(1)
+                    if not prefix: 
+                        prefix = match.group(1) 
                     num_str = match.group(2)
                     padding_len = max(padding_len, len(num_str))
+                
                 nums = re.findall(r'\d+', base)
                 if nums:
                     val = int(nums[-1])
                     if val > max_num:
                         max_num = val
                         
+        if not prefix:
+            clean_route = route_upper.replace("TODA", "").strip()
+            prefix = clean_route if len(clean_route) <= 4 else clean_route[:3]
+            
         next_num = max(max_num + 1, 1)
         while next_num == 0 or str(next_num).endswith("000") or str(next_num).endswith("0000"):
             next_num += 1
+            
         return f"{prefix}-{next_num:0{padding_len}d}"
 
-    # SELF-HEALING: GET DOMINANT ROUTE DYNAMICALLY
     def get_dominant_driving_route(db: Session, route_name: str) -> str:
         records = db.query(FranchiseRecord.driving_route).filter(
             FranchiseRecord.route == route_name.upper(),
@@ -308,7 +324,6 @@ try:
             return most_common[0][0]
         return ""
 
-    # DEDUPLICATE BY BASE SBN IN MEMORY
     def deduplicate_records_by_base_sbn(records):
         unique_map = {}
         for r in records:
@@ -345,7 +360,6 @@ try:
                     unique_map[route_key] = r
         return list(unique_map.values())
 
-    # SINGLE & MULTIPLE DELETION ENDPOINTS
     @app.delete("/api/operators/{sbn_no}")
     def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         clean_sbn = normalize_base_sbn(sbn_no)
@@ -376,13 +390,29 @@ try:
         log_action(db, f"{current_user.first_name} {current_user.last_name}", "BULK_DELETE", "0", "ALL", f"Bulk deleted {deleted_count} operator record(s).")
         return {"message": f"{deleted_count} operator(s) deleted successfully."}
 
-    # ONE-CLICK DATABASE CLEANUP ENDPOINT (POST /admin/refresh-db)
+    @app.delete("/api/routes/{route_name}")
+    def delete_entire_route(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        route_to_delete = route_name.strip().upper()
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
+        
+        if not records:
+            raise HTTPException(status_code=404, detail="Route not found or already empty.")
+            
+        count = len(records)
+        for r in records:
+            db.delete(r)
+        db.commit()
+        
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DELETE_ROUTE", "0", route_to_delete, f"Bulk deleted entire route line '{route_to_delete}' containing {count} record(s).")
+        return {"message": f"Route '{route_to_delete}' deleted successfully."}
+
     @app.post("/admin/refresh-db")
     def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         all_records = db.query(FranchiseRecord).all()
         route_sbn_map = {}
         deleted_count = 0
         updated_count = 0
+        current_year = get_pht_now().year
         
         for r in all_records:
             sbn_str = str(r.sbn_no).strip().upper()
@@ -394,6 +424,12 @@ try:
             clean_sbn = normalize_base_sbn(r.sbn_no)
             if r.sbn_no != clean_sbn:
                 r.sbn_no = clean_sbn
+                updated_count += 1
+
+            if r.issue_date and r.issue_date.month == 1 and r.issue_date.day == 1 and r.issue_date.year == current_year:
+                r.issue_date = None
+                r.valid_until = None
+                r.is_active = False
                 updated_count += 1
             
             is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
@@ -428,7 +464,6 @@ try:
             is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
             record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
 
-        # Heal driving routes for all records across the database
         unique_routes = {r.route for r in route_sbn_map.values()}
         for r_name in unique_routes:
             dom_route = get_dominant_driving_route(db, r_name)
@@ -440,10 +475,10 @@ try:
                             r.driving_route = dom_route
 
         db.commit()
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, and removed {deleted_count} duplicates.")
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, reversed phantom dates, and removed {deleted_count} duplicates.")
         return {
             "status": "success",
-            "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate or invalid test records. Total remaining across all routes: {len(route_sbn_map)}."
+            "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
         }
 
     @app.post("/signup")
@@ -525,7 +560,7 @@ try:
             "users": users
         }
 
-    # AUTO-GENERATE NEXT SBN ON ADD NEW FRANCHISE
+    # UPGRADED: Force valid status when manually creating an operator
     @app.post("/api/operators")
     def create_operator_api(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         return create_franchise(record, current_user, db)
@@ -544,17 +579,27 @@ try:
         full_name = f"{current_user.first_name} {current_user.last_name}"
         current_time = get_pht_now()
         
-        raw_next = generate_next_sbn(db, record.route)
-        record.sbn_no = format_sbn_with_year(raw_next, current_time, is_vacant=False)
+        if not record.sbn_no or str(record.sbn_no).strip() == "":
+            raw_next = generate_next_sbn(db, record.route)
+        else:
+            raw_next = record.sbn_no
+
+        is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
+        
+        # FIX: Force strict None defaults for blank/vacant slots to prevent 5346 tally inflation
+        actual_issue_date = None if is_vacant else current_time
+        actual_valid_until = None if is_vacant else datetime(current_time.year, 12, 31)
+        actual_active = False if is_vacant else True
+
+        record.sbn_no = format_sbn_with_year(raw_next, actual_issue_date, is_vacant)
         record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
         
-        # Self-Heal empty driving route input
         if not record.driving_route or str(record.driving_route).strip() == "":
             record.driving_route = get_dominant_driving_route(db, record.route) or record.route
 
         new_record = FranchiseRecord(
-            **record.dict(), processed_by=full_name, issue_date=current_time,
-            valid_until=datetime(current_time.year, 12, 31), is_active=True
+            **record.dict(), processed_by=full_name, issue_date=actual_issue_date,
+            valid_until=actual_valid_until, is_active=actual_active
         )
         db.add(new_record)
         db.commit()
@@ -562,6 +607,7 @@ try:
         log_action(db, full_name, "CREATE_RECORD", new_record.id, new_record.route, f"Processed Initial MTOP for {record.operator_name}")
         return {"status": "success", "message": f"Franchise operator added successfully with SBN {record.sbn_no}."}
 
+    # UPGRADED: Force valid status when manually editing an operator
     @app.put("/franchise/{record_id}")
     def update_franchise(record_id: str, record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
@@ -573,16 +619,22 @@ try:
         record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
         
         is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
-        if old_sbn != new_base_sbn:
-            new_year = get_pht_now().year
-            db_record.issue_date = get_pht_now()
-            db_record.valid_until = datetime(new_year, 12, 31)
-            db_record.is_active = True
-            is_renewal = True
+        
+        # FIX: If user clears the operator name to make it vacant, forcefully clear the ghost dates
+        if is_vacant:
+            db_record.is_active = False
+            db_record.issue_date = None
+            db_record.valid_until = None
+        else:
+            if old_sbn != new_base_sbn:
+                new_year = get_pht_now().year
+                db_record.issue_date = get_pht_now()
+                db_record.valid_until = datetime(new_year, 12, 31)
+                db_record.is_active = True
+                is_renewal = True
 
         record.sbn_no = format_sbn_with_year(new_base_sbn, db_record.issue_date, is_vacant)
 
-        # Self-Heal empty driving route input
         if not record.driving_route or str(record.driving_route).strip() == "":
             record.driving_route = get_dominant_driving_route(db, db_record.route) or db_record.route
 
@@ -592,7 +644,7 @@ try:
         db.commit()
         full_name = f"{current_user.first_name} {current_user.last_name}"
         if is_renewal:
-            log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {new_year}")
+            log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
         else:
             log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated details for {db_record.operator_name}")
         return {"status": "success"}
@@ -634,7 +686,6 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # STRICT SOURCE-OF-TRUTH PRECEDENCE, SMART MERGING, FALLBACK & -YY INJECTION
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
@@ -644,9 +695,11 @@ try:
         existing_route_records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper()).all()
 
         for file in files:
+            if file.filename.startswith("~$") or file.filename.startswith("._") or file.filename == ".DS_Store":
+                continue
+
             contents = await file.read()
             try:
-                # EXCEL (.xlsx) & CSV (.csv) -> Authoritative for Timeline & Compliance; Non-Destructive for Profile
                 if file.filename.endswith(".xlsx") or file.filename.endswith(".csv"):
                     row_dicts = []
                     if file.filename.endswith(".xlsx"):
@@ -701,9 +754,7 @@ try:
                                     break
 
                         parsed_date = parse_safe_date(raw_date, current_time.year)
-                        if not is_vacant and not parsed_date:
-                            parsed_date = datetime(current_time.year, 1, 1)
-
+                        
                         incoming_base_sbn = normalize_base_sbn(raw_sbn)
                         clean_plate = sanitize_plate(plate, chassis, motor)
                         
@@ -714,14 +765,12 @@ try:
                                 break
 
                         if existing_record:
-                            # Excel sets authoritative Timeline & Compliance
                             if get_record_year(parsed_date) >= get_record_year(existing_record.issue_date):
                                 existing_record.issue_date = parsed_date
                                 existing_record.valid_until = datetime(parsed_date.year, 12, 31) if parsed_date else None
                                 existing_record.is_active = False if is_vacant else determine_status(parsed_date)
                                 existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, parsed_date, is_vacant)
                                 
-                                # Non-Destructive Merging: only set address, make, plate, chassis, motor if currently blank
                                 if name and str(name).strip():
                                     existing_record.operator_name = str(name).strip().upper()
                                 existing_record.address = set_if_blank(existing_record.address, address)
@@ -744,25 +793,20 @@ try:
                             existing_route_records.append(record)
                             imported_count += 1
 
-                # WORD (.docx) -> Authoritative for Profile & Hardware
                 elif file.filename.endswith(".docx"):
                     extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
                     is_vacant = not extracted['operator_name'] or str(extracted['operator_name']).strip() == ""
                     issue_date = parse_safe_date(extracted['issue_date'], current_time.year)
-                    if not is_vacant and not issue_date:
-                        issue_date = datetime(current_time.year, 1, 1)
-
+                    
                     clean_plate = sanitize_plate(extracted['plate_no'], extracted['chassis_no'], extracted['motor_no'])
                     incoming_base_sbn = normalize_base_sbn(extracted['sbn_no'])
                     
                     existing_record = None
-                    # 1. Standard Matching by SBN
                     for pr in existing_route_records:
                         if normalize_base_sbn(pr.sbn_no) == incoming_base_sbn:
                             existing_record = pr
                             break
 
-                    # 2. FALLBACK MATCHING: Hardware matching to prevent '000' duplicates
                     if not existing_record:
                         has_plate = clean_plate and str(clean_plate).strip() != ""
                         has_motor = extracted['motor_no'] and str(extracted['motor_no']).strip() != ""
@@ -773,11 +817,10 @@ try:
                                (has_motor and pr.motor_no == str(extracted['motor_no']).strip().upper()) or \
                                (has_chassis and pr.chassis_no == str(extracted['chassis_no']).strip().upper()):
                                 existing_record = pr
-                                incoming_base_sbn = normalize_base_sbn(pr.sbn_no) # Adopt correct SBN
+                                incoming_base_sbn = normalize_base_sbn(pr.sbn_no) 
                                 break
 
                     if existing_record:
-                        # Authoritative override for profile & hardware fields
                         if extracted['operator_name'] and str(extracted['operator_name']).strip():
                             existing_record.operator_name = str(extracted['operator_name']).strip().upper()
                         if extracted['address'] and str(extracted['address']).strip():
@@ -793,7 +836,6 @@ try:
                         if extracted['motor_no'] and str(extracted['motor_no']).strip():
                             existing_record.motor_no = str(extracted['motor_no']).strip().upper()
 
-                        # Update issue_date ONLY if existing record has no date or older year
                         doc_year = get_record_year(issue_date)
                         existing_year = get_record_year(existing_record.issue_date)
                         if issue_date and (not existing_record.issue_date or doc_year > existing_year):
@@ -804,7 +846,6 @@ try:
                         existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, existing_record.issue_date, is_vacant)
                         imported_count += 1
                     else:
-                        # STRICT BLOCK: Do not create a new '000' record duplicate if hardware fallback also failed
                         if "000" in incoming_base_sbn:
                             continue
 
@@ -830,15 +871,12 @@ try:
                 force_log(f"Import Error: {e}")
                 continue
 
-        # Save files and initial records
         db.commit()
 
-        # RUN SELF-HEALING DOMINANT ROUTE ALGORITHM
         dominant_route = get_dominant_driving_route(db, route_name)
         if dominant_route:
             for pr in existing_route_records:
                 curr_dr = str(pr.driving_route).strip().upper() if pr.driving_route else ""
-                # Replace old POBLACION ghosts, or blank Excel entries, with the true Dominant Route found from the active Word files
                 if curr_dr == "" or (curr_dr == "POBLACION" and dominant_route != "POBLACION"):
                     pr.driving_route = dominant_route
             db.commit()
@@ -846,7 +884,6 @@ try:
         log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
-    # HIGH-PERFORMANCE I/O: Async Download Word Endpoint
     @app.post("/franchise/download/word/{record_id}")
     async def download_word_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
@@ -866,7 +903,6 @@ try:
         }
         committee_data = {"committee_chair": settings.committee_chair}
         
-        # Offload intensive file I/O processing to background thread to unblock API UI
         doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="docx")
         
         if os.path.exists(doc_path):
@@ -875,7 +911,6 @@ try:
             
         raise HTTPException(status_code=500)
 
-    # HIGH-PERFORMANCE I/O: Async PDF Generate Endpoint
     @app.post("/franchise/generate/{record_id}")
     async def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
@@ -895,7 +930,6 @@ try:
         }
         committee_data = {"committee_chair": settings.committee_chair}
 
-        # Offload intensive PDF conversion to background thread to unblock API UI
         doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="pdf")
         
         if os.path.exists(doc_path):

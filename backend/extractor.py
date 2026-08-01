@@ -47,9 +47,9 @@ def extract_docx_data(contents, default_route, current_year):
     make = clean_field(make)
     physical_route = clean_field(physical_route)
 
-    # Universal SBN Extractor (Hunts down en-dashes automatically)
-    sbn_match = re.search(r"([A-Z]{2,5}[\-\–]\d{3,}[\-\–]\d{2})", full_text, re.IGNORECASE)
-    sbn_no = sbn_match.group(1).replace('–', '-').strip() if sbn_match else f"{default_route[:3]}-000-{str(current_year)[-2:]}"
+    # UPDATED: Fault-Tolerant Universal SBN Extractor (Ignores spaces, handles optional years)
+    sbn_match = re.search(r"([A-Z]{2,5}\s*[\-\–]\s*\d{3,}(?:\s*[\-\–]\s*\d{2,4})?)", full_text, re.IGNORECASE)
+    sbn_no = re.sub(r'\s+', '', sbn_match.group(1)).replace('–', '-').strip() if sbn_match else f"{default_route[:3]}-000-{str(current_year)[-2:]}"
 
     date_match = re.search(r"(?:Date Issued|Given this)[:\s]*([a-zA-Z]+\s+\d{1,2},?\s+\d{4})", full_text, re.IGNORECASE)
     try:

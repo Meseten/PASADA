@@ -5,7 +5,7 @@ import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { ThemeProvider, useTheme } from "next-themes"
 import { useEffect, useState, useCallback } from "react"
-import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map } from "lucide-react"
+import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map, Pin, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
@@ -13,10 +13,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
-
+  
   useEffect(() => setMounted(true), [])
   if (!mounted) return <div className="w-8 h-8" />
-
+  
   return (
     <button 
       onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
@@ -33,6 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter()
   const [mounted, setMounted] = useState(false)
   const [activeRoutes, setActiveRoutes] = useState<string[]>([])
+  const [pinnedRoutes, setPinnedRoutes] = useState<string[]>([])
   const [routeSearch, setRouteSearch] = useState("")
   const [userName, setUserName] = useState("System User")
   const [userRole, setUserRole] = useState("Clerk")
@@ -62,13 +63,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     
     const storedName = localStorage.getItem("pasada_full_name") || localStorage.getItem("full_name")
     const storedRole = localStorage.getItem("pasada_role")
+    const storedPinned = localStorage.getItem("pasada_pinned_routes")
     
     if (storedName) setUserName(storedName)
     if (storedRole) setUserRole(storedRole)
+    if (storedPinned) setPinnedRoutes(JSON.parse(storedPinned))
     
     if (pathname !== "/" && pathname !== "/signup") {
       fetchRoutes()
     }
+    
     window.addEventListener('toda_imported', fetchRoutes)
     
     return () => {
@@ -87,10 +91,77 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     router.push("/")
   }
 
+  const togglePin = (e: React.MouseEvent, route: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    let updated = [...pinnedRoutes];
+    if (updated.includes(route)) {
+        updated = updated.filter(r => r !== route);
+    } else {
+        updated.push(route);
+    }
+    setPinnedRoutes(updated);
+    localStorage.setItem("pasada_pinned_routes", JSON.stringify(updated));
+  };
+
+  const deleteRoute = async (e: React.MouseEvent, route: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (window.confirm(`Are you sure you want to delete the entire ${route} line and all its records? This action cannot be undone.`)) {
+        const token = localStorage.getItem("token") || localStorage.getItem("pasada_token");
+        try {
+            const res = await fetch(`${API_URL}/api/routes/${route}`, {
+                method: "DELETE",
+                headers: { "Authorization": `Bearer ${token}` }
+            });
+            if (res.ok) {
+                // 1. Purge from local storage pins so it doesn't leave a ghost element
+                if (pinnedRoutes.includes(route)) {
+                    const updatedPins = pinnedRoutes.filter(r => r !== route);
+                    setPinnedRoutes(updatedPins);
+                    localStorage.setItem("pasada_pinned_routes", JSON.stringify(updatedPins));
+                }
+
+                alert(`Route ${route} deleted successfully.`);
+                fetchRoutes();
+                
+                // 2. Safely redirect the user to the dashboard if they are viewing the deleted route
+                if (pathname === `/toda/${route}`) {
+                    router.push('/dashboard');
+                }
+            } else {
+                const err = await res.json();
+                alert(err.detail || `Failed to delete route ${route}.`);
+            }
+        } catch (error) {
+            alert("Network error while deleting route.");
+        }
+    }
+  };
+
   const isAuthPage = pathname === "/" || pathname === "/signup"
+  
   if (!mounted) return null
 
   const filteredRoutes = activeRoutes.filter(r => r.toLowerCase().includes(routeSearch.toLowerCase()))
+  const pinnedList = filteredRoutes.filter(r => pinnedRoutes.includes(r));
+  const unpinnedList = filteredRoutes.filter(r => !pinnedRoutes.includes(r));
+
+  const RouteItem = ({ route, isPinned }: { route: string, isPinned: boolean }) => (
+    <div key={route} className="relative group flex items-center">
+        <Link href={`/toda/${route}`} className={`flex-1 flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === `/toda/${route}` ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+            <Map className="mr-2 h-4 w-4 opacity-50" /> {route}
+        </Link>
+        <div className="absolute right-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-background/80 px-1 rounded">
+            <button onClick={(e) => togglePin(e, route)} className="p-1 hover:text-blue-600 transition-colors" title={isPinned ? "Unpin Route" : "Pin Route"}>
+                <Pin className={`h-3.5 w-3.5 ${isPinned ? 'fill-current text-blue-600' : 'text-slate-400'}`} />
+            </button>
+            <button onClick={(e) => deleteRoute(e, route)} className="p-1 hover:text-red-600 transition-colors" title="Delete Entire Route">
+                <Trash2 className="h-3.5 w-3.5 text-slate-400 hover:text-red-500" />
+            </button>
+        </div>
+    </div>
+  );
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -116,12 +187,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </div>
                   <ThemeToggle />
                 </div>
-
                 <div className="px-4 py-4 border-b border-border bg-muted/20">
                   <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{userName}</p>
                   <p className="text-xs text-muted-foreground font-medium">{userRole}</p>
                 </div>
-
+                
                 <nav className="flex-1 space-y-1 p-4 overflow-y-auto custom-scrollbar">
                   <Link href="/dashboard" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/dashboard' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <LayoutDashboard className="mr-2 h-4 w-4" /> Dashboard
@@ -157,17 +227,24 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   )}
                   
                   <div className="space-y-1 mt-1">
-                    {filteredRoutes.map((route) => (
-                      <Link key={route} href={`/toda/${route}`} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === `/toda/${route}` ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
-                        <Map className="mr-2 h-4 w-4 opacity-50" /> {route}
-                      </Link>
-                    ))}
+                    {pinnedList.length > 0 && (
+                        <div className="mb-2">
+                            <p className="px-3 text-[10px] font-black text-blue-600/70 uppercase tracking-widest mb-1 mt-2 flex items-center gap-1"><Pin size={10} className="fill-current"/> Pinned Routes</p>
+                            {pinnedList.map(route => <RouteItem key={`pinned-${route}`} route={route} isPinned={true} />)}
+                        </div>
+                    )}
+
+                    <div className="mb-2">
+                        {pinnedList.length > 0 && unpinnedList.length > 0 && <p className="px-3 text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-1 mt-2">All Routes</p>}
+                        {unpinnedList.map(route => <RouteItem key={`unpinned-${route}`} route={route} isPinned={false} />)}
+                    </div>
+
                     {activeRoutes.length > 0 && filteredRoutes.length === 0 && (
                       <div className="px-3 py-2 text-xs text-muted-foreground font-semibold italic">No routes found.</div>
                     )}
                   </div>
                 </nav>
-
+                
                 <div className="p-4 border-t border-border space-y-4 bg-muted/10">
                   <p className="text-xs font-bold text-muted-foreground">
                     Status: <span className={isNetworkOnline ? "text-emerald-500" : "text-red-500"}>{isNetworkOnline ? "Online" : "Offline Mode"}</span>
@@ -180,7 +257,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </button>
                 </div>
               </aside>
-
+              
               <main className="flex-1 overflow-y-auto bg-background/95">
                 {children}
               </main>
