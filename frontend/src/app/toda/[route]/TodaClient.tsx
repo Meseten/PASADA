@@ -186,7 +186,7 @@ export default function TodaClient() {
       make: "", 
       plate_no: "", 
       route: safeRouteName, 
-      driving_route: "POBLACION" 
+      driving_route: "" // Removed default "POBLACION" fallback here
     })
     setIsAddOpen(true)
   }
@@ -499,7 +499,10 @@ export default function TodaClient() {
     e.preventDefault()
     const token = localStorage.getItem("token")
     try {
-      const payload = { ...formData, driving_route: formData.driving_route || formData.route, route: safeRouteName }
+      // Prioritize explicit driving_route, otherwise allow it to remain blank and inherit route
+      const finalDrivingRoute = formData.driving_route.trim() !== "" ? formData.driving_route : formData.route;
+      const payload = { ...formData, driving_route: finalDrivingRoute, route: safeRouteName }
+      
       const response = await fetch(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
         method: isAdd ? "POST" : "PUT",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -687,7 +690,10 @@ export default function TodaClient() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-xs font-bold text-muted-foreground uppercase">Route Assignment</span>
-                  <Badge className="font-bold">{viewMember.route}</Badge>
+                  {/* Graceful fallback to the parent route (e.g. BATODA) if the slot is vacant/revoked with no specific driving_route */}
+                  <Badge className="font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                    {viewMember.driving_route || viewMember.route}
+                  </Badge>
                 </div>
               </div>
 
@@ -828,8 +834,8 @@ export default function TodaClient() {
       <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
         <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="text-2xl font-bold">Add Operator</DialogTitle>
-            <DialogDescription>Enter accurate details. SBN number is generated automatically.</DialogDescription>
+            <DialogTitle className="text-2xl font-bold">Add Operator / Slot</DialogTitle>
+            <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
@@ -849,19 +855,19 @@ export default function TodaClient() {
             </div>
             <div className="space-y-2">
               <Label className="font-semibold">Operator Name</Label>
-              <Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} required className="h-11" />
+              <Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" />
             </div>
             <div className="space-y-2">
               <Label className="font-semibold">Address</Label>
-              <Input name="address" value={formData.address} onChange={handleInputChange} required className="h-11" />
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" />
             </div>
             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} required /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="e.g. POBLACION" required /></div>
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit TODA route" /></div>
             </div>
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} required /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} required /></div>
+              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
             </div>
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white">Save Operator</Button>
@@ -875,7 +881,7 @@ export default function TodaClient() {
         <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold">Edit / Renew Operator</DialogTitle>
-            <DialogDescription>Update record details or renew compliance.</DialogDescription>
+            <DialogDescription>Update record details or clear fields to set as Vacant.</DialogDescription>
           </DialogHeader>
           <form onSubmit={(e) => handleSubmitForm(e, false)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
@@ -885,15 +891,15 @@ export default function TodaClient() {
               </div>
               <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
             </div>
-            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} required className="h-11" /></div>
-            <div className="space-y-2"><Label className="font-semibold">Address</Label><Input name="address" value={formData.address} onChange={handleInputChange} required className="h-11" /></div>
+            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
+            <div className="space-y-2"><Label className="font-semibold">Address</Label><Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" /></div>
             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} required /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="e.g. POBLACION" required /></div>
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit TODA route" /></div>
             </div>
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} required /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} required /></div>
+              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
             </div>
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Changes</Button>

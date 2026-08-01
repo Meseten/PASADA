@@ -176,7 +176,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     onClick={handleLogout} 
                     className="w-full flex items-center justify-center gap-2 py-3 bg-card border border-border hover:bg-red-500/10 hover:text-red-600 hover:border-red-500/30 text-muted-foreground rounded-lg text-sm font-black shadow-sm transition-all"
                   >
-                    <LogOut size={16} /> Log Out
+                    <LogOut size={16} /> Log out
                   </button>
                 </div>
               </aside>

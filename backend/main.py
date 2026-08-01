@@ -2,6 +2,7 @@ import sys
 import os
 import traceback
 import re
+import asyncio
 from datetime import datetime
 import zipfile
 import threading
@@ -289,6 +290,24 @@ try:
             next_num += 1
         return f"{prefix}-{next_num:0{padding_len}d}"
 
+    # SELF-HEALING: GET DOMINANT ROUTE DYNAMICALLY
+    def get_dominant_driving_route(db: Session, route_name: str) -> str:
+        records = db.query(FranchiseRecord.driving_route).filter(
+            FranchiseRecord.route == route_name.upper(),
+            FranchiseRecord.driving_route != None,
+            FranchiseRecord.driving_route != ""
+        ).all()
+        
+        valid_routes = [str(r[0]).strip().upper() for r in records if r[0] and str(r[0]).strip()]
+        if not valid_routes:
+            return ""
+            
+        from collections import Counter
+        most_common = Counter(valid_routes).most_common(1)
+        if most_common:
+            return most_common[0][0]
+        return ""
+
     # DEDUPLICATE BY BASE SBN IN MEMORY
     def deduplicate_records_by_base_sbn(records):
         unique_map = {}
@@ -409,8 +428,19 @@ try:
             is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
             record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
 
+        # Heal driving routes for all records across the database
+        unique_routes = {r.route for r in route_sbn_map.values()}
+        for r_name in unique_routes:
+            dom_route = get_dominant_driving_route(db, r_name)
+            if dom_route:
+                for r in route_sbn_map.values():
+                    if r.route == r_name:
+                        curr_dr = str(r.driving_route).strip().upper() if r.driving_route else ""
+                        if curr_dr == "" or (curr_dr == "POBLACION" and dom_route != "POBLACION"):
+                            r.driving_route = dom_route
+
         db.commit()
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, removed test records and {deleted_count} duplicates.")
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, and removed {deleted_count} duplicates.")
         return {
             "status": "success",
             "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate or invalid test records. Total remaining across all routes: {len(route_sbn_map)}."
@@ -517,6 +547,11 @@ try:
         raw_next = generate_next_sbn(db, record.route)
         record.sbn_no = format_sbn_with_year(raw_next, current_time, is_vacant=False)
         record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
+        
+        # Self-Heal empty driving route input
+        if not record.driving_route or str(record.driving_route).strip() == "":
+            record.driving_route = get_dominant_driving_route(db, record.route) or record.route
+
         new_record = FranchiseRecord(
             **record.dict(), processed_by=full_name, issue_date=current_time,
             valid_until=datetime(current_time.year, 12, 31), is_active=True
@@ -546,6 +581,10 @@ try:
             is_renewal = True
 
         record.sbn_no = format_sbn_with_year(new_base_sbn, db_record.issue_date, is_vacant)
+
+        # Self-Heal empty driving route input
+        if not record.driving_route or str(record.driving_route).strip() == "":
+            record.driving_route = get_dominant_driving_route(db, db_record.route) or db_record.route
 
         for key, value in record.dict().items():
             setattr(db_record, key, value)
@@ -595,7 +634,7 @@ try:
             if os.path.exists(temp_db_path): os.remove(temp_db_path)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # STRICT SOURCE-OF-TRUTH PRECEDENCE, SMART MERGING & -YY INJECTION
+    # STRICT SOURCE-OF-TRUTH PRECEDENCE, SMART MERGING, FALLBACK & -YY INJECTION
     @app.post("/upload/bulk/{route_name}")
     async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         full_name = f"{current_user.first_name} {current_user.last_name}"
@@ -690,8 +729,6 @@ try:
                                 existing_record.plate_no = set_if_blank(existing_record.plate_no, clean_plate)
                                 existing_record.chassis_no = set_if_blank(existing_record.chassis_no, chassis)
                                 existing_record.motor_no = set_if_blank(existing_record.motor_no, motor)
-                                if not existing_record.driving_route or not str(existing_record.driving_route).strip():
-                                    existing_record.driving_route = "POBLACION"
                                 imported_count += 1
                         else:
                             record = FranchiseRecord(
@@ -699,7 +736,7 @@ try:
                                 operator_name=name.upper() if name else "",
                                 address=address.upper() if address else "", motor_no=motor.upper() if motor else "",
                                 plate_no=clean_plate.upper() if clean_plate else "", chassis_no=chassis.upper() if chassis else "",
-                                make=make.upper() if make else "", route=route_name.upper(), driving_route="POBLACION", 
+                                make=make.upper() if make else "", route=route_name.upper(), driving_route="", 
                                 issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31) if parsed_date else None,
                                 processed_by=full_name, is_active=False if is_vacant else determine_status(parsed_date)
                             )
@@ -719,10 +756,25 @@ try:
                     incoming_base_sbn = normalize_base_sbn(extracted['sbn_no'])
                     
                     existing_record = None
+                    # 1. Standard Matching by SBN
                     for pr in existing_route_records:
                         if normalize_base_sbn(pr.sbn_no) == incoming_base_sbn:
                             existing_record = pr
                             break
+
+                    # 2. FALLBACK MATCHING: Hardware matching to prevent '000' duplicates
+                    if not existing_record:
+                        has_plate = clean_plate and str(clean_plate).strip() != ""
+                        has_motor = extracted['motor_no'] and str(extracted['motor_no']).strip() != ""
+                        has_chassis = extracted['chassis_no'] and str(extracted['chassis_no']).strip() != ""
+                        
+                        for pr in existing_route_records:
+                            if (has_plate and pr.plate_no == str(clean_plate).strip().upper()) or \
+                               (has_motor and pr.motor_no == str(extracted['motor_no']).strip().upper()) or \
+                               (has_chassis and pr.chassis_no == str(extracted['chassis_no']).strip().upper()):
+                                existing_record = pr
+                                incoming_base_sbn = normalize_base_sbn(pr.sbn_no) # Adopt correct SBN
+                                break
 
                     if existing_record:
                         # Authoritative override for profile & hardware fields
@@ -732,7 +784,7 @@ try:
                             existing_record.address = str(extracted['address']).strip().upper()
                         if extracted['make'] and str(extracted['make']).strip():
                             existing_record.make = str(extracted['make']).strip().upper()
-                        if extracted['driving_route'] and str(extracted['driving_route']).strip():
+                        if extracted.get('driving_route') and str(extracted['driving_route']).strip():
                             existing_record.driving_route = str(extracted['driving_route']).strip().upper()
                         if clean_plate and str(clean_plate).strip():
                             existing_record.plate_no = str(clean_plate).strip().upper()
@@ -752,6 +804,10 @@ try:
                         existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, existing_record.issue_date, is_vacant)
                         imported_count += 1
                     else:
+                        # STRICT BLOCK: Do not create a new '000' record duplicate if hardware fallback also failed
+                        if "000" in incoming_base_sbn:
+                            continue
+
                         record = FranchiseRecord(
                             sbn_no=format_sbn_with_year(incoming_base_sbn, issue_date, is_vacant),
                             operator_name=extracted['operator_name'].upper() if extracted['operator_name'] else "",
@@ -761,7 +817,7 @@ try:
                             chassis_no=extracted['chassis_no'].upper() if extracted['chassis_no'] else "",
                             make=extracted['make'].upper() if extracted['make'] else "",
                             route=route_name.upper(),
-                            driving_route=extracted['driving_route'].upper() if extracted['driving_route'] else "POBLACION",
+                            driving_route=extracted['driving_route'].upper() if extracted.get('driving_route') else "",
                             issue_date=issue_date,
                             valid_until=datetime(issue_date.year, 12, 31) if issue_date else None,
                             processed_by=full_name,
@@ -774,12 +830,25 @@ try:
                 force_log(f"Import Error: {e}")
                 continue
 
+        # Save files and initial records
         db.commit()
+
+        # RUN SELF-HEALING DOMINANT ROUTE ALGORITHM
+        dominant_route = get_dominant_driving_route(db, route_name)
+        if dominant_route:
+            for pr in existing_route_records:
+                curr_dr = str(pr.driving_route).strip().upper() if pr.driving_route else ""
+                # Replace old POBLACION ghosts, or blank Excel entries, with the true Dominant Route found from the active Word files
+                if curr_dr == "" or (curr_dr == "POBLACION" and dominant_route != "POBLACION"):
+                    pr.driving_route = dominant_route
+            db.commit()
+
         log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records.")
         return {"imported": imported_count}
 
+    # HIGH-PERFORMANCE I/O: Async Download Word Endpoint
     @app.post("/franchise/download/word/{record_id}")
-    def download_word_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    async def download_word_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
         if not record: raise HTTPException(status_code=404)
         settings = init_settings(db)
@@ -787,14 +856,18 @@ try:
         is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
         full_sbn = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
         
-        doc_path, media_type = generate_certificate({
+        cert_data = {
             "sbn_no": full_sbn, "operator_name": record.operator_name,
             "address": record.address, "motor_no": record.motor_no,
             "chassis_no": record.chassis_no, "make": record.make,
             "plate_no": record.plate_no, "route": record.route,
             "driving_route": record.driving_route,
             "issue_date": record.issue_date, "valid_until": record.valid_until
-        }, {"committee_chair": settings.committee_chair}, return_format="docx")
+        }
+        committee_data = {"committee_chair": settings.committee_chair}
+        
+        # Offload intensive file I/O processing to background thread to unblock API UI
+        doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="docx")
         
         if os.path.exists(doc_path):
             log_action(db, f"{current_user.first_name} {current_user.last_name}", "DOWNLOAD_DOCX", record.id, record.route, f"Downloaded raw MTOP Word Document")
@@ -802,8 +875,9 @@ try:
             
         raise HTTPException(status_code=500)
 
+    # HIGH-PERFORMANCE I/O: Async PDF Generate Endpoint
     @app.post("/franchise/generate/{record_id}")
-    def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    async def generate_doc(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
         if not record: raise HTTPException(status_code=404)
         settings = init_settings(db)
@@ -811,14 +885,18 @@ try:
         is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
         full_sbn = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
         
-        doc_path, media_type = generate_certificate({
+        cert_data = {
             "sbn_no": full_sbn, "operator_name": record.operator_name,
             "address": record.address, "motor_no": record.motor_no,
             "chassis_no": record.chassis_no, "make": record.make,
             "plate_no": record.plate_no, "route": record.route,
             "driving_route": record.driving_route,
             "issue_date": record.issue_date, "valid_until": record.valid_until
-        }, {"committee_chair": settings.committee_chair}, return_format="pdf")
+        }
+        committee_data = {"committee_chair": settings.committee_chair}
+
+        # Offload intensive PDF conversion to background thread to unblock API UI
+        doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="pdf")
         
         if os.path.exists(doc_path):
             log_action(db, f"{current_user.first_name} {current_user.last_name}", "PRINT_MTOP", record.id, record.route, f"Generated MTOP Document")
