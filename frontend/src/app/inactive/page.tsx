@@ -1,5 +1,4 @@
 "use client";
-
 import { useEffect, useState } from "react";
 import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -7,8 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-
-const API_URL = "http://127.0.0.1:43888";
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
 interface FranchiseRecord {
   id: string;
@@ -34,20 +32,17 @@ export default function InactiveLines() {
   const [isExporting, setIsExporting] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
-
+  
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [viewMember, setViewMember] = useState<FranchiseRecord | null>(null);
 
   useEffect(() => {
     const fetchInactive = async () => {
       try {
-        const token = localStorage.getItem("pasada_token") || localStorage.getItem("token");
-        const res = await fetch(`${API_URL}/franchise/status/inactive`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        const res = await fetchWithAuth(`${API_URL}/franchise/status/inactive`);
         if (res.ok) setRecords(await res.json());
       } catch (e) {
-        console.error("Failed to fetch inactive operators");
+        console.error("Failed to fetch inactive operators", e);
       } finally {
         setLoading(false);
       }
@@ -119,18 +114,20 @@ export default function InactiveLines() {
 
   const handleExportInactive = async () => {
     setIsExporting(true);
-    const token = localStorage.getItem("token");
     try {
-      const response = await fetch(`${API_URL}/export/masterlist/BATODA?status_filter=REVOKED`, {
-        headers: { "Authorization": `Bearer ${token}` }
-      });
+      const response = await fetchWithAuth(`${API_URL}/export/masterlist/${routeFilter}?status_filter=REVOKED`);
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        a.download = `INACTIVE_ARCHIVE_EXPORT_${new Date().getFullYear()}.xlsx`;
+        
+        // Exact Naming Convention Enforced
+        const year = new Date().getFullYear();
+        const routePrefix = routeFilter === "ALL" ? "ALL_ROUTES" : routeFilter;
+        a.download = `${routePrefix} ${year} - REVOKED.xlsx`;
+        
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
@@ -148,20 +145,18 @@ export default function InactiveLines() {
   };
 
   const handleDownloadWord = async (member: FranchiseRecord) => {
-    const token = localStorage.getItem("token");
     try {
-      const response = await fetch(`${API_URL}/franchise/download/word/${member.id}`, { 
-        method: 'POST', 
-        headers: { "Authorization": `Bearer ${token}` } 
-      });
+      const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        const safeName = String(member.operator_name || "VACANT").replace(/\s+/g, '_');
-        a.download = `MTOP_${member.sbn_no}_${safeName}.docx`;
+        
+        // Exact Naming Convention Enforced
+        a.download = `${member.sbn_no}.docx`;
+        
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
@@ -175,18 +170,16 @@ export default function InactiveLines() {
   };
 
   const handleNativePrint = async (member: FranchiseRecord) => {
-    const token = localStorage.getItem("token");
     try {
-      const response = await fetch(`${API_URL}/franchise/generate/${member.id}`, { 
-        method: 'POST', 
-        headers: { "Authorization": `Bearer ${token}` } 
-      });
+      const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
+        
         if (blob.type === "application/pdf") {
           const existingIframe = document.getElementById('pasada-print-frame');
           if (existingIframe) document.body.removeChild(existingIframe);
+          
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
           iframe.style.position = 'fixed';
@@ -196,20 +189,22 @@ export default function InactiveLines() {
           iframe.style.height = '500px';
           iframe.src = url;
           document.body.appendChild(iframe);
-          setTimeout(() => {
+          
+          iframe.onload = () => {
             try {
               iframe.contentWindow?.focus();
               iframe.contentWindow?.print();
             } catch (e) {
               console.error(e);
             }
-            setTimeout(() => window.URL.revokeObjectURL(url), 300000);
-          }, 1500); 
+            setTimeout(() => window.URL.revokeObjectURL(url), 10000);
+          };
+          
         } else {
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${member.sbn_no}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => document.body.removeChild(a), 100);
@@ -222,9 +217,10 @@ export default function InactiveLines() {
 
   return (
     <div className="p-6 md:p-8 animate-in fade-in duration-500 min-h-screen bg-muted/5">
-      {/* HEADER WITH CONTROLS */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-        <div className="flex items-center gap-3">
+      
+      {/* HEADER WITH CONTROLS - GILID RIGHT ALIGNED */}
+      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-8">
+        <div className="flex items-center gap-3 shrink-0">
           <ArchiveX className="w-8 h-8 text-red-600" />
           <div>
             <h1 className="text-3xl font-black tracking-tight">2+ Years Non-Renewal / Inactive</h1>
@@ -232,7 +228,7 @@ export default function InactiveLines() {
           </div>
         </div>
         
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center xl:justify-end gap-3 w-full xl:w-auto md:ml-auto">
           {/* SORT BY DROPDOWN */}
           <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
             <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
@@ -241,11 +237,11 @@ export default function InactiveLines() {
               onChange={(e) => setSortBy(e.target.value)}
               className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2"
             >
-              <option value="ROUTE_ASC">Sort: TODA Route (A–Z)</option>
+              <option value="ROUTE_ASC">Sort: TODA Route (A Z)</option>
               <option value="YEAR_NEWEST">Sort: Renewal Year (Newest)</option>
               <option value="YEAR_OLDEST">Sort: Renewal Year (Oldest)</option>
               <option value="SBN_ASC">Sort: SBN Number</option>
-              <option value="NAME_ASC">Sort: Operator Name (A–Z)</option>
+              <option value="NAME_ASC">Sort: Operator Name (A Z)</option>
             </select>
           </div>
 
@@ -272,9 +268,9 @@ export default function InactiveLines() {
           <div className="relative w-full md:w-72 group">
             <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
             <Input 
-              placeholder="Search Operator, SBN..." 
-              value={search} 
-              onChange={(e) => setSearch(e.target.value)} 
+              placeholder="Search Operator, SBN..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
               className="pl-10 h-11 bg-card border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium" 
             />
           </div>
@@ -292,6 +288,7 @@ export default function InactiveLines() {
               Archived municipal tricycle franchise record details.
             </DialogDescription>
           </DialogHeader>
+          
           {viewMember && (
             <div className="space-y-4 py-2">
               <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl space-y-3">
@@ -312,7 +309,7 @@ export default function InactiveLines() {
                   <Badge className="font-bold bg-red-500 text-white">{viewMember.route}</Badge>
                 </div>
               </div>
-
+              
               <div className="grid grid-cols-2 gap-3 p-4 bg-muted/30 border border-border rounded-xl text-sm">
                 <div>
                   <p className="text-xs font-bold text-muted-foreground uppercase">Make / Brand</p>
@@ -338,6 +335,7 @@ export default function InactiveLines() {
               </div>
             </div>
           )}
+
           <DialogFooter className="flex gap-2 sm:justify-end">
             {viewMember && (
               <>
@@ -410,6 +408,7 @@ export default function InactiveLines() {
             </Table>
           )}
         </div>
+        
         <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-t border-border/60 bg-muted/10">
           <div className="text-sm text-muted-foreground font-bold mb-4 sm:mb-0">
             Showing {filteredRecords.length === 0 ? 0 : ((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredRecords.length)} of {filteredRecords.length} records
@@ -418,8 +417,8 @@ export default function InactiveLines() {
             <div className="flex items-center gap-2">
               <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
               <select 
-                value={rowsPerPage} 
-                onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                 value={rowsPerPage} 
+                 onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
                 className="h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
               >
                 <option value={50}>50</option>

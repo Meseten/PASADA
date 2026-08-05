@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { Database, Users, AlertTriangle, ArchiveX, Activity, Calendar, Globe, MapPin, Settings2, Loader2 } from "lucide-react";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 const COLORS = ['#10b981', '#f59e0b', '#ef4444'];
 
 interface GlobalStats {
@@ -32,7 +32,7 @@ export default function Dashboard() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch(`${API_URL}/stats/global`);
+        const res = await fetchWithAuth(`${API_URL}/stats/global`);
         if (res.ok) {
           const data = await res.json();
           setStats(data);
@@ -43,8 +43,11 @@ export default function Dashboard() {
             return prev;
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error("Dashboard failed to fetch stats", e);
+      }
     };
+    
     fetchStats();
     const interval = setInterval(fetchStats, 5000);
     return () => clearInterval(interval);
@@ -53,7 +56,7 @@ export default function Dashboard() {
   const fetchML = async () => {
     if (!activePrediction) return;
     try {
-      const res = await fetch(`${API_URL}/predict/${activePrediction}`);
+      const res = await fetchWithAuth(`${API_URL}/predict/${activePrediction}`);
       if (res.ok) {
         const data = await res.json();
         if (data && data.length > 0) {
@@ -76,14 +79,13 @@ export default function Dashboard() {
   const handleUpdateRouteData = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!population || !roadLength) return;
+    
     setIsUpdatingRoute(true);
-    const token = localStorage.getItem("token") || "";
     try {
-      const res = await fetch(`${API_URL}/route_data/${activePrediction}`, {
+      const res = await fetchWithAuth(`${API_URL}/route_data/${activePrediction}`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           population: parseInt(population),
@@ -116,10 +118,13 @@ export default function Dashboard() {
     { name: '1-Year Non-Renewal', value: stats.flagged_pending },
     { name: '2+ Years Non-Renewal / Vacant', value: stats.vacant_slots },
   ];
+  
   const activeRoutes = stats.route_breakdown.map(r => r.route);
+  
   const statusText = predictionData?.forecast_period || "";
   let clusterColor = "bg-blue-50/50 border-blue-500/20 text-blue-600 dark:bg-blue-950/20";
   let textColor = "text-blue-600";
+  
   if (statusText.includes("GREEN CLUSTER")) {
     clusterColor = "bg-emerald-50/50 border-emerald-500/30 text-emerald-700 dark:bg-emerald-950/20";
     textColor = "text-emerald-600";
@@ -158,7 +163,6 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
-
         <div className="bg-card border-l-4 border-l-emerald-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-emerald-600">Active Operators</p>
@@ -173,7 +177,6 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
-
         <div className="bg-card border-l-4 border-l-amber-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-amber-600">1-Year Non-Renewal</p>
@@ -188,7 +191,6 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
-
         <div className="bg-card border-l-4 border-l-red-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-red-600">2+ Years Non-Renewal / Vacant</p>
@@ -232,7 +234,6 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-start mb-2">
             <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Weekly Volume</p>
@@ -258,7 +259,6 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-start mb-2">
             <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Monthly Volume</p>
@@ -316,7 +316,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-1"><div className="w-2 h-2 bg-red-500 rounded-sm"></div> 2+ Years</div>
           </div>
         </div>
-
+        
         <div className="lg:col-span-3 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col">
           <div className="flex flex-col mb-1">
             <h3 className="text-sm font-bold text-foreground">Route Distribution</h3>
@@ -362,6 +362,7 @@ export default function Dashboard() {
             </button>
           ))}
         </div>
+        
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className={`col-span-1 border rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-inner h-[160px] transition-colors duration-500 ${clusterColor}`}>
             <p className="text-[10px] font-black uppercase tracking-widest mb-1 opacity-80">
@@ -376,12 +377,13 @@ export default function Dashboard() {
               </h3>
             </div>
             <p className="text-[10px] font-bold opacity-80 mb-2">
-              Current Active Fleet
+              Current Active Operators
             </p>
             <div className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm">
               {predictionData ? predictionData.model_confidence : "Density Score: 0.00"}
             </div>
           </div>
+          
           <div className="col-span-2 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[160px]">
               <div>
@@ -408,6 +410,7 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
+              
               <div className="bg-muted/20 border border-border/50 rounded-lg p-3 flex flex-col justify-between">
                 <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
                   <Settings2 size={12} /> Adjust Route Parameters

@@ -1,21 +1,42 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import pytz
 import os
 import uuid
+import platformdirs
+import shutil
 
-# DEFINITIVE FIX: Move database out of protected "Documents" to guaranteed "LocalAppData"
-local_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
-BASE_DIR = os.path.join(local_app_data, "PASADA_DATA")
+# 1. DEFINE OLD AND NEW PATHS
+old_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+OLD_BASE_DIR = os.path.join(old_app_data, "PASADA_DATA")
+old_db_path = os.path.join(OLD_BASE_DIR, 'pasada_production.db')
 
-# Ensure the folder actually exists before SQLite tries to write to it
-if not os.path.exists(BASE_DIR):
-    os.makedirs(BASE_DIR)
+NEW_BASE_DIR = platformdirs.user_data_dir("PASADA", "LGU")
+new_db_path = os.path.join(NEW_BASE_DIR, 'pasada_production.db')
 
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'pasada_production.db')}"
+if not os.path.exists(NEW_BASE_DIR):
+    os.makedirs(NEW_BASE_DIR)
+
+# 2. AUTO-MIGRATION: Rescues the old database so no data is lost
+if os.path.exists(old_db_path) and not os.path.exists(new_db_path):
+    shutil.copy2(old_db_path, new_db_path)
+
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{new_db_path}"
+
+# Database connection
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+
+# CONCURRENCY FIX: Enable WAL mode and Busy Timeout to prevent "database is locked" errors
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -51,6 +72,7 @@ class FranchiseRecord(Base):
     is_active = Column(Boolean, default=True)
     processed_by = Column(String)
     updated_at = Column(DateTime, default=get_pht_now, onupdate=get_pht_now)
+    is_deleted = Column(Boolean, default=False, index=True)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -76,3 +98,6 @@ class RouteData(Base):
     road_length_km = Column(Float, default=5.0)     
 
 Base.metadata.create_all(bind=engine)
+
+# Keep BASE_DIR pointing to the new cross-platform directory for backups, etc.
+BASE_DIR = NEW_BASE_DIR

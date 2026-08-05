@@ -2,10 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
+import { Eye, EyeOff, Loader2, Moon, Sun, AlertTriangle } from "lucide-react";
 import { useTheme } from "next-themes";
-
-const API_URL = "http://127.0.0.1:43888";
+import { API_URL, getToken } from "@/lib/api";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
@@ -32,7 +31,7 @@ export default function Signup() {
     const checkServer = async () => {
       try {
         const res = await fetch(`${API_URL}/stats/global`);
-        if (res.ok) {
+        if (res.ok || res.status === 401) {
           setServerReady(true);
           clearInterval(interval);
         }
@@ -54,16 +53,27 @@ export default function Signup() {
     e.preventDefault();
     if (!serverReady) return;
     
+    const currentToken = getToken();
+    if (!currentToken) {
+      setError("Unauthorized: You must be logged in as an existing clerk to create new accounts.");
+      return;
+    }
+
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
     }
+
     setLoading(true);
     setError("");
+
     try {
       const res = await fetch(`${API_URL}/signup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${currentToken}` 
+        },
         body: JSON.stringify({
           first_name: firstName.trim(),
           last_name: lastName.trim(),
@@ -72,7 +82,9 @@ export default function Signup() {
           role: "Clerk", 
         }),
       });
+      
       if (res.ok) {
+        alert("Account created successfully!");
         router.push("/");
       } else {
         const errData = await res.json();
@@ -102,11 +114,19 @@ export default function Signup() {
           </div>
         ) : (
           <form onSubmit={handleSignup} className="space-y-5">
+            {!getToken() && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-700 text-xs rounded-lg font-bold flex items-start gap-2">
+                    <AlertTriangle className="shrink-0" size={16} />
+                    <span>Security Lock: You must be logged in on another tab to create a new user.</span>
+                </div>
+            )}
+            
             {error && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-600 text-sm rounded-lg font-bold text-center">
                 {error}
               </div>
             )}
+            
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">First Name</label>
@@ -131,6 +151,7 @@ export default function Signup() {
                 />
               </div>
             </div>
+
             <div className="space-y-1.5">
               <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Full Username</label>
               <input
@@ -140,6 +161,7 @@ export default function Signup() {
                 className="w-full bg-muted/60 border border-border rounded-lg px-4 py-3 text-sm font-bold text-slate-500 dark:text-slate-400 cursor-not-allowed uppercase"
               />
             </div>
+
             <div className="space-y-1.5 relative">
               <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Password (8+ Characters)</label>
               <div className="relative">
@@ -160,15 +182,17 @@ export default function Signup() {
                 </button>
               </div>
             </div>
+
             <button
               type="submit"
-              disabled={loading}
-              className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 mt-2 shadow-md"
+              disabled={loading || !getToken()}
+              className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 mt-2 shadow-md disabled:opacity-50"
             >
               {loading ? <Loader2 size={18} className="animate-spin" /> : "Complete Registration"}
             </button>
           </form>
         )}
+
         <div className="mt-8 text-center border-t border-border pt-6">
           <p className="text-sm text-muted-foreground font-medium">
             Return to {" "}
