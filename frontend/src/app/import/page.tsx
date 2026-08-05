@@ -2,8 +2,7 @@
 
 import { useState, useRef } from "react";
 import { UploadCloud, CheckCircle, Loader2, FileText, AlertTriangle, Database } from "lucide-react";
-
-const API_URL = "http://127.0.0.1:43888";
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
 export default function MassImport() {
   const [selectedRoute, setSelectedRoute] = useState("");
@@ -12,8 +11,8 @@ export default function MassImport() {
   const [progress, setProgress] = useState(0);
   const [successMsg, setSuccessMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
-  const progressInterval = useRef<NodeJS.Timeout | null>(null);
-
+  const [serverErrors, setServerErrors] = useState<string[]>([]);
+  
   const isDatabaseFile = files.length === 1 && files[0].name.endsWith(".db");
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -22,55 +21,25 @@ export default function MassImport() {
     }
   };
 
-  // Fluid simulated progress bar logic
-  const startFluidProgress = (estimatedSeconds: number) => {
-    setProgress(0);
-    const intervalMs = 50; // High resolution for smooth animation
-    const totalSteps = (estimatedSeconds * 1000) / intervalMs;
-    let currentStep = 0;
-
-    progressInterval.current = setInterval(() => {
-      currentStep++;
-      // Easing function: fast at first, then slows down, capping at 95%
-      const percentage = 95 * (1 - Math.pow(1 - currentStep / totalSteps, 3));
-      
-      setProgress((prev) => {
-        const next = Math.min(percentage, 95);
-        return next > prev ? next : prev;
-      });
-    }, intervalMs);
-  };
-
-  const stopFluidProgress = () => {
-    if (progressInterval.current) {
-      clearInterval(progressInterval.current);
-    }
-    setProgress(100);
-  };
-
   const executeUpload = async () => {
     setUploading(true);
     setSuccessMsg("");
     setErrorMsg("");
-    const token = localStorage.getItem("pasada_token") || localStorage.getItem("token");
-    
+    setServerErrors([]);
+    setProgress(5); 
+
     try {
       if (isDatabaseFile) {
-        // Database import is usually very fast
-        startFluidProgress(1.5);
-        
         const formData = new FormData();
         formData.append("file", files[0]);
-        const res = await fetch(`${API_URL}/upload/database`, {
+        
+        const res = await fetchWithAuth(`${API_URL}/upload/database`, {
           method: "POST",
-          headers: { "Authorization": `Bearer ${token}` },
           body: formData
         });
         
-        if (!res.ok) throw new Error("Database import failed");
         const data = await res.json();
-        
-        stopFluidProgress();
+        setProgress(100);
         setSuccessMsg(`Database imported! Added ${data.imported} new records.`);
       } else {
         if (!selectedRoute.trim()) {
@@ -80,48 +49,50 @@ export default function MassImport() {
         }
         
         let importedTotal = 0;
+        let chunkErrors: string[] = [];
         const CHUNK_SIZE = 500; 
         const totalChunks = Math.ceil(files.length / CHUNK_SIZE);
         const formattedRoute = selectedRoute.trim().toUpperCase();
-
-        // Estimate time based on file count (roughly 0.1s per file)
-        const estimatedSeconds = Math.max(files.length * 0.1, 2);
-        startFluidProgress(estimatedSeconds);
 
         for (let i = 0; i < totalChunks; i++) {
           const chunk = files.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
           const formData = new FormData();
           chunk.forEach(f => formData.append("files", f));
           
-          const res = await fetch(`${API_URL}/upload/bulk/${formattedRoute}`, {
-            method: "POST",
-            headers: { "Authorization": `Bearer ${token}` },
-            body: formData
-          });
+          try {
+            const res = await fetchWithAuth(`${API_URL}/upload/bulk/${formattedRoute}`, {
+              method: "POST",
+              body: formData
+            });
+            
+            const data = await res.json();
+            importedTotal += data.imported || 0;
+            if (data.errors && data.errors.length > 0) {
+              chunkErrors = [...chunkErrors, ...data.errors];
+            }
+          } catch (chunkErr) {
+            chunkErrors.push(`Failed to upload chunk ${i+1}`);
+          }
           
-          if (!res.ok) throw new Error("File upload failed");
-          const data = await res.json();
-          importedTotal += data.imported;
+          setProgress(Math.round(((i + 1) / totalChunks) * 100));
         }
         
-        stopFluidProgress();
-        window.dispatchEvent(new Event('toda_imported'));
+        setServerErrors(chunkErrors);
         setSuccessMsg(`Successfully imported ${importedTotal} records for ${formattedRoute}.`);
+        window.dispatchEvent(new Event('toda_imported'));
       }
       
-      // Small delay before resetting the UI completely
       setTimeout(() => {
         setFiles([]);
         setSelectedRoute("");
         setUploading(false);
         setProgress(0);
-      }, 1500);
+      }, 3000);
 
-    } catch (err) {
-      if (progressInterval.current) clearInterval(progressInterval.current);
+    } catch (err: any) {
       setProgress(0);
       setUploading(false);
-      setErrorMsg("Upload failed. Ensure the server is connected.");
+      setErrorMsg(err.message || "Upload failed. Ensure the server is connected.");
     }
   };
 
@@ -137,10 +108,23 @@ export default function MassImport() {
 
       <div className="bg-card border border-border rounded-2xl p-8 shadow-sm">
         {successMsg && (
-          <div className="mb-6 p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 rounded-lg flex items-center gap-2 font-bold shadow-sm">
+          <div className="mb-4 p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 rounded-lg flex items-center gap-2 font-bold shadow-sm">
             <CheckCircle size={18} /> {successMsg}
           </div>
         )}
+        
+        {serverErrors.length > 0 && (
+          <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 text-amber-700 rounded-lg shadow-sm text-sm font-bold">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertTriangle size={18} /> <span>{serverErrors.length} Warning(s) during import:</span>
+            </div>
+            <ul className="list-disc pl-6 space-y-1 font-medium text-xs">
+              {serverErrors.slice(0, 5).map((err, i) => <li key={i}>{err}</li>)}
+              {serverErrors.length > 5 && <li>...and {serverErrors.length - 5} more.</li>}
+            </ul>
+          </div>
+        )}
+
         {errorMsg && (
           <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 text-red-600 rounded-lg flex items-center gap-2 font-bold shadow-sm">
             <AlertTriangle size={18} /> {errorMsg}
@@ -155,14 +139,6 @@ export default function MassImport() {
                 type="text"
                 value={selectedRoute} 
                 onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    if (files.length > 0 && selectedRoute.trim() && !uploading) {
-                      executeUpload();
-                    }
-                  }
-                }}
                 disabled={uploading}
                 placeholder="E.g. BATODA (Required for Excel/Word files)"
                 className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all disabled:opacity-60"
@@ -206,17 +182,13 @@ export default function MassImport() {
               </div>
               <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner relative">
                 <div 
-                  className="bg-blue-600 h-3 rounded-full absolute left-0 top-0 bottom-0" 
-                  style={{ 
-                    width: `${Math.max(progress, 2)}%`,
-                    transition: progress === 100 ? 'width 0.2s ease-out' : 'width 0.1s linear' // Smooth real-time transition
-                  }}
+                  className="bg-blue-600 h-3 rounded-full absolute left-0 top-0 bottom-0 transition-all duration-300 ease-out"
+                  style={{ width: `${Math.max(progress, 2)}%` }}
                 >
-                  {/* Subtle shimmer effect on the loading bar */}
                   <div className="absolute inset-0 bg-white/20 w-full h-full animate-[shimmer_1s_infinite]"></div>
                 </div>
               </div>
-              <p className="text-xs font-bold text-blue-600">{Math.round(progress)}% Complete</p>
+              <p className="text-xs font-bold text-blue-600">{progress}% Complete</p>
             </div>
           ) : (
             <button 

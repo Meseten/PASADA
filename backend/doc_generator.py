@@ -60,7 +60,7 @@ def clean_val(v):
 def generate_certificate(data: dict, settings: dict, template_path: str = "template.docx", output_dir: str = "exports", return_format: str = "pdf"):
     out_path = os.path.join(BASE_DIR, output_dir)
     if not os.path.exists(out_path):
-        os.makedirs(out_path)
+        os.makedirs(out_path, exist_ok=True)
 
     actual_template_path = get_resource_path(template_path)
     
@@ -69,8 +69,8 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     except Exception as e:
         raise FileNotFoundError(f"Template not found at {actual_template_path}. Error: {e}")
 
-    issue_date_obj = data.get("issue_date", datetime.now())
-    valid_until_obj = data.get("valid_until", datetime(issue_date_obj.year, 12, 31))
+    issue_date_obj = data.get("issue_date") or datetime.now()
+    valid_until_obj = data.get("valid_until") or datetime(issue_date_obj.year, 12, 31)
 
     replacements = {
         "[SBN_NO]": data.get("sbn_no", ""),
@@ -106,35 +106,46 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
                 for paragraph in cell.paragraphs:
                     replace_text_in_paragraph(paragraph, replacements)
 
-    safe_name = data.get('operator_name', 'Unknown').replace(' ', '_').replace('/', '-')
+    # FIX 7.3: Prevent Path Traversal (violently strip out slashes, dots, and illegal characters)
+    raw_name = data.get('operator_name', 'Unknown')
+    safe_name = re.sub(r'[^A-Za-z0-9_\-]', '', str(raw_name).replace(' ', '_'))
+    
     docx_path = os.path.abspath(os.path.join(out_path, f"MTOP_{safe_name}.docx"))
     doc.save(docx_path)
 
-    # If the user just clicked "Download Word File", skip the heavy PDF conversion entirely.
     if return_format == "docx":
         return docx_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     pdf_path = os.path.abspath(os.path.join(out_path, f"MTOP_{safe_name}.pdf"))
+    
+    # CROSS-PLATFORM CONVERSION: Windows (win32com) or Linux (LibreOffice)
     try:
         if platform.system() == "Windows":
-            import pythoncom
-            import win32com.client
-            pythoncom.CoInitialize() 
-            word = win32com.client.DispatchEx("Word.Application")
             try:
-                word.Visible = False
-                word.DisplayAlerts = 0
-                doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
-                doc_obj.SaveAs(pdf_path, FileFormat=17)
-                doc_obj.Close()
-            finally:
-                word.Quit()
-                pythoncom.CoUninitialize()
-                
-            if os.path.exists(pdf_path): return pdf_path, "application/pdf"
-        else:
-            subprocess.run(['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path], check=True)
-            if os.path.exists(pdf_path): return pdf_path, "application/pdf"
+                import pythoncom
+                import win32com.client
+                pythoncom.CoInitialize() 
+                word = win32com.client.DispatchEx("Word.Application")
+                try:
+                    word.Visible = False
+                    word.DisplayAlerts = 0
+                    doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
+                    doc_obj.SaveAs(pdf_path, FileFormat=17)
+                    doc_obj.Close()
+                finally:
+                    word.Quit()
+                    pythoncom.CoUninitialize()
+                if os.path.exists(pdf_path): return pdf_path, "application/pdf"
+            except Exception:
+                pass 
+
+        subprocess.run(
+            ['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if os.path.exists(pdf_path): 
+            return pdf_path, "application/pdf"
+            
     except Exception as e:
         pass
         
