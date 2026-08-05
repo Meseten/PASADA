@@ -2,14 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // Run the main Tauri application
+    // Run the main Tauri application. Graceful cleanup is now handled in lib.rs
     app_lib::run();
-    
-    // AGGRESSIVE ZOMBIE HUNTER: Executes the moment the app window is closed
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(&["/F", "/T", "/IM", "pasada-backend.exe"])
-            .status();
-    }
 }

@@ -7,15 +7,33 @@ from sqlalchemy import func
 from database import FranchiseRecord, RouteData
 import traceback
 
+# PERFORMANCE CACHE
+_ML_CACHE = {}
+
+def invalidate_ml_cache(route: str = None):
+    """Invalidates cached ML data when writes occur."""
+    global _ML_CACHE
+    if route:
+        route_upper = str(route).strip().upper()
+        if route_upper in _ML_CACHE:
+            del _ML_CACHE[route_upper]
+    else:
+        _ML_CACHE.clear()
+
 def run_kmeans_clustering(db: Session, target_route: str):
+    global _ML_CACHE
+    target_route = str(target_route).strip().upper()
+    
+    # Return from cache if valid
+    if target_route in _ML_CACHE:
+        return _ML_CACHE[target_route]
+
     try:
-        # ==============================================================================
-        # STEP 1: DATA EXTRACTION
-        # ==============================================================================
+        # STEP 1: DATA EXTRACTION (Ignore deleted records)
         fleet_counts = db.query(
             FranchiseRecord.route, 
             func.count(FranchiseRecord.id).label('fleet_size')
-        ).filter(FranchiseRecord.is_active == True).group_by(FranchiseRecord.route).all()
+        ).filter(FranchiseRecord.is_active == True, FranchiseRecord.is_deleted == False).group_by(FranchiseRecord.route).all()
         
         if not fleet_counts:
             return []
@@ -46,11 +64,8 @@ def run_kmeans_clustering(db: Session, target_route: str):
             
         df = pd.DataFrame(data)
         
-        # ==============================================================================
-        # STEP 2 & 4: DYNAMIC CLUSTERING TO PREVENT SKLEARN CRASHES
-        # ==============================================================================
+        # DYNAMIC CLUSTERING TO PREVENT SKLEARN CRASHES
         unique_densities = df['density'].nunique()
-        
         if len(df) < 3 or unique_densities < 2:
             df['cluster'] = 0
             df['severity'] = 0
@@ -64,12 +79,11 @@ def run_kmeans_clustering(db: Session, target_route: str):
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
             df['cluster'] = kmeans.fit_predict(X_scaled)
             
-            # STEP 5: MATHEMATICAL CLUSTER RANKING
             cluster_densities = df.groupby('cluster')['density'].mean().sort_values()
             ranking_map = {cluster_id: rank for rank, (cluster_id, _) in enumerate(cluster_densities.items())}
             df['severity'] = df['cluster'].map(ranking_map)
         
-        target_data = df[df['route'] == str(target_route).strip().upper()]
+        target_data = df[df['route'] == target_route]
         
         if target_data.empty:
             severity, fleet_val, pop_val, road_val, density_val = 0, 0, 5000, 5.0, 0
@@ -98,13 +112,17 @@ def run_kmeans_clustering(db: Session, target_route: str):
             {"factor": "Algorithm Density Score", "weight": round(min(density_val * 10, 100), 1)}
         ]
 
-        return [{
+        result = [{
             "forecast_period": status_map.get(severity, "GREEN CLUSTER: Under-saturated (Accept Applications)"), 
             "expected_renewals": fleet_val,  
             "model_confidence": f"Density Score: {round(density_val, 2)}",
             "feature_importances": importance_data,
             "historical_trend": [] 
         }]
+        
+        # Save to Cache
+        _ML_CACHE[target_route] = result
+        return result
         
     except Exception as e:
         print(f"ML Engine Crash: {e}")

@@ -1,14 +1,12 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
+description = "PASADA Municipal Franchise Registry System"
+authors = ["Ben James J. Duag (B&V Software Solutions,Inc.)"]
+license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 name = "app_lib"
@@ -24,3 +22,4 @@ log = "0.4"
 tauri = { version = "2.11.1", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"

@@ -1,5 +1,4 @@
 "use client"
-
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams, usePathname, useRouter } from "next/navigation"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -10,8 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, ArrowUpDown, Shield, RefreshCw } from "lucide-react"
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
 interface Member {
   id: string;
@@ -48,7 +46,6 @@ export default function TodaClient() {
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("ALL")
   const [sortBy, setSortBy] = useState("SBN_ASC")
-  
   const [isAddOpen, setIsAddOpen] = useState(false)
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -59,9 +56,9 @@ export default function TodaClient() {
   const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
-  const [isRefreshing, setIsRefreshing] = useState(false) // NEW STATE FOR REFRESH BUTTON
-  const [selectedSbns, setSelectedSbns] = useState<string[]>([])
+  const [isRefreshing, setIsRefreshing] = useState(false)
   
+  const [selectedSbns, setSelectedSbns] = useState<string[]>([])
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
   const [batchSpecificDate, setBatchSpecificDate] = useState("")
@@ -86,7 +83,7 @@ export default function TodaClient() {
     route: safeRouteName,
     driving_route: ""
   })
-  
+
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const formatSafeDate = (dateStr: string | null | undefined) => {
@@ -97,12 +94,8 @@ export default function TodaClient() {
 
   const fetchMembers = useCallback(async () => {
     if (!safeRouteName) return
-    const token = localStorage.getItem("token")
-    if (!token) return router.push("/")
     try {
-      const response = await fetch(`${API_URL}/franchise/route/${safeRouteName}`, { 
-        headers: { "Authorization": `Bearer ${token}` } 
-      })
+      const response = await fetchWithAuth(`${API_URL}/franchise/route/${safeRouteName}`)
       if (response.ok) {
         const data = await response.json()
         setMembers(data)
@@ -148,7 +141,6 @@ export default function TodaClient() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // NEW SMART PREFIX EXTRACTOR
   const getNextSbnPreview = (route: string, list: Member[]): string => {
     let prefix = "";
     let maxNum = 0;
@@ -182,7 +174,9 @@ export default function TodaClient() {
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value.toUpperCase() })
+    const dontUppercase = ["operator_name", "address"];
+    const value = dontUppercase.includes(e.target.name) ? e.target.value : e.target.value.toUpperCase();
+    setFormData({ ...formData, [e.target.name]: value })
   }
 
   const handleOpenAdd = () => {
@@ -212,22 +206,17 @@ export default function TodaClient() {
     setIsViewOpen(true)
   }
 
-  // REFRESH DB HANDLER (Fixes Ghost Dates & Erroneous "Poblacion" routes)
   const handleRefreshDatabase = async () => {
     const confirmRefresh = window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?");
     if (!confirmRefresh) return;
 
     setIsRefreshing(true);
-    const token = localStorage.getItem("token") || localStorage.getItem("pasada_token");
     try {
-      const res = await fetch(`${API_URL}/admin/refresh-db`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}` }
-      });
+      const res = await fetchWithAuth(`${API_URL}/admin/refresh-db`, { method: "POST" });
       if (res.ok) {
         const result = await res.json();
         alert(result.message || "Database refreshed successfully!");
-        fetchMembers(); // Instantly update the table tally!
+        fetchMembers(); 
       } else {
         const err = await res.json();
         alert(err.detail || "Failed to refresh database.");
@@ -244,12 +233,8 @@ export default function TodaClient() {
     if (!confirmDelete) return;
 
     setIsDeleting(true);
-    const token = localStorage.getItem("token");
     try {
-      const res = await fetch(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, {
-        method: "DELETE",
-        headers: { "Authorization": `Bearer ${token}` }
-      });
+      const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
       if (res.ok) {
         const result = await res.json();
         alert(result.message || "Operator deleted successfully.");
@@ -272,14 +257,10 @@ export default function TodaClient() {
     if (!confirmDelete) return;
 
     setIsDeleting(true);
-    const token = localStorage.getItem("token");
     try {
-      const res = await fetch(`${API_URL}/api/operators/bulk-delete`, {
+      const res = await fetchWithAuth(`${API_URL}/api/operators/bulk-delete`, {
         method: "POST",
-        headers: { 
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}` 
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sbn_list: selectedSbns })
       });
       if (res.ok) {
@@ -318,18 +299,21 @@ export default function TodaClient() {
 
   const handleExportMasterlist = async () => {
     setIsExporting(true)
-    const token = localStorage.getItem("token")
     try {
-      const response = await fetch(`${API_URL}/export/masterlist/${safeRouteName}?status_filter=${statusFilter}`, {
-        headers: { "Authorization": `Bearer ${token}` }
-      })
+      const response = await fetchWithAuth(`${API_URL}/export/masterlist/${safeRouteName}?status_filter=${statusFilter}`);
       if (response.ok) {
         const blob = await response.blob()
         const url = window.URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.style.display = 'none'
         a.href = url
-        a.download = `${safeRouteName}_MASTERLIST_${new Date().getFullYear()}${statusFilter !== "ALL" ? `_${statusFilter}` : ""}.xlsx`
+        
+        // Exact Naming Convention Enforced
+        const year = new Date().getFullYear();
+        a.download = statusFilter === "ALL" 
+          ? `${safeRouteName} ${year}.xlsx` 
+          : `${safeRouteName} ${year} - ${statusFilter.toUpperCase()}.xlsx`;
+
         document.body.appendChild(a)
         a.click()
         setTimeout(() => {
@@ -349,20 +333,18 @@ export default function TodaClient() {
   const handleDownloadWord = async (member: Member) => {
     if (isDownloadingId) return;
     setIsDownloadingId(member.id);
-    const token = localStorage.getItem("token");
     try {
-      const response = await fetch(`${API_URL}/franchise/download/word/${member.id}`, { 
-        method: 'POST', 
-        headers: { "Authorization": `Bearer ${token}` } 
-      });
+      const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        const safeName = String(member.operator_name || "VACANT").replace(/\s+/g, '_');
-        a.download = `MTOP_${member.sbn_no}_${safeName}.docx`;
+        
+        // Exact Naming Convention Enforced
+        a.download = `${member.sbn_no}.docx`;
+        
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
@@ -380,18 +362,17 @@ export default function TodaClient() {
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return; 
     setIsGeneratingId(member.id);
-    const token = localStorage.getItem("token");
+
     try {
-      const response = await fetch(`${API_URL}/franchise/generate/${member.id}`, { 
-        method: 'POST', 
-        headers: { "Authorization": `Bearer ${token}` } 
-      });
+      const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
+        
         if (blob.type === "application/pdf") {
           const existingIframe = document.getElementById('pasada-print-frame');
           if (existingIframe) document.body.removeChild(existingIframe);
+          
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
           iframe.style.position = 'fixed';
@@ -401,7 +382,8 @@ export default function TodaClient() {
           iframe.style.height = '500px';
           iframe.src = url;
           document.body.appendChild(iframe);
-          setTimeout(() => {
+          
+          iframe.onload = () => {
             try {
               iframe.contentWindow?.focus();
               iframe.contentWindow?.print();
@@ -409,13 +391,14 @@ export default function TodaClient() {
               console.error(e);
             }
             setIsGeneratingId(null);
-            setTimeout(() => window.URL.revokeObjectURL(url), 300000);
-          }, 1500); 
+            setTimeout(() => window.URL.revokeObjectURL(url), 10000);
+          };
+          
         } else {
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${member.sbn_no}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setIsGeneratingId(null);
@@ -430,15 +413,12 @@ export default function TodaClient() {
   };
 
   const downloadBatchDocument = async (member: Member) => {
-    const token = localStorage.getItem("token");
     try {
-      const res = await fetch(`${API_URL}/franchise/generate/${member.id}`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}` }
-      });
+      const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: "POST" });
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
+        
         if (blob.type === "application/pdf") {
           const iframe = document.createElement('iframe');
           iframe.style.position = 'fixed';
@@ -448,8 +428,9 @@ export default function TodaClient() {
           iframe.style.height = '500px';
           iframe.src = url;
           document.body.appendChild(iframe);
+          
           return new Promise<void>((resolve) => {
-            setTimeout(() => {
+            iframe.onload = () => {
               try {
                 iframe.contentWindow?.focus();
                 iframe.contentWindow?.print();
@@ -458,16 +439,16 @@ export default function TodaClient() {
               }
               setTimeout(() => {
                 window.URL.revokeObjectURL(url);
-                document.body.removeChild(iframe);
+                if (document.body.contains(iframe)) document.body.removeChild(iframe);
                 resolve();
-              }, 1000);
-            }, 1500);
+              }, 10000);
+            };
           });
         } else {
           const a = document.createElement("a");
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${String(member.operator_name || "VACANT").replace(/\s+/g, '_')}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => {
@@ -486,12 +467,15 @@ export default function TodaClient() {
     let targetRecords: Member[] = []
     const now = new Date()
     const todayString = now.toISOString().split('T')[0]
+    
     targetRecords = members.filter(record => {
       if (!record.issue_date) return false
       const recordDateObj = new Date(record.issue_date)
       if (isNaN(recordDateObj.getTime())) return false; 
+      
       const recordDateString = recordDateObj.toISOString().split('T')[0]
       const hour = recordDateObj.getHours()
+      
       switch (batchFilterType) {
         case "TODAY_ALL":
           return recordDateString === todayString
@@ -507,17 +491,21 @@ export default function TodaClient() {
           return false
       }
     })
+    
     if (targetRecords.length === 0) {
       alert("No records found for the selected date filter.")
       setBatchPrinting(false)
       return
     }
+    
     setBatchProgress({ current: 0, total: targetRecords.length })
+    
     for (let i = 0; i < targetRecords.length; i++) {
       setBatchProgress({ current: i + 1, total: targetRecords.length })
       await downloadBatchDocument(targetRecords[i])
       await new Promise(resolve => setTimeout(resolve, 800))
     }
+    
     setBatchPrinting(false)
     setBatchModalOpen(false)
     setBatchProgress({ current: 0, total: 0 })
@@ -525,9 +513,8 @@ export default function TodaClient() {
 
   const handleOpenHistory = async (member: Member) => {
     setActiveMember(member)
-    const token = localStorage.getItem("token")
     try {
-      const res = await fetch(`${API_URL}/logs/record/${member.id}`, { headers: { "Authorization": `Bearer ${token}` } })
+      const res = await fetchWithAuth(`${API_URL}/logs/record/${member.id}`)
       if (res.ok) setHistoryLogs(await res.json())
       setIsHistoryOpen(true)
     } catch (e) {}
@@ -535,16 +522,16 @@ export default function TodaClient() {
 
   const handleSubmitForm = async (e: React.FormEvent, isAdd: boolean) => {
     e.preventDefault()
-    const token = localStorage.getItem("token")
     try {
       const finalDrivingRoute = formData.driving_route.trim() !== "" ? formData.driving_route : formData.route;
       const payload = { ...formData, driving_route: finalDrivingRoute, route: safeRouteName }
       
-      const response = await fetch(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
+      const response = await fetchWithAuth(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
         method: isAdd ? "POST" : "PUT",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       })
+      
       if (response.ok) {
         isAdd ? setIsAddOpen(false) : setIsEditOpen(false)
         fetchMembers()
@@ -558,6 +545,7 @@ export default function TodaClient() {
   };
 
   const currentYear = new Date().getFullYear()
+
   const filteredMembers = members.filter(m => {
     const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
     const isVacant = !m.operator_name || m.operator_name.trim() === "";
@@ -574,6 +562,7 @@ export default function TodaClient() {
     if (statusFilter !== "ALL" && computedStatus !== statusFilter) {
       return false;
     }
+    
     const term = search.toLowerCase();
     return (
       String(m.operator_name || "").toLowerCase().includes(term) ||
@@ -628,60 +617,69 @@ export default function TodaClient() {
 
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500">
-      {/* PAGE HEADER */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-        <div>
+      
+      {/* PAGE HEADER - STRICT 2 ROWS */}
+      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6 mb-6">
+        <div className="shrink-0">
           <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
           <p className="text-muted-foreground mt-1 text-sm md:text-base">
             Tricycle Operators and Drivers Association Route Registry
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          {/* SORT BY DROPDOWN */}
-          <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-            <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+        
+        <div className="flex flex-col gap-2 w-full lg:w-auto md:ml-auto items-end">
+          {/* ROW 1: Sort, Filter, Refresh DB */}
+          <div className="flex items-center justify-end gap-2 w-full">
+            {/* SORT BY DROPDOWN */}
+            <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-10 shadow-sm shrink-0 whitespace-nowrap">
+              <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2"
+              >
+                <option value="SBN_ASC">Sort: SBN (1 to 1000)</option>
+                <option value="SBN_DESC">Sort: SBN (Highest First)</option>
+                <option value="NAME_ASC">Sort: Name (A-Z)</option>
+                <option value="YEAR_NEWEST">Sort: Renewal (Newest)</option>
+                <option value="YEAR_OLDEST">Sort: Renewal (Oldest)</option>
+              </select>
+            </div>
+
+            {/* STATUS FILTER DROPDOWN */}
             <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="appearance-none shrink-0 bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.75rem_center] bg-[length:16px_16px] pr-10 h-10 px-4 rounded-lg border border-border/60 bg-background text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
             >
-              <option value="SBN_ASC">Sort: SBN (1 to 1000)</option>
-              <option value="SBN_DESC">Sort: SBN (Highest First)</option>
-              <option value="NAME_ASC">Sort: Name (A–Z)</option>
-              <option value="YEAR_NEWEST">Sort: Renewal (Newest First)</option>
-              <option value="YEAR_OLDEST">Sort: Renewal (Oldest First)</option>
+              <option value="ALL">All Records</option>
+              <option value="ACTIVE">Active Only</option>
+              <option value="FLAGGED">1-Year Non-Renewal</option>
+              <option value="REVOKED">2+ Years Non-Renewal</option>
+              <option value="VACANT">Vacant Slots</option>
             </select>
+
+            <Button variant="outline" onClick={handleRefreshDatabase} disabled={isRefreshing} className="shrink-0 shadow-sm hover:shadow-md transition-all duration-300 h-10 px-4 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
+              {isRefreshing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              Refresh DB
+            </Button>
           </div>
 
-          {/* STATUS FILTER DROPDOWN */}
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] pr-10 h-11 px-4 rounded-lg border border-border/60 bg-background text-sm font-bold shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
-          >
-            <option value="ALL">All Records</option>
-            <option value="ACTIVE">Active Only</option>
-            <option value="FLAGGED">1-Year Non-Renewal</option>
-            <option value="REVOKED">2+ Years Non-Renewal</option>
-            <option value="VACANT">Vacant Slots</option>
-          </select>
-
-          {/* ADDED: REFRESH DATABASE BUTTON */}
-          <Button variant="outline" onClick={handleRefreshDatabase} disabled={isRefreshing} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-4 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
-            {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
-            Refresh DB
-          </Button>
-
-          <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
-            {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
-            Export Excel
-          </Button>
-          <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600" title="Alt + P">
-            <Printer className="mr-2 h-5 w-5" /> Batch Print
-          </Button>
-          <Button onClick={handleOpenAdd} className="shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" title="Alt + N">
-            <PlusCircle className="mr-2 h-5 w-5" /> Add Operator
-          </Button>
+          {/* ROW 2: Export, Batch Print, Add Operator */}
+          <div className="flex items-center justify-end gap-2 w-full">
+            <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="shrink-0 shadow-sm hover:shadow-md transition-all duration-300 h-10 px-5 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
+              {isExporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+              Export Excel
+            </Button>
+            
+            <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="shrink-0 shadow-sm hover:shadow-md transition-all duration-300 h-10 px-5 rounded-lg font-bold border-border/60 bg-background text-blue-600" title="Alt + P">
+              <Printer className="mr-2 h-4 w-4" /> Batch Print
+            </Button>
+            
+            <Button onClick={handleOpenAdd} className="shrink-0 shadow-md hover:shadow-lg transition-all duration-300 h-10 px-5 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" title="Alt + N">
+              <PlusCircle className="mr-2 h-4 w-4" /> Add Operator
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -716,6 +714,7 @@ export default function TodaClient() {
               Verify operator details before printing or downloading the MTOP form.
             </DialogDescription>
           </DialogHeader>
+          
           {viewMember && (
             <div className="space-y-4 py-2">
               <div className="p-4 bg-muted/30 border border-border rounded-xl space-y-3">
@@ -738,7 +737,7 @@ export default function TodaClient() {
                   </Badge>
                 </div>
               </div>
-
+              
               <div className="grid grid-cols-2 gap-3 p-4 bg-muted/30 border border-border rounded-xl text-sm">
                 <div>
                   <p className="text-xs font-bold text-muted-foreground uppercase">Make / Brand</p>
@@ -764,6 +763,7 @@ export default function TodaClient() {
               </div>
             </div>
           )}
+
           <DialogFooter className="flex gap-2 sm:justify-end">
             {viewMember && (
               <>
@@ -790,6 +790,7 @@ export default function TodaClient() {
               Select date filter for document printing.
             </DialogDescription>
           </DialogHeader>
+          
           {batchPrinting ? (
             <div className="flex flex-col items-center justify-center py-8 space-y-6 text-center">
               <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
@@ -824,19 +825,21 @@ export default function TodaClient() {
                   <option value="DATE_RANGE">Custom Date Range</option>
                 </select>
               </div>
+
               {batchFilterType === "SPECIFIC_DATE" && (
                 <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
                   <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
                     <Calendar size={14} /> Select Date
                   </Label>
-                  <Input
-                    type="date"
-                    value={batchSpecificDate}
-                    onChange={(e) => setBatchSpecificDate(e.target.value)}
+                  <Input 
+                    type="date" 
+                    value={batchSpecificDate} 
+                    onChange={(e) => setBatchSpecificDate(e.target.value)} 
                     className="h-12 font-semibold"
                   />
                 </div>
               )}
+
               {batchFilterType === "DATE_RANGE" && (
                 <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
                   <div className="space-y-3">
@@ -855,9 +858,10 @@ export default function TodaClient() {
               )}
             </div>
           )}
+
           {!batchPrinting && (
             <DialogFooter className="pt-4">
-              <Button
+              <Button 
                 onClick={executeBatchPrint}
                 disabled={
                   (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
@@ -879,16 +883,18 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Add Operator / Slot</DialogTitle>
             <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
           </DialogHeader>
+
           <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
                 <Label className="font-semibold flex justify-between">
-                  SBN No. <span className="text-xs text-blue-600 font-normal">(Auto-Generated, Editable)</span>
+                  SBN No. <span className="text-xs text-blue-600 font-normal">(Auto-Generated)</span>
                 </Label>
                 <Input 
                   name="sbn_no" 
                   value={formData.sbn_no} 
-                  onChange={handleInputChange}
+                  onChange={handleInputChange} 
+                  placeholder="Auto-assigned if blank"
                   className="font-mono bg-background border-border/50 shadow-inner h-11 font-bold" 
                 />
               </div>
@@ -897,22 +903,27 @@ export default function TodaClient() {
                 <Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" />
               </div>
             </div>
+            
             <div className="space-y-2">
               <Label className="font-semibold">Operator Name</Label>
               <Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" />
             </div>
+            
             <div className="space-y-2">
               <Label className="font-semibold">Address</Label>
               <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" />
             </div>
+
             <div className="grid grid-cols-2 gap-4">
                <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
                <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
             </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
               <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
             </div>
+
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white">Save Operator</Button>
             </DialogFooter>
@@ -927,6 +938,7 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Edit / Renew Operator</DialogTitle>
             <DialogDescription>Update record details or clear fields to set as Vacant.</DialogDescription>
           </DialogHeader>
+
           <form onSubmit={(e) => handleSubmitForm(e, false)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
@@ -935,16 +947,20 @@ export default function TodaClient() {
               </div>
               <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
             </div>
+            
             <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
             <div className="space-y-2"><Label className="font-semibold">Address</Label><Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" /></div>
+
             <div className="grid grid-cols-2 gap-4">
                <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
                <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
             </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
               <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
             </div>
+
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Changes</Button>
             </DialogFooter>
@@ -961,6 +977,7 @@ export default function TodaClient() {
               <DialogDescription className="mt-1">Action history for <span className="font-bold text-foreground">{activeMember?.operator_name || "VACANT"}</span></DialogDescription>
             </DialogHeader>
           </div>
+
           <div className="p-6 overflow-y-auto custom-scrollbar">
             <div className="space-y-6">
               {historyLogs.length === 0 ? (
@@ -971,7 +988,10 @@ export default function TodaClient() {
               ) : historyLogs.map((log) => (
                 <div key={log.id} className="relative pl-6 pb-6 border-l-2 border-blue-500/30 last:border-0 last:pb-0">
                   <div className="absolute w-3.5 h-3.5 bg-blue-600 rounded-full -left-[8px] top-1 shadow-sm ring-4 ring-background" />
-                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-1.5">{new Date(log.timestamp).toLocaleString()}</p>                   <p className="text-sm font-bold text-foreground flex items-center gap-1.5">                     {log.action} <span className="font-normal text-muted-foreground text-xs bg-muted px-2 py-0.5 rounded-full ml-2">by {log.clerk_name}</span>                   </p>
+                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-1.5">{new Date(log.timestamp).toLocaleString()}</p>
+                  <p className="text-sm font-bold text-foreground flex items-center gap-1.5">
+                    {log.action} <span className="font-normal text-muted-foreground text-xs bg-muted px-2 py-0.5 rounded-full ml-2">by {log.clerk_name}</span>
+                  </p>
                   <div className="mt-2.5 bg-muted/30 p-3 rounded-lg text-sm border border-border/40 text-foreground/80 leading-relaxed shadow-sm font-medium">
                     {log.details}
                   </div>
@@ -982,7 +1002,7 @@ export default function TodaClient() {
         </DialogContent>
       </Dialog>
 
-      {/* OPERATOR LIST TABLE (ACTIONS CENTERED) */}
+      {/* OPERATOR LIST TABLE */}
       <Card className="shadow-sm border-border/60 rounded-2xl overflow-hidden bg-card">
         <CardHeader className="bg-muted/10 pb-5 border-b border-border/50">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -990,6 +1010,7 @@ export default function TodaClient() {
               <CardTitle className="text-xl font-bold flex items-center gap-2"><FileSignature className="h-5 w-5 text-blue-600"/> Operator List</CardTitle>
               <CardDescription className="mt-1 font-medium">Total of {filteredMembers.length} operator records found.</CardDescription>
             </div>
+            
             <div className="relative w-full md:w-96 group">
               <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
               <Input
@@ -1073,8 +1094,8 @@ export default function TodaClient() {
                         </TableCell>
                         <TableCell>
                           {member.plate_no ? 
-                            <Badge variant="secondary" className="font-mono tracking-widest shadow-sm bg-background/60 font-bold">{member.plate_no}</Badge> : 
-                            <span className="text-muted-foreground/60 italic text-xs font-bold tracking-wide px-1">NO PLATE</span>
+                              <Badge variant="secondary" className="font-mono tracking-widest shadow-sm bg-background/60 font-bold">{member.plate_no}</Badge> : 
+                              <span className="text-muted-foreground/60 italic text-xs font-bold tracking-wide px-1">NO PLATE</span>
                           }
                         </TableCell>
                         <TableCell className="text-sm font-bold text-muted-foreground">
@@ -1093,12 +1114,12 @@ export default function TodaClient() {
                               <History className="h-3.5 w-3.5" />
                             </Button>
                             <Button 
-                              variant="outline" 
-                              size="icon" 
-                              disabled={isDeleting}
+                                variant="outline" 
+                                size="icon" 
+                                disabled={isDeleting}
                               onClick={() => handleDeleteOne(member)}
                               className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm" 
-                              title="Delete Operator"
+                                title="Delete Operator"
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>
@@ -1121,8 +1142,8 @@ export default function TodaClient() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
                 <select 
-                  value={rowsPerPage} 
-                  onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                    value={rowsPerPage} 
+                    onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
                   className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:16px_16px] h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer pr-8"
                 >
                   <option value={50}>50</option>

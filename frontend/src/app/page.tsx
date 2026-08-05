@@ -4,16 +4,13 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+import { API_URL } from "@/lib/api";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  
   useEffect(() => setMounted(true), []);
   if (!mounted) return <div className="absolute top-6 right-6 w-10 h-10" />;
-  
   return (
     <button 
       onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
@@ -36,7 +33,7 @@ export default function Login() {
   const [isCheckingSession, setIsCheckingSession] = useState(true);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("token")) {
+    if (typeof window !== "undefined" && (localStorage.getItem("token") || localStorage.getItem("pasada_token"))) {
       router.replace("/dashboard");
       return;
     }
@@ -46,7 +43,8 @@ export default function Login() {
     const checkServer = async () => {
       try {
         const res = await fetch(`${API_URL}/stats/global`);
-        if (res.ok) {
+        // 401 Unauthorized means the server is online and secure, just waiting for login!
+        if (res.ok || res.status === 401) {
           setServerReady(true);
           clearInterval(interval);
         }
@@ -64,6 +62,7 @@ export default function Login() {
     if (!serverReady) return;
     setLoading(true);
     setError("");
+
     try {
       const formData = new URLSearchParams();
       formData.append("username", username);

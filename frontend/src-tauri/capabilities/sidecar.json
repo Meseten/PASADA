@@ -1,6 +1,6 @@
 {
   "identifier": "sidecar-permission",
-  "windows": ["*"],
+  "windows": ["main"],
   "permissions": [
     {
       "identifier": "shell:allow-execute",

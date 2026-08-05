@@ -1,5 +1,4 @@
 "use client"
-
 import "./globals.css"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
@@ -7,16 +6,13 @@ import { ThemeProvider, useTheme } from "next-themes"
 import { useEffect, useState, useCallback } from "react"
 import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map, Pin, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+import { API_URL, fetchWithAuth, clearAuthAndRedirect } from "@/lib/api"
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
-  
   useEffect(() => setMounted(true), [])
   if (!mounted) return <div className="w-8 h-8" />
-  
   return (
     <button 
       onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
@@ -41,7 +37,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   const fetchRoutes = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/stats/global`)
+      const res = await fetchWithAuth(`${API_URL}/stats/global`)
       if (res.ok) {
         const data = await res.json()
         const routes = data.route_breakdown.map((r: any) => r.route)
@@ -83,12 +79,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   }, [pathname, fetchRoutes])
 
   const handleLogout = () => {
-    localStorage.removeItem("pasada_token")
-    localStorage.removeItem("pasada_full_name")
-    localStorage.removeItem("full_name")
-    localStorage.removeItem("token")
-    localStorage.removeItem("pasada_role")
-    router.push("/")
+    clearAuthAndRedirect();
   }
 
   const togglePin = (e: React.MouseEvent, route: string) => {
@@ -108,24 +99,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     e.preventDefault();
     e.stopPropagation();
     if (window.confirm(`Are you sure you want to delete the entire ${route} line and all its records? This action cannot be undone.`)) {
-        const token = localStorage.getItem("token") || localStorage.getItem("pasada_token");
         try {
-            const res = await fetch(`${API_URL}/api/routes/${route}`, {
-                method: "DELETE",
-                headers: { "Authorization": `Bearer ${token}` }
+            const res = await fetchWithAuth(`${API_URL}/api/routes/${route}`, {
+                method: "DELETE"
             });
             if (res.ok) {
-                // 1. Purge from local storage pins so it doesn't leave a ghost element
                 if (pinnedRoutes.includes(route)) {
                     const updatedPins = pinnedRoutes.filter(r => r !== route);
                     setPinnedRoutes(updatedPins);
                     localStorage.setItem("pasada_pinned_routes", JSON.stringify(updatedPins));
                 }
-
                 alert(`Route ${route} deleted successfully.`);
                 fetchRoutes();
                 
-                // 2. Safely redirect the user to the dashboard if they are viewing the deleted route
                 if (pathname === `/toda/${route}`) {
                     router.push('/dashboard');
                 }
@@ -140,7 +126,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   };
 
   const isAuthPage = pathname === "/" || pathname === "/signup"
-  
   if (!mounted) return null
 
   const filteredRoutes = activeRoutes.filter(r => r.toLowerCase().includes(routeSearch.toLowerCase()))
@@ -233,12 +218,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                             {pinnedList.map(route => <RouteItem key={`pinned-${route}`} route={route} isPinned={true} />)}
                         </div>
                     )}
-
                     <div className="mb-2">
                         {pinnedList.length > 0 && unpinnedList.length > 0 && <p className="px-3 text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-1 mt-2">All Routes</p>}
                         {unpinnedList.map(route => <RouteItem key={`unpinned-${route}`} route={route} isPinned={false} />)}
                     </div>
-
                     {activeRoutes.length > 0 && filteredRoutes.length === 0 && (
                       <div className="px-3 py-2 text-xs text-muted-foreground font-semibold italic">No routes found.</div>
                     )}

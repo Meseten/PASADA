@@ -1,11 +1,9 @@
 "use client"
-
 import { useState, useEffect } from "react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useRouter } from "next/navigation"
-
-const API_URL = "http://127.0.0.1:43888";
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
 interface LogEntry {
   id: number;
@@ -22,17 +20,8 @@ export default function AuditLogsPage() {
 
   useEffect(() => {
     const fetchLogs = async () => {
-      const token = localStorage.getItem("pasada_token");
-      if (!token) {
-        router.push("/");
-        return;
-      }
       try {
-        const response = await fetch(`${API_URL}/logs`, {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
-        });
+        const response = await fetchWithAuth(`${API_URL}/logs`);
         if (response.ok) {
           const data = await response.json();
           setLogs(data);
@@ -47,6 +36,7 @@ export default function AuditLogsPage() {
   return (
     <div className="flex-1 space-y-4 p-8 pt-6">
       <h2 className="text-3xl font-bold tracking-tight">Activity History</h2>
+      
       <Card>
         <CardHeader>
           <CardTitle>System Action Log</CardTitle>
