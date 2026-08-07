@@ -1,0 +1,18 @@
+fastapi
+uvicorn
+sqlalchemy
+pandas
+openpyxl
+python-docx
+passlib
+bcrypt==3.2.0
+pydantic
+python-multipart
+requests
+scikit-learn
+pytz
+pyinstaller
+numpy<2
+psutil
+python-jose
+pywin32; sys_platform == 'win32'
