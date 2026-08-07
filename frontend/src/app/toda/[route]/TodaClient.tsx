@@ -1,3 +1,7 @@
+// File: frontend/src/app/toda/[route]/TodaClient.tsx
+// Change IDs: B2
+// 25010 Characteristic: Maintainability
+
 "use client"
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams, usePathname, useRouter } from "next/navigation"
@@ -9,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, ArrowUpDown, Shield, RefreshCw } from "lucide-react"
-import { API_URL, fetchWithAuth } from "@/lib/api";
+import { API_URL, fetchWithAuth, computeRecordStatus } from "@/lib/api";
 
 interface Member {
   id: string;
@@ -25,6 +29,7 @@ interface Member {
   issue_date: string;
   valid_until: string;
   is_active: boolean;
+  status?: string;
 }
 
 interface LogEntry {
@@ -308,7 +313,6 @@ export default function TodaClient() {
         a.style.display = 'none'
         a.href = url
         
-        // Exact Naming Convention Enforced
         const year = new Date().getFullYear();
         a.download = statusFilter === "ALL" 
           ? `${safeRouteName} ${year}.xlsx` 
@@ -342,7 +346,6 @@ export default function TodaClient() {
         a.style.display = 'none';
         a.href = url;
         
-        // Exact Naming Convention Enforced
         a.download = `${member.sbn_no}.docx`;
         
         document.body.appendChild(a);
@@ -369,45 +372,23 @@ export default function TodaClient() {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         
-        if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame');
-          if (existingIframe) document.body.removeChild(existingIframe);
-          
-          const iframe = document.createElement('iframe');
-          iframe.id = 'pasada-print-frame';
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-2000px';
-          iframe.style.bottom = '-2000px';
-          iframe.style.width = '500px';
-          iframe.style.height = '500px';
-          iframe.src = url;
-          document.body.appendChild(iframe);
-          
-          iframe.onload = () => {
-            try {
-              iframe.contentWindow?.focus();
-              iframe.contentWindow?.print();
-            } catch (e) {
-              console.error(e);
-            }
-            setIsGeneratingId(null);
-            setTimeout(() => window.URL.revokeObjectURL(url), 10000);
-          };
-          
-        } else {
-          const a = document.createElement('a');
-          a.style.display = 'none';
-          a.href = url;
-          a.download = `${member.sbn_no}.docx`;
-          document.body.appendChild(a);
-          a.click();
-          setIsGeneratingId(null);
-          setTimeout(() => document.body.removeChild(a), 100);
-        }
-      } else {
-        setIsGeneratingId(null);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        const ext = blob.type === "application/pdf" ? "pdf" : "docx";
+        a.download = `${member.sbn_no}_PRINT.${ext}`;
+        
+        document.body.appendChild(a);
+        a.click();
+        
+        setTimeout(() => {
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 1000);
       }
     } catch (error) {
+      console.error("Print Download Error", error);
+    } finally {
       setIsGeneratingId(null);
     }
   };
@@ -419,43 +400,19 @@ export default function TodaClient() {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
         
-        if (blob.type === "application/pdf") {
-          const iframe = document.createElement('iframe');
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-2000px';
-          iframe.style.bottom = '-2000px';
-          iframe.style.width = '500px';
-          iframe.style.height = '500px';
-          iframe.src = url;
-          document.body.appendChild(iframe);
-          
-          return new Promise<void>((resolve) => {
-            iframe.onload = () => {
-              try {
-                iframe.contentWindow?.focus();
-                iframe.contentWindow?.print();
-              } catch (e) {
-                console.error(e);
-              }
-              setTimeout(() => {
-                window.URL.revokeObjectURL(url);
-                if (document.body.contains(iframe)) document.body.removeChild(iframe);
-                resolve();
-              }, 10000);
-            };
-          });
-        } else {
-          const a = document.createElement("a");
-          a.style.display = 'none';
-          a.href = url;
-          a.download = `${member.sbn_no}.docx`;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-          }, 1000);
-        }
+        const a = document.createElement("a");
+        a.style.display = 'none';
+        a.href = url;
+        const ext = blob.type === "application/pdf" ? "pdf" : "docx";
+        a.download = `${member.sbn_no}_PRINT.${ext}`;
+        
+        document.body.appendChild(a);
+        a.click();
+        
+        setTimeout(() => {
+          window.URL.revokeObjectURL(url);
+          document.body.removeChild(a);
+        }, 1000);
       }
     } catch (err) {
       console.error(err);
@@ -547,17 +504,7 @@ export default function TodaClient() {
   const currentYear = new Date().getFullYear()
 
   const filteredMembers = members.filter(m => {
-    const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
-    const isVacant = !m.operator_name || m.operator_name.trim() === "";
-    
-    let computedStatus = "ACTIVE";
-    if (isVacant) {
-      computedStatus = "VACANT";
-    } else if (m.is_active === false || issueYear <= currentYear - 2) {
-      computedStatus = "REVOKED";
-    } else if (issueYear === currentYear - 1) {
-      computedStatus = "FLAGGED";
-    }
+    const computedStatus = computeRecordStatus(m, currentYear);
 
     if (statusFilter !== "ALL" && computedStatus !== statusFilter) {
       return false;
@@ -630,7 +577,6 @@ export default function TodaClient() {
         <div className="flex flex-col gap-2 w-full lg:w-auto md:ml-auto items-end">
           {/* ROW 1: Sort, Filter, Refresh DB */}
           <div className="flex items-center justify-end gap-2 w-full">
-            {/* SORT BY DROPDOWN */}
             <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-10 shadow-sm shrink-0 whitespace-nowrap">
               <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
               <select
@@ -646,7 +592,6 @@ export default function TodaClient() {
               </select>
             </div>
 
-            {/* STATUS FILTER DROPDOWN */}
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
@@ -771,7 +716,7 @@ export default function TodaClient() {
                   <FileText className="mr-2 h-4 w-4 text-blue-600" /> Download Word File
                 </Button>
                 <Button onClick={() => handleNativePrint(viewMember)} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
-                  <Printer className="mr-2 h-4 w-4" /> Print MTOP
+                  <Printer className="mr-2 h-4 w-4" /> Download MTOP (PDF)
                 </Button>
               </>
             )}
@@ -797,7 +742,7 @@ export default function TodaClient() {
               <div className="space-y-2 w-full">
                 <p className="font-bold text-lg">Preparing Documents</p>
                 <p className="text-sm text-muted-foreground font-medium">
-                  Opening print box {batchProgress.current} of {batchProgress.total}...
+                  Downloading PDF {batchProgress.current} of {batchProgress.total}...
                 </p>
                 <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
                   <div 
@@ -869,7 +814,7 @@ export default function TodaClient() {
                 }
                 className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
               >
-                <CheckCircle className="mr-2 h-5 w-5" /> Start Batch Print
+                <CheckCircle className="mr-2 h-5 w-5" /> Start Batch Download
               </Button>
             </DialogFooter>
           )}
@@ -1056,8 +1001,8 @@ export default function TodaClient() {
                   </TableRow>
                 ) : (
                   paginatedMembers.map((member) => {
-                    const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
-                    const isVacant = !member.operator_name || member.operator_name.trim() === "";
+                    const computedStatus = computeRecordStatus(member, currentYear);
+                    const isVacant = computedStatus === "VACANT";
                     
                     let rowColor = "hover:bg-muted/30 transition-colors duration-200";
                     let statusBadge = <Badge variant="outline" className="bg-green-500/10 text-green-700 border-green-500/20 dark:text-green-400 font-bold tracking-wide shadow-sm"><CheckCircle className="h-3 w-3 mr-1"/> Active</Badge>;
@@ -1065,10 +1010,10 @@ export default function TodaClient() {
                     if (isVacant) {
                       rowColor = "bg-blue-50/60 dark:bg-blue-950/20 hover:bg-blue-100/80 dark:hover:bg-blue-900/30 transition-colors duration-200";
                       statusBadge = <Badge variant="outline" className="bg-blue-500/10 text-blue-700 border-blue-500/20 dark:text-blue-400 font-bold tracking-wide shadow-sm">VACANT</Badge>;
-                    } else if (member.is_active === false || issueYear <= currentYear - 2) {
+                    } else if (computedStatus === "REVOKED") {
                       rowColor = "bg-red-50/60 dark:bg-red-950/20 hover:bg-red-100/80 dark:hover:bg-red-900/30 transition-colors duration-200";
                       statusBadge = <Badge variant="outline" className="bg-red-500/10 text-red-700 border-red-500/20 dark:text-red-400 font-bold tracking-wide shadow-sm"><XCircle className="h-3 w-3 mr-1"/> Revoked (2+ Yrs)</Badge>;
-                    } else if (issueYear === currentYear - 1) {
+                    } else if (computedStatus === "FLAGGED") {
                       rowColor = "bg-amber-50/60 dark:bg-amber-950/20 hover:bg-amber-100/80 dark:hover:bg-amber-900/30 transition-colors duration-200";
                       statusBadge = <Badge variant="outline" className="bg-amber-500/10 text-amber-700 border-amber-500/20 dark:text-amber-400 font-bold tracking-wide shadow-sm"><AlertCircle className="h-3 w-3 mr-1"/> 1-Year Non-Renewal</Badge>;
                     }

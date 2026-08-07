@@ -1,6 +1,9 @@
+# 25010 Characteristic: Reliability
+
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import inspect, text
 from datetime import datetime
 import pytz
 import os
@@ -98,6 +101,17 @@ class RouteData(Base):
     road_length_km = Column(Float, default=5.0)     
 
 Base.metadata.create_all(bind=engine)
+
+# --- LEGACY DB MIGRATION HEALING ---
+def ensure_schema_upgrades(engine):
+    inspector = inspect(engine)
+    if "franchise_records" in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns("franchise_records")]
+        if "is_deleted" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE franchise_records ADD COLUMN is_deleted BOOLEAN DEFAULT 0"))
+
+ensure_schema_upgrades(engine)
 
 # Keep BASE_DIR pointing to the new cross-platform directory for backups, etc.
 BASE_DIR = NEW_BASE_DIR
