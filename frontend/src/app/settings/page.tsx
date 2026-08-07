@@ -1,3 +1,5 @@
+// 25010 Characteristic: Usability
+
 "use client";
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
@@ -15,7 +17,6 @@ export default function Settings() {
   const [newUsername, setNewUsername] = useState("");
   
   const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[] } | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [isCleaningDb, setIsCleaningDb] = useState(false);
@@ -167,14 +168,6 @@ export default function Settings() {
     setLoading(false);
   };
 
-  const handleForceSync = async () => {
-    setIsSyncing(true);
-    setTimeout(() => {
-      setIsSyncing(false);
-      triggerSuccess("Data updated from the network successfully.");
-    }, 2000);
-  };
-
   return (
     <div className="p-6 md:p-8 animate-in fade-in duration-500 w-full max-w-[1600px]">
       <div className="flex items-center gap-3 mb-8">
@@ -199,10 +192,7 @@ export default function Settings() {
         </div>
       )}
 
-      {/* FULL WIDTH WRAPPER FOR NAV AND BODY */}
       <div className="bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
-        
-        {/* FULL WIDTH NAVBAR */}
         <div className="flex w-full overflow-x-auto border-b border-border bg-muted/10">
           {[
             { id: "general", label: "General Settings", icon: <SettingsIcon size={16} /> },
@@ -225,7 +215,6 @@ export default function Settings() {
           ))}
         </div>
 
-        {/* FULL WIDTH BODY */}
         <div className="p-6 md:p-8">
           {activeTab === "general" && (
             <div className="space-y-8 max-w-2xl">
@@ -252,7 +241,6 @@ export default function Settings() {
 
           {activeTab === "backup" && (
             <div className="space-y-8">
-              {/* BACKUP EXPORT SECTION */}
               <div>
                 <h2 className="text-lg font-bold flex items-center gap-2"><Download className="text-blue-600" size={20} /> Export Backup Files</h2>
                 <p className="text-sm text-muted-foreground mt-1 font-medium">Download a ZIP file containing Excel lists and Word document templates.</p>
@@ -295,7 +283,6 @@ export default function Settings() {
 
               <hr className="border-border" />
 
-              {/* ONE-CLICK DATABASE CLEANUP TOOL */}
               <div className="bg-amber-500/10 border border-amber-500/30 p-6 rounded-xl space-y-4">
                 <div className="flex items-start gap-3">
                   <RefreshCw className="text-amber-600 mt-1 shrink-0" size={24} />
@@ -389,11 +376,14 @@ export default function Settings() {
                 </div>
 
                 <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1 flex flex-col justify-center">
-                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">Sync Network Data</p>
-                  <button onClick={handleForceSync} disabled={isSyncing} className="w-full bg-blue-600 text-white font-bold py-4 rounded-lg shadow-md hover:bg-blue-700 transition-all flex items-center justify-center gap-2">
-                    {isSyncing ? <Loader2 className="animate-spin h-5 w-5" /> : <Server className="h-5 w-5" />}
-                    {isSyncing ? "Updating..." : "Update from Network"}
-                  </button>
+                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">LAN Sync Status</p>
+                  <div className="w-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center">
+                    <div className="flex items-center gap-2">
+                        <RefreshCw className="h-5 w-5 animate-spin" />
+                        <span>Sync is Automatic</span>
+                    </div>
+                    <p className="text-[10px] font-medium opacity-80 mt-1">Background synchronization active</p>
+                  </div>
                 </div>
               </div>
             </div>
