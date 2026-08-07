@@ -1,3 +1,5 @@
+# 25010 Characteristic: Reliability
+
 import os
 import sys
 import platform
@@ -7,6 +9,14 @@ from docx import Document
 from docx.shared import Pt
 from datetime import datetime
 from database import BASE_DIR
+
+def log_conversion_error(msg):
+    try:
+        log_path = os.path.join(BASE_DIR, "PASADA_CRASH_LOG.txt")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now()}] DOC_GEN ERROR: {msg}\n")
+    except:
+        pass
 
 def get_resource_path(relative_path):
     try:
@@ -136,8 +146,8 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
                     word.Quit()
                     pythoncom.CoUninitialize()
                 if os.path.exists(pdf_path): return pdf_path, "application/pdf"
-            except Exception:
-                pass 
+            except Exception as e:
+                log_conversion_error(f"Windows COM PDF conversion failed: {e}. Trying LibreOffice...")
 
         subprocess.run(
             ['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path],
@@ -146,7 +156,11 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
         if os.path.exists(pdf_path): 
             return pdf_path, "application/pdf"
             
+    except subprocess.CalledProcessError as e:
+        log_conversion_error(f"LibreOffice PDF conversion failed: {e}. Falling back to .docx.")
+    except FileNotFoundError as e:
+        log_conversion_error(f"LibreOffice not found: {e}. Falling back to .docx.")
     except Exception as e:
-        pass
+        log_conversion_error(f"Unexpected PDF conversion error: {e}. Falling back to .docx.")
         
     return docx_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

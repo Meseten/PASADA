@@ -1,3 +1,5 @@
+# 25010 Characteristic: Functional Suitability, Maintainability
+
 import sys
 import os
 import traceback
@@ -20,7 +22,7 @@ def force_log(msg):
     try:
         with open(crash_log_path, "a", encoding="utf-8") as f:
             f.write(f"{msg}\n")
-    except:
+    except OSError:
         pass
 
 def exception_hook(exc_type, exc_value, exc_traceback):
@@ -122,7 +124,7 @@ def automated_background_tasks():
                     if os.path.getmtime(file_path) < current_timestamp - 7200:
                         try:
                             os.remove(file_path)
-                        except:
+                        except OSError:
                             pass
 
             # 2. AUTOMATED DATABASE BACKUP
@@ -225,6 +227,25 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
+
+def compute_record_status(record: FranchiseRecord) -> str:
+    """SINGLE SOURCE OF TRUTH FOR RECORD STATUS"""
+    is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
+    if is_vacant:
+        return "VACANT"
+    issue_year = record.issue_date.year if record.issue_date else 0
+    current_year = get_pht_now().year
+    
+    if getattr(record, 'is_active', True) is False or issue_year <= current_year - 2:
+        return "REVOKED"
+    if issue_year == current_year - 1:
+        return "FLAGGED"
+    return "ACTIVE"
+
+def attach_status(record: FranchiseRecord):
+    record.status = compute_record_status(record)
+    return record
+
 def log_action(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str):
     new_log = AuditLog(clerk_name=clerk_name, action=action, target_id=str(target_id), target_route=target_route, details=details)
     db.add(new_log)
@@ -262,7 +283,8 @@ def parse_safe_date(raw_date, fallback_year):
         if pd.isna(dt):
             return None
         return dt.to_pydatetime()
-    except:
+    except (ValueError, TypeError, OverflowError) as e:
+        force_log(f"Date parsing failed: {e}")
         return None
 
 def get_base_sbn(sbn):
@@ -304,7 +326,7 @@ def format_sbn_with_year(sbn, issue_date, is_vacant=False):
             issue_date = datetime.fromisoformat(issue_date.split('T')[0])
         year_suffix = str(issue_date.year)[-2:]
         return f"{base_sbn}-{year_suffix}"
-    except:
+    except Exception:
         return base_sbn
 
 def get_record_year(dt):
@@ -670,7 +692,7 @@ def sync_pull(since: str, x_cluster_secret: str = Header(None), db: Session = De
         u_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns if c.name != "password_hash"}
         safe_users.append(u_dict)
         
-    return {"records": records, "users": safe_users}
+    return {"records": [attach_status(r) for r in records], "users": safe_users}
 
 @app.post("/api/operators")
 def create_operator_api(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -716,7 +738,6 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
     if not db_record: raise HTTPException(status_code=404)
     
-    # FIX: Check if the literal string SBN changed (e.g. BA-001-18 -> BA-001-26) to trigger renewal
     raw_old_sbn = str(db_record.sbn_no).strip().upper()
     raw_new_sbn = str(record.sbn_no).strip().upper()
     
@@ -785,29 +806,41 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
         temp_db = TempSession()
         imported_records = temp_db.query(FranchiseRecord).all()
         db = SessionLocal()
-        existing_chassis = {r.chassis_no for r in db.query(FranchiseRecord.chassis_no).filter(FranchiseRecord.is_deleted == False).all()}
+        
+        existing_ids = {r.id for r in db.query(FranchiseRecord.id).all()}
+        
         new_count = 0
+        skipped_count = 0
+        
         for r in imported_records:
-            if r.chassis_no not in existing_chassis and not getattr(r, 'is_deleted', False):
-                is_vac = not r.operator_name or str(r.operator_name).strip() == ""
-                new_record = FranchiseRecord(
-                    id=r.id, sbn_no=format_sbn_with_year(r.sbn_no, r.issue_date, is_vac), operator_name=r.operator_name,
-                    address=r.address, motor_no=r.motor_no, chassis_no=r.chassis_no,
-                    make=r.make, plate_no=r.plate_no, route=r.route,
-                    driving_route=r.driving_route, issue_date=r.issue_date,
-                    valid_until=r.valid_until, is_active=r.is_active,
-                    processed_by=f"{current_user.first_name} {current_user.last_name}", 
-                    updated_at=r.updated_at
-                )
-                db.add(new_record)
-                existing_chassis.add(r.chassis_no)
-                new_count += 1
+            if getattr(r, 'is_deleted', False):
+                skipped_count += 1
+                continue
+                
+            if r.id in existing_ids:
+                skipped_count += 1
+                continue
+
+            is_vac = not r.operator_name or str(r.operator_name).strip() == ""
+            new_record = FranchiseRecord(
+                id=r.id, sbn_no=format_sbn_with_year(r.sbn_no, r.issue_date, is_vac), operator_name=r.operator_name,
+                address=r.address, motor_no=r.motor_no, chassis_no=r.chassis_no,
+                make=r.make, plate_no=r.plate_no, route=r.route,
+                driving_route=r.driving_route, issue_date=r.issue_date,
+                valid_until=r.valid_until, is_active=r.is_active,
+                processed_by=f"{current_user.first_name} {current_user.last_name}", 
+                updated_at=r.updated_at
+            )
+            db.add(new_record)
+            existing_ids.add(r.id)
+            new_count += 1
+            
         db.commit()
         invalidate_ml_cache()
         temp_db.close()
         os.remove(temp_db_path)
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file.")
-        return {"imported": new_count}
+        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
+        return {"imported": new_count, "skipped": skipped_count}
     except Exception as e:
         if os.path.exists(temp_db_path): os.remove(temp_db_path)
         raise HTTPException(status_code=400, detail=str(e))
@@ -1079,7 +1112,7 @@ def get_route_records(route_name: str, current_user: User = Depends(get_current_
     for r in deduped:
         is_vac = not r.operator_name or str(r.operator_name).strip() == ""
         r.sbn_no = format_sbn_with_year(r.sbn_no, r.issue_date, is_vac)
-    return sorted(deduped, key=get_sbn_sort_key)
+    return [attach_status(r) for r in sorted(deduped, key=get_sbn_sort_key)]
 
 @app.get("/franchise/status/inactive")
 def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1088,16 +1121,14 @@ def get_inactive_records(current_user: User = Depends(get_current_user), db: Ses
     for r in deduped:
         is_vac = not r.operator_name or str(r.operator_name).strip() == ""
         r.sbn_no = format_sbn_with_year(r.sbn_no, r.issue_date, is_vac)
-    return sorted(deduped, key=get_sbn_sort_key)
+    return [attach_status(r) for r in sorted(deduped, key=get_sbn_sort_key)]
 
-# 7.2: SECURE UNAUTHENTICATED ENDPOINTS WITH JWT
 @app.get("/predict/{route}")
 def get_prediction(route: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return run_kmeans_clustering(db, route)
 
 @app.get("/export/masterlist/{route_name}")
 def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Support "ALL" routes parameter from Inactive Screen
     if route_name.upper() == "ALL":
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
     else:
@@ -1109,18 +1140,7 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
     
     filtered_records = []
     for r in records_query:
-        is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
-        issue_year = r.issue_date.year if (r.issue_date and not is_vacant) else 0
-        
-        if is_vacant:
-            computed_filter_status = "VACANT"
-        elif not r.is_active or issue_year <= current_year - 2:
-            computed_filter_status = "REVOKED"
-        elif issue_year == current_year - 1:
-            computed_filter_status = "FLAGGED"
-        else:
-            computed_filter_status = "ACTIVE"
-            
+        computed_filter_status = compute_record_status(r)
         if status_filter == "ALL" or status_filter == computed_filter_status:
             filtered_records.append(r)
 
@@ -1132,7 +1152,6 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
         is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
         formatted_sbn = format_sbn_with_year(r.sbn_no, r.issue_date, is_vacant)
         
-        # FIX 7.1 & 15.1: Apply Escape Function to prevent Excel Formula Execution
         csv_data.append({
             "SBN NO.": escape_excel(formatted_sbn),
             "DATE OF RENEWAL": None if is_vacant else r.issue_date,
@@ -1204,7 +1223,6 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
             issue_year = issue_date.year if pd.notna(issue_date) else 0
             
             fill_color = None
-            
             if not op_name or op_name == "'":
                 fill_color = fill_vacant
             elif issue_year == current_year:
@@ -1219,11 +1237,9 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
             for col_num in range(1, 8):
                 cell = ws.cell(row=row_num, column=col_num)
                 cell.font = calibri_11
-                
                 if fill_color:
                     cell.fill = fill_color
                 cell.alignment = Alignment(horizontal='left', vertical='center')
-                
                 if col_num == 2 and cell.value:
                     cell.number_format = 'dd-mmm-yy'
         
@@ -1246,7 +1262,6 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
 
     output.seek(0)
     
-    # Exact Name Formatting Request
     if status_filter == "ALL":
         filename_str = f"{route_name.upper()} {current_year}.xlsx"
     else:
@@ -1362,9 +1377,7 @@ if __name__ == "__main__":
         force_log("Scanning for zombie processes on Port 43888...")
         kill_zombie_port(43888)
         force_log("Port 43888 is clear. Starting Uvicorn server...")
-        
         uvicorn.run(app, host="0.0.0.0", port=43888, log_config=None)
-        
     except Exception as e:
         force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{traceback.format_exc()}")
         sys.exit(1)

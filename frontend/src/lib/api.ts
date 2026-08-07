@@ -1,3 +1,5 @@
+// 25010 Characteristic: Maintainability
+
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
 
 export const getToken = () => {
@@ -43,6 +45,8 @@ export const fetchWithAuth = async (endpoint: string, options: RequestInit = {})
 
 // Unified Status Computer (Ensures Dashboard, Table, and Exports match perfectly)
 export const computeRecordStatus = (member: any, currentYear: number) => {
+  if (member.status) return member.status; // B2: Defers to backend as authoritative
+  
   if (!member.operator_name || member.operator_name.trim() === "") return "VACANT";
   
   const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
