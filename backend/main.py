@@ -73,7 +73,6 @@ force_log("All libraries loaded successfully!")
 starlette.formparsers.MultiPartParser.max_files = 10000
 starlette.formparsers.MultiPartParser.max_fields = 10000
 
-# --- RELIABILITY FIX: STATEFUL AUTOMATED BACKUP & FILE CLEANUP ---
 def automated_background_tasks():
     while True:
         try:
@@ -118,7 +117,6 @@ def automated_background_tasks():
             
         time.sleep(60)
 
-# Safely decouples heavy threaded background tasks from the Uvicorn ASGI network loop
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     threading.Thread(target=automated_background_tasks, daemon=True).start()
@@ -132,8 +130,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PASADA Registry API", lifespan=lifespan)
 
-# FIX: Universal CORS. Since we converted the Login payload to JSON, the anti-CSRF Simple Request vulnerability is gone. 
-# We can now safely allow ALL origins (*), bypassing any weird WebKitGTK schema (asset://, null, tauri://).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -239,6 +235,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
+
+def get_full_name(user: User) -> str:
+    """Failsafe to ensure clerk name is never blank in activity logs"""
+    first = getattr(user, 'first_name', "") or ""
+    last = getattr(user, 'last_name', "") or ""
+    name = f"{first} {last}".strip()
+    
+    if not name or name == "None" or name == "None None":
+        return getattr(user, 'username', "SYSTEM ADMIN")
+    return name
 
 def compute_record_status(record: FranchiseRecord) -> str:
     is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
@@ -489,7 +495,7 @@ def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current
         
     db.commit()
     invalidate_ml_cache(target_route)
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "DELETE_RECORD", clean_sbn, "ALL", f"Soft deleted operator record {clean_sbn}.")
+    log_action(db, get_full_name(current_user), "DELETE_RECORD", clean_sbn, "ALL", f"Soft deleted operator record {clean_sbn}.")
     return {"message": f"{count} operator(s) deleted successfully."}
 
 @app.post("/api/operators/bulk-delete")
@@ -507,7 +513,7 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
             deleted_count += 1
     db.commit()
     invalidate_ml_cache() 
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "BULK_DELETE", "0", "ALL", f"Bulk deleted {deleted_count} operator record(s).")
+    log_action(db, get_full_name(current_user), "BULK_DELETE", "0", "ALL", f"Bulk deleted {deleted_count} operator record(s).")
     return {"message": f"{deleted_count} operator(s) deleted successfully."}
 
 @app.delete("/api/routes/{route_name}")
@@ -526,7 +532,7 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
             count += 1
     db.commit()
     invalidate_ml_cache(route_to_delete)
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
+    log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
     return {"message": f"Route '{route_to_delete}' deleted successfully."}
 
 @app.post("/admin/refresh-db")
@@ -603,13 +609,12 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
 
     db.commit()
     invalidate_ml_cache() 
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, reversed phantom dates, and removed {deleted_count} duplicates.")
+    log_action(db, get_full_name(current_user), "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, reversed phantom dates, and removed {deleted_count} duplicates.")
     return {
         "status": "success",
         "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
     }
 
-# UNLOCKED SIGNUP: Removed Depends(get_current_user) to allow open registration.
 @app.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
@@ -623,7 +628,7 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
-    log_action(db, "SYSTEM", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {user.username}")
+    log_action(db, "SYSTEM ADMIN", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {user.username}")
     return {"message": "Account created"}
 
 @app.post("/token")
@@ -632,7 +637,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not user or not pwd_context.verify(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect credentials")
     
-    full_name = f"{user.first_name} {user.last_name}"
+    full_name = get_full_name(user)
     access_token = create_access_token(data={"sub": user.username})
     
     log_action(db, full_name, "LOGIN", "0", "SYSTEM", "Successful authentication")
@@ -649,7 +654,7 @@ def update_password(payload: PasswordUpdate, current_user: User = Depends(get_cu
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     current_user.password_hash = pwd_context.hash(payload.new_password)
     db.commit()
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SECURITY", "0", "SYSTEM", "Updated account password")
+    log_action(db, get_full_name(current_user), "UPDATE_SECURITY", "0", "SYSTEM", "Updated account password")
     return {"status": "success"}
 
 @app.put("/users/username")
@@ -661,7 +666,7 @@ def update_username(payload: UsernameUpdate, current_user: User = Depends(get_cu
     current_user.username = payload.new_username.upper()
     db.commit()
     
-    log_action(db, current_user.first_name + " " + current_user.last_name, "UPDATE_USERNAME", "0", "SYSTEM", f"Changed username from {old_username} to {payload.new_username.upper()}")
+    log_action(db, get_full_name(current_user), "UPDATE_USERNAME", "0", "SYSTEM", f"Changed username from {old_username} to {payload.new_username.upper()}")
     return {"status": "success"}
 
 @app.get("/settings")
@@ -673,7 +678,7 @@ def update_settings(settings: SettingsUpdate, current_user: User = Depends(get_c
     sys_settings = init_settings(db)
     sys_settings.committee_chair = settings.committee_chair
     db.commit()
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
+    log_action(db, get_full_name(current_user), "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
     return {"status": "success"}
 
 @app.post("/route_data/{route_name}")
@@ -687,7 +692,7 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
         route_info.road_length_km = payload.road_length_km
     db.commit()
     invalidate_ml_cache(route_name) 
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
+    log_action(db, get_full_name(current_user), "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
     return {"status": "success", "message": f"Updated demographic data for {route_name.upper()}"}
 
 @app.get("/system/network")
@@ -718,7 +723,7 @@ def create_operator_api(record: FranchiseCreate, current_user: User = Depends(ge
 def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run_kmeans_clustering(db, record.route.upper())
 
-    full_name = f"{current_user.first_name} {current_user.last_name}"
+    full_name = get_full_name(current_user)
     current_time = get_pht_now()
     
     if not record.sbn_no or str(record.sbn_no).strip() == "":
@@ -750,7 +755,8 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     db.commit()
     db.refresh(new_record)
     invalidate_ml_cache(new_record.route)
-    log_action(db, full_name, "CREATE_RECORD", new_record.id, new_record.route, f"Processed Initial MTOP for {record.operator_name}")
+    
+    log_action(db, full_name, "CREATE_RECORD", new_record.id, new_record.route, f"Registered new operator {record.operator_name or 'VACANT'} under SBN {record.sbn_no} ({record.route})")
     return {"status": "success", "message": f"Franchise operator added successfully with SBN {record.sbn_no}."}
 
 @app.put("/franchise/{record_id}")
@@ -777,7 +783,6 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
         db_record.issue_date = None
         db_record.valid_until = None
     else:
-        # Detect Motor Spec Changes for Auto-Fallback
         if (
             str(db_record.motor_no).strip().upper() != str(record.motor_no).strip().upper() or
             str(db_record.chassis_no).strip().upper() != str(record.chassis_no).strip().upper() or
@@ -794,7 +799,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
             db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
             db_record.is_active = True
 
-        elif manual_issue: # Standard Edit with Manual Override Provided
+        elif manual_issue: 
             db_record.issue_date = manual_issue
             db_record.valid_until = manual_valid if manual_valid else datetime(manual_issue.year, 12, 31)
             db_record.is_active = determine_status(db_record.issue_date)
@@ -810,14 +815,14 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
 
     db.commit()
     invalidate_ml_cache(db_record.route)
-    full_name = f"{current_user.first_name} {current_user.last_name}"
+    full_name = get_full_name(current_user)
     
     if is_change_motor:
-        log_action(db, full_name, "CHANGE_MOTOR", db_record.id, db_record.route, f"Processed Change Motor for {db_record.operator_name}. Updated Date Issued to {db_record.issue_date.strftime('%Y-%m-%d')}.")
+        log_action(db, full_name, "CHANGE_MOTOR", db_record.id, db_record.route, f"Processed Change Motor for {db_record.operator_name or 'VACANT'}. Updated Date Issued to {db_record.issue_date.strftime('%Y-%m-%d')}.")
     elif is_renewal:
         log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
     else:
-        log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated details for {db_record.operator_name}")
+        log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated record for {db_record.operator_name or 'VACANT'} - SBN {db_record.sbn_no} ({db_record.route})")
     return {"status": "success"}
 
 @app.post("/upload/database")
@@ -858,7 +863,7 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
                 make=r.make, plate_no=r.plate_no, route=r.route,
                 driving_route=r.driving_route, issue_date=r.issue_date,
                 valid_until=r.valid_until, is_active=r.is_active,
-                processed_by=f"{current_user.first_name} {current_user.last_name}", 
+                processed_by=get_full_name(current_user), 
                 updated_at=r.updated_at
             )
             db.add(new_record)
@@ -869,7 +874,7 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
         invalidate_ml_cache()
         temp_db.close()
         os.remove(temp_db_path)
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
+        log_action(db, get_full_name(current_user), "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
         return {"imported": new_count, "skipped": skipped_count}
     except Exception as e:
         if os.path.exists(temp_db_path): os.remove(temp_db_path)
@@ -877,7 +882,7 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
 
 @app.post("/upload/bulk/{route_name}")
 async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    full_name = f"{current_user.first_name} {current_user.last_name}"
+    full_name = get_full_name(current_user)
     imported_count = 0
     current_time = get_pht_now()
     error_log = [] 
@@ -1093,7 +1098,7 @@ async def download_word_doc(record_id: str, current_user: User = Depends(get_cur
     doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="docx")
     
     if os.path.exists(doc_path):
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "DOWNLOAD_DOCX", record.id, record.route, f"Downloaded raw MTOP Word Document")
+        log_action(db, get_full_name(current_user), "DOWNLOAD_DOCX", record.id, record.route, f"Downloaded raw MTOP Word Document for SBN {full_sbn}")
         headers = {'Content-Disposition': f'attachment; filename="{full_sbn}.docx"'}
         return FileResponse(path=doc_path, headers=headers, media_type=media_type)
         
@@ -1121,7 +1126,7 @@ async def generate_doc(record_id: str, current_user: User = Depends(get_current_
     doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="pdf")
     
     if os.path.exists(doc_path):
-        log_action(db, f"{current_user.first_name} {current_user.last_name}", "PRINT_MTOP", record.id, record.route, f"Generated MTOP Document")
+        log_action(db, get_full_name(current_user), "PRINT_MTOP", record.id, record.route, f"Generated MTOP Document for SBN {full_sbn}")
         headers = {'Content-Disposition': f'attachment; filename="{full_sbn}.pdf"'}
         return FileResponse(path=doc_path, headers=headers, media_type=media_type)
         
@@ -1129,11 +1134,54 @@ async def generate_doc(record_id: str, current_user: User = Depends(get_current_
 
 @app.get("/logs/record/{record_id}")
 def get_record_history(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(AuditLog).filter(AuditLog.target_id == record_id).order_by(AuditLog.timestamp.desc()).all()
+    logs = db.query(AuditLog).filter(AuditLog.target_id == record_id).order_by(AuditLog.timestamp.desc()).all()
+    result = []
+    
+    for log in logs:
+        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
+        
+        cname = str(log_dict.get("clerk_name", "")).strip()
+        if not cname or cname.lower() in ["none", "null"]:
+            cname = "SYSTEM ADMIN"
+            
+        log_dict["clerk_name"] = cname
+        log_dict["user"] = cname
+        
+        result.append(log_dict)
+        
+    return result
 
 @app.get("/logs")
 def get_audit_logs(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200).all()
+    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200).all()
+    result = []
+    
+    for log in logs:
+        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
+        
+        tid = str(log_dict.get("target_id", ""))
+        if len(tid) > 10:  
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == tid).first()
+            if rec:
+                val = f"{rec.sbn_no} ({rec.operator_name or 'VACANT'})"
+            else:
+                val = "Unknown / Deleted Record"
+        else:
+            val = tid if tid and tid != "0" else "SYSTEM"
+            
+        log_dict["target_id"] = val
+        log_dict["target_record"] = val 
+        
+        cname = str(log_dict.get("clerk_name", "")).strip()
+        if not cname or cname.lower() in ["none", "null"]:
+            cname = "SYSTEM ADMIN"
+            
+        log_dict["clerk_name"] = cname
+        log_dict["user"] = cname 
+        
+        result.append(log_dict)
+        
+    return result
 
 @app.get("/franchise/route/{route_name}")
 def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1297,7 +1345,7 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
     else:
         filename_str = f"{route_name.upper()} {current_year} - {status_filter.upper()}.xlsx"
 
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported {status_filter} Masterlist for {route_name.upper()}")
+    log_action(db, get_full_name(current_user), "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported {status_filter} Masterlist for {route_name.upper()}")
     
     headers = {
         'Content-Disposition': f'attachment; filename="{filename_str}"'
