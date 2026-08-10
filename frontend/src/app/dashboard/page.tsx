@@ -32,6 +32,7 @@ export default function Dashboard() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
+        // FIX: Replaced raw fetch with fetchWithAuth to break Next.js cache poisoning
         const res = await fetchWithAuth(`${API_URL}/stats/global`);
         if (res.ok) {
           const data = await res.json();
@@ -49,13 +50,14 @@ export default function Dashboard() {
     };
     
     fetchStats();
-    const interval = setInterval(fetchStats, 5000);
+    const interval = setInterval(fetchStats, 15000);
     return () => clearInterval(interval);
   }, []);
 
   const fetchML = async () => {
     if (!activePrediction) return;
     try {
+      // FIX: Replaced raw fetch with fetchWithAuth
       const res = await fetchWithAuth(`${API_URL}/predict/${activePrediction}`);
       if (res.ok) {
         const data = await res.json();
@@ -82,6 +84,7 @@ export default function Dashboard() {
     
     setIsUpdatingRoute(true);
     try {
+      // FIX: Replaced raw fetch with fetchWithAuth and removed redundant Authorization header
       const res = await fetchWithAuth(`${API_URL}/route_data/${activePrediction}`, {
         method: 'POST',
         headers: {
@@ -113,15 +116,16 @@ export default function Dashboard() {
   }
 
   const compliantCount = stats.total_system_capacity - stats.vacant_slots - stats.flagged_pending;
+
   const pieData = [
     { name: 'Active Operators', value: Math.max(0, compliantCount) },
     { name: '1-Year Non-Renewal', value: stats.flagged_pending },
     { name: '2+ Years Non-Renewal / Vacant', value: stats.vacant_slots },
   ];
-  
+
   const activeRoutes = stats.route_breakdown.map(r => r.route);
-  
   const statusText = predictionData?.forecast_period || "";
+  
   let clusterColor = "bg-blue-50/50 border-blue-500/20 text-blue-600 dark:bg-blue-950/20";
   let textColor = "text-blue-600";
   
@@ -163,6 +167,7 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
+
         <div className="bg-card border-l-4 border-l-emerald-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-emerald-600">Active Operators</p>
@@ -177,6 +182,7 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
+
         <div className="bg-card border-l-4 border-l-amber-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-amber-600">1-Year Non-Renewal</p>
@@ -191,6 +197,7 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
+
         <div className="bg-card border-l-4 border-l-red-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-center mb-2">
             <p className="text-xs font-bold text-red-600">2+ Years Non-Renewal / Vacant</p>
@@ -234,6 +241,7 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-start mb-2">
             <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Weekly Volume</p>
@@ -259,6 +267,7 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
         <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
           <div className="flex justify-between items-start mb-2">
             <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Monthly Volume</p>
@@ -317,7 +326,7 @@ export default function Dashboard() {
           </div>
         </div>
         
-        <div className="lg:col-span-3 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col">
+        <div className="lg:col-span-3 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col text-slate-800 dark:text-slate-200">
           <div className="flex flex-col mb-1">
             <h3 className="text-sm font-bold text-foreground">Route Distribution</h3>
             <p className="text-[10px] text-muted-foreground mt-0.5">Total active operators per TODA line.</p>
@@ -326,8 +335,8 @@ export default function Dashboard() {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={stats.route_breakdown}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={8} tickLine={false} axisLine={false} tick={{ fill: '#94a3b8' }} />
-                <YAxis fontSize={9} tickLine={false} axisLine={false} tick={{ fill: '#94a3b8' }} />
+                <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={10} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />
+                <YAxis fontSize={11} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />
                 <Tooltip
                   cursor={{ fill: 'transparent' }}
                   contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px 8px', fontWeight: 'bold', border: 'none', backgroundColor: '#1e293b', color: '#f8fafc' }}
@@ -347,6 +356,7 @@ export default function Dashboard() {
           <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" />
           Route Density Analysis
         </h3>
+        
         <div className="flex flex-wrap gap-1.5 mb-4">
           {activeRoutes.map((toda) => (
             <button

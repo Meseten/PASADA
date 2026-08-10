@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Loader2, Moon, Sun, AlertTriangle } from "lucide-react";
+import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
-import { API_URL, getToken } from "@/lib/api";
+
+const API_URL = "http://127.0.0.1:43888";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
@@ -31,7 +32,7 @@ export default function Signup() {
     const checkServer = async () => {
       try {
         const res = await fetch(`${API_URL}/stats/global`);
-        if (res.ok || res.status === 401) {
+        if (res.ok) {
           setServerReady(true);
           clearInterval(interval);
         }
@@ -53,12 +54,6 @@ export default function Signup() {
     e.preventDefault();
     if (!serverReady) return;
     
-    const currentToken = getToken();
-    if (!currentToken) {
-      setError("Unauthorized: You must be logged in as an existing clerk to create new accounts.");
-      return;
-    }
-
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
@@ -70,10 +65,7 @@ export default function Signup() {
     try {
       const res = await fetch(`${API_URL}/signup`, {
         method: "POST",
-        headers: { 
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${currentToken}` 
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           first_name: firstName.trim(),
           last_name: lastName.trim(),
@@ -82,9 +74,8 @@ export default function Signup() {
           role: "Clerk", 
         }),
       });
-      
+
       if (res.ok) {
-        alert("Account created successfully!");
         router.push("/");
       } else {
         const errData = await res.json();
@@ -114,13 +105,6 @@ export default function Signup() {
           </div>
         ) : (
           <form onSubmit={handleSignup} className="space-y-5">
-            {!getToken() && (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-700 text-xs rounded-lg font-bold flex items-start gap-2">
-                    <AlertTriangle className="shrink-0" size={16} />
-                    <span>Security Lock: You must be logged in on another tab to create a new user.</span>
-                </div>
-            )}
-            
             {error && (
               <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-600 text-sm rounded-lg font-bold text-center">
                 {error}
@@ -169,7 +153,7 @@ export default function Signup() {
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="********"
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
@@ -185,8 +169,8 @@ export default function Signup() {
 
             <button
               type="submit"
-              disabled={loading || !getToken()}
-              className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 mt-2 shadow-md disabled:opacity-50"
+              disabled={loading}
+              className="w-full bg-slate-900 dark:bg-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 text-white font-bold py-3.5 rounded-lg transition-all flex items-center justify-center gap-2 mt-2 shadow-md"
             >
               {loading ? <Loader2 size={18} className="animate-spin" /> : "Complete Registration"}
             </button>

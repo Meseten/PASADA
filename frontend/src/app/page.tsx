@@ -1,3 +1,4 @@
+// 25010 Characteristic: Usability, Reliability
 "use client";
 
 import { useState, useEffect } from "react";
@@ -9,11 +10,13 @@ import { API_URL } from "@/lib/api";
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
+
   useEffect(() => setMounted(true), []);
   if (!mounted) return <div className="absolute top-6 right-6 w-10 h-10" />;
+
   return (
-    <button 
-      onClick={() => setTheme(theme === "dark" ? "light" : "dark")} 
+    <button
+      onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
       className="absolute top-6 right-6 flex items-center justify-center w-10 h-10 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors z-50"
     >
       <Sun className={`absolute w-5 h-5 transition-all duration-300 ${theme === "dark" ? "rotate-90 scale-0 opacity-0" : "rotate-0 scale-100 opacity-100"}`} />
@@ -37,51 +40,69 @@ export default function Login() {
       router.replace("/dashboard");
       return;
     }
-    
     setIsCheckingSession(false);
+
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
       try {
-        const res = await fetch(`${API_URL}/stats/global`);
-        // 401 Unauthorized means the server is online and secure, just waiting for login!
-        if (res.ok || res.status === 401) {
+        const res = await fetch(`http://127.0.0.1:43888/health?_t=${Date.now()}`, {
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            "Accept": "application/json",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate"
+          }
+        });
+        if (res.ok) {
           setServerReady(true);
-          clearInterval(interval);
+          if (interval) clearInterval(interval);
         }
       } catch (e) {
         setServerReady(false);
       }
     };
     checkServer();
-    interval = setInterval(checkServer, 1500);
-    return () => clearInterval(interval);
+    interval = setInterval(checkServer, 1000);
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!serverReady) return;
+    
     setLoading(true);
     setError("");
 
     try {
-      const formData = new URLSearchParams();
-      formData.append("username", username);
-      formData.append("password", password);
-      
-      const res = await fetch(`${API_URL}/token`, {
+      // FIX: Payload explicitly converted to JSON.
+      // This obliterates the Webview's "Simple Request" classification and suspends the anti-CSRF assassination protocol.
+      // The browser is now forced to send an OPTIONS preflight to verify intent.
+      // URL is explicitly hardcoded to prevent Webpack API_URL SSG anomalies.
+      const res = await fetch(`http://127.0.0.1:43888/token`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: formData.toString(),
+        headers: { 
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ 
+            username: username, 
+            password: password 
+        }),
+        cache: "no-store"
       });
-      
+
       if (res.ok) {
         const data = await res.json();
         localStorage.setItem("pasada_token", data.access_token);
         localStorage.setItem("pasada_full_name", data.full_name);
         localStorage.setItem("pasada_role", data.role || "Clerk");
+        
         localStorage.setItem("token", data.access_token);
         localStorage.setItem("full_name", data.full_name);
-        router.replace("/dashboard"); 
+        
+        router.replace("/dashboard");
       } else {
         const errData = await res.json();
         setError(errData.detail || "Invalid login credentials.");
@@ -98,6 +119,7 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-muted/20 text-foreground p-4 relative">
       <ThemeToggle />
+
       <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">
         <div className="flex flex-col items-center mb-8">
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />
@@ -137,7 +159,7 @@ export default function Login() {
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="********"
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
                   required
                 />
