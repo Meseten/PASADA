@@ -1,13 +1,13 @@
 // 25010 Characteristic: Maintainability
-
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:43888";
+// DEFINITIVE FIX: Hardcoded to bypass any Next.js .env.local poisoning during SSG build.
+export const API_URL = "http://127.0.0.1:43888";
 
 export const getToken = () => {
   if (typeof window !== "undefined") {
     return localStorage.getItem("token") || localStorage.getItem("pasada_token");
   }
   return null;
-};
+}
 
 export const clearAuthAndRedirect = () => {
   if (typeof window !== "undefined") {
@@ -19,39 +19,47 @@ export const clearAuthAndRedirect = () => {
     localStorage.removeItem("pasada_role");
     window.location.href = "/";
   }
-};
+}
 
 // Global interceptor for 401 Unauthorized (Expired Tokens)
 export const fetchWithAuth = async (endpoint: string, options: RequestInit = {}) => {
   const token = getToken();
   const headers = {
     ...options.headers,
-    "Authorization": `Bearer ${token}`
+    "Authorization": `Bearer ${token}`,
+    "Pragma": "no-cache",
+    "Cache-Control": "no-cache, no-store, must-revalidate"
   };
-  
-  // FIX: Force Tauri to use the absolute URL for the backend
+
   const isAbsolute = endpoint.startsWith('http');
-  const url = isAbsolute ? endpoint : `${API_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
-  
-  const response = await fetch(url, { ...options, headers });
-  
+  const baseUrl = isAbsolute ? endpoint : `${API_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+
+  // DEFINITIVE FIX: Append a cache-busting timestamp to absolutely destroy Next.js aggressive caching.
+  const urlObj = new URL(baseUrl);
+  urlObj.searchParams.append('_t', Date.now().toString());
+
+  const response = await fetch(urlObj.toString(), {
+       ...options,
+       headers,
+      cache: "no-store"
+   });
+
   if (response.status === 401) {
     clearAuthAndRedirect();
     throw new Error("Session expired. Please log in again.");
   }
-  
+
   return response;
-};
+}
 
 // Unified Status Computer (Ensures Dashboard, Table, and Exports match perfectly)
 export const computeRecordStatus = (member: any, currentYear: number) => {
   if (member.status) return member.status; // B2: Defers to backend as authoritative
-  
   if (!member.operator_name || member.operator_name.trim() === "") return "VACANT";
-  
+
   const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
-  
   if (member.is_active === false || issueYear <= currentYear - 2) return "REVOKED";
   if (issueYear === currentYear - 1) return "FLAGGED";
+
   return "ACTIVE";
 };

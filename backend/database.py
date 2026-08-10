@@ -16,6 +16,7 @@ old_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
 OLD_BASE_DIR = os.path.join(old_app_data, "PASADA_DATA")
 old_db_path = os.path.join(OLD_BASE_DIR, 'pasada_production.db')
 
+# New cross-platform secure directory
 NEW_BASE_DIR = platformdirs.user_data_dir("PASADA", "LGU")
 new_db_path = os.path.join(NEW_BASE_DIR, 'pasada_production.db')
 
@@ -26,18 +27,20 @@ if not os.path.exists(NEW_BASE_DIR):
 if os.path.exists(old_db_path) and not os.path.exists(new_db_path):
     shutil.copy2(old_db_path, new_db_path)
 
+# INCREASED TIMEOUT to 30 seconds (Restored from non-ISO) to allow queries to queue
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{new_db_path}"
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 30})
 
-# Database connection
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
-
-# CONCURRENCY FIX: Enable WAL mode and Busy Timeout to prevent "database is locked" errors
+# ==============================================================================
+# SQLITE WAL MODE ACTIVATION (CONCURRENCY FIX)
+# ==============================================================================
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    # Restored from non-ISO: Enforce 30-second busy timeout at the pragma level
+    cursor.execute("PRAGMA busy_timeout=30000") 
     cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -75,6 +78,7 @@ class FranchiseRecord(Base):
     is_active = Column(Boolean, default=True)
     processed_by = Column(String)
     updated_at = Column(DateTime, default=get_pht_now, onupdate=get_pht_now)
+    # REQUIRED FOR ISO MAIN.PY COMPATIBILITY
     is_deleted = Column(Boolean, default=False, index=True)
 
 class AuditLog(Base):

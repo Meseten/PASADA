@@ -1,4 +1,4 @@
-# 25010 Characteristic: Functional Suitability, Maintainability
+# 25010 Characteristic: Functional Suitability, Maintainability, Performance Efficiency
 
 import sys
 import os
@@ -13,9 +13,38 @@ import io
 import shutil
 import calendar
 import uuid
+import subprocess
+import platform
+import time
+from typing import List, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
+from fastapi.security import OAuth2PasswordBearer
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+import starlette.formparsers
+import uvicorn
+
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import func, extract, create_engine, inspect
+
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+import passlib.handlers.bcrypt
+import pandas as pd
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 
 # --- CORE SETTINGS & LOGGING ---
-from database import BASE_DIR
+from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now
+from ml_engine import run_kmeans_clustering, invalidate_ml_cache
+from doc_generator import generate_certificate
+from extractor import extract_docx_data
+from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
+from pydantic import BaseModel
+
 crash_log_path = os.path.join(BASE_DIR, "PASADA_CRASH_LOG.txt")
 
 def force_log(msg):
@@ -38,76 +67,11 @@ force_log(f"Running from: {sys.executable}")
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-# --- IMPORTS ---
-import subprocess
-import time
-import platform
-import psutil 
-from typing import List, Optional
-
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
-import starlette.formparsers
-import uvicorn
-
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy import func, extract, create_engine, inspect
-
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-import passlib.handlers.bcrypt
-import pandas as pd
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment
-from openpyxl.utils import get_column_letter
-
-from database import SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now
-from ml_engine import run_kmeans_clustering, invalidate_ml_cache
-from doc_generator import generate_certificate
-from extractor import extract_docx_data
-from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
-from pydantic import BaseModel
-
 force_log("All libraries loaded successfully!")
 
 # --- APP INITIALIZATION ---
 starlette.formparsers.MultiPartParser.max_files = 10000
 starlette.formparsers.MultiPartParser.max_fields = 10000
-
-app = FastAPI(title="PASADA Registry API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"]
-)
-
-# --- JWT AUTHENTICATION CONFIGURATION ---
-SECRET_KEY_PATH = os.path.join(BASE_DIR, "jwt_secret.key")
-if os.path.exists(SECRET_KEY_PATH):
-    with open(SECRET_KEY_PATH, "r") as f:
-        JWT_SECRET_KEY = f.read().strip()
-else:
-    JWT_SECRET_KEY = str(uuid.uuid4())
-    with open(SECRET_KEY_PATH, "w") as f:
-        f.write(JWT_SECRET_KEY)
-
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 30 
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
 
 # --- RELIABILITY FIX: STATEFUL AUTOMATED BACKUP & FILE CLEANUP ---
 def automated_background_tasks():
@@ -115,7 +79,6 @@ def automated_background_tasks():
         try:
             now = get_pht_now()
             
-            # 1. MTOP GENERATION CLEANUP
             export_dir = os.path.join(BASE_DIR, "exports")
             if os.path.exists(export_dir):
                 current_timestamp = time.time()
@@ -127,7 +90,6 @@ def automated_background_tasks():
                         except OSError:
                             pass
 
-            # 2. AUTOMATED DATABASE BACKUP
             track_file = os.path.join(BASE_DIR, "last_backup.txt")
             last_backup = ""
             if os.path.exists(track_file):
@@ -156,8 +118,52 @@ def automated_background_tasks():
             
         time.sleep(60)
 
-threading.Thread(target=automated_background_tasks, daemon=True).start()
-start_lan_sync()
+# Safely decouples heavy threaded background tasks from the Uvicorn ASGI network loop
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    threading.Thread(target=automated_background_tasks, daemon=True).start()
+    def safe_sync():
+        try:
+            start_lan_sync()
+        except Exception as e:
+            force_log(f"LAN Sync initialization deferred: {e}")
+    threading.Thread(target=safe_sync, daemon=True).start()
+    yield
+
+app = FastAPI(title="PASADA Registry API", lifespan=lifespan)
+
+# FIX: Universal CORS. Since we converted the Login payload to JSON, the anti-CSRF Simple Request vulnerability is gone. 
+# We can now safely allow ALL origins (*), bypassing any weird WebKitGTK schema (asset://, null, tauri://).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"]
+)
+
+# --- JWT AUTHENTICATION CONFIGURATION ---
+SECRET_KEY_PATH = os.path.join(BASE_DIR, "jwt_secret.key")
+if os.path.exists(SECRET_KEY_PATH):
+    with open(SECRET_KEY_PATH, "r") as f:
+        JWT_SECRET_KEY = f.read().strip()
+else:
+    JWT_SECRET_KEY = str(uuid.uuid4())
+    with open(SECRET_KEY_PATH, "w") as f:
+        f.write(JWT_SECRET_KEY)
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_DAYS = 30 
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
 
 # --- DATABASE INJECTION ---
 def get_db():
@@ -186,6 +192,8 @@ class FranchiseCreate(BaseModel):
     plate_no: str
     route: str
     driving_route: str = ""
+    issue_date: Optional[str] = ""
+    valid_until: Optional[str] = ""
 
 class UserCreate(BaseModel):
     first_name: str
@@ -193,6 +201,10 @@ class UserCreate(BaseModel):
     username: str
     password: str
     role: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 class SettingsUpdate(BaseModel):
     committee_chair: str
@@ -229,7 +241,6 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
 
 def compute_record_status(record: FranchiseRecord) -> str:
-    """SINGLE SOURCE OF TRUTH FOR RECORD STATUS"""
     is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
     if is_vacant:
         return "VACANT"
@@ -454,6 +465,10 @@ def escape_excel(val):
 
 # --- API ENDPOINTS ---
 
+@app.get("/health")
+def health_check():
+    return {"status": "online"}
+
 @app.delete("/api/operators/{sbn_no}")
 def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     clean_sbn = normalize_base_sbn(sbn_no)
@@ -594,8 +609,9 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
         "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
     }
 
+# UNLOCKED SIGNUP: Removed Depends(get_current_user) to allow open registration.
 @app.post("/signup")
-def signup(user: UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def signup(user: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(status_code=400, detail="Username taken")
     new_user = User(
@@ -607,13 +623,13 @@ def signup(user: UserCreate, current_user: User = Depends(get_current_user), db:
     )
     db.add(new_user)
     db.commit()
-    log_action(db, f"{current_user.first_name} {current_user.last_name}", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {user.username}")
+    log_action(db, "SYSTEM", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {user.username}")
     return {"message": "Account created"}
 
 @app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not pwd_context.verify(form_data.password, user.password_hash):
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not pwd_context.verify(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect credentials")
     
     full_name = f"{user.first_name} {user.last_name}"
@@ -712,9 +728,12 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
 
     is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
     
-    actual_issue_date = None if is_vacant else current_time
-    actual_valid_until = None if is_vacant else datetime(current_time.year, 12, 31)
-    actual_active = False if is_vacant else True
+    manual_issue = parse_safe_date(record.issue_date, current_time.year) if record.issue_date else None
+    manual_valid = parse_safe_date(record.valid_until, current_time.year) if record.valid_until else None
+
+    actual_issue_date = manual_issue if manual_issue else (None if is_vacant else current_time)
+    actual_valid_until = manual_valid if manual_valid else (None if is_vacant else datetime(current_time.year, 12, 31))
+    actual_active = False if is_vacant else determine_status(actual_issue_date)
 
     record.sbn_no = format_sbn_with_year(raw_next, actual_issue_date, is_vacant)
     record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
@@ -722,8 +741,9 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, record.route) or record.route
 
+    update_data = record.dict(exclude={'issue_date', 'valid_until'})
     new_record = FranchiseRecord(
-        **record.dict(), processed_by=full_name, issue_date=actual_issue_date,
+        **update_data, processed_by=full_name, issue_date=actual_issue_date,
         valid_until=actual_valid_until, is_active=actual_active
     )
     db.add(new_record)
@@ -748,34 +768,44 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     
     is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
     
+    current_time = get_pht_now()
+    manual_issue = parse_safe_date(record.issue_date, current_time.year) if record.issue_date else None
+    manual_valid = parse_safe_date(record.valid_until, current_time.year) if record.valid_until else None
+
     if is_vacant:
         db_record.is_active = False
         db_record.issue_date = None
         db_record.valid_until = None
     else:
+        # Detect Motor Spec Changes for Auto-Fallback
         if (
             str(db_record.motor_no).strip().upper() != str(record.motor_no).strip().upper() or
             str(db_record.chassis_no).strip().upper() != str(record.chassis_no).strip().upper() or
             str(db_record.make).strip().upper() != str(record.make).strip().upper()
         ):
             is_change_motor = True
-            db_record.issue_date = get_pht_now()
-            db_record.valid_until = datetime(db_record.issue_date.year, 12, 31)
+            db_record.issue_date = manual_issue if manual_issue else current_time
+            db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
             db_record.is_active = True
             
         elif raw_old_sbn != raw_new_sbn: 
-            new_year = get_pht_now().year
-            db_record.issue_date = get_pht_now()
-            db_record.valid_until = datetime(new_year, 12, 31)
-            db_record.is_active = True
             is_renewal = True
+            db_record.issue_date = manual_issue if manual_issue else current_time
+            db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
+            db_record.is_active = True
+
+        elif manual_issue: # Standard Edit with Manual Override Provided
+            db_record.issue_date = manual_issue
+            db_record.valid_until = manual_valid if manual_valid else datetime(manual_issue.year, 12, 31)
+            db_record.is_active = determine_status(db_record.issue_date)
 
     record.sbn_no = format_sbn_with_year(new_base_sbn, db_record.issue_date, is_vacant)
 
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, db_record.route) or db_record.route
 
-    for key, value in record.dict().items():
+    update_data = record.dict(exclude={'issue_date', 'valid_until'})
+    for key, value in update_data.items():
         setattr(db_record, key, value)
 
     db.commit()
@@ -1362,22 +1392,42 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
     }
 
 def kill_zombie_port(port):
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            for conn in proc.connections(kind='inet'):
-                if conn.laddr.port == port:
-                    force_log(f"CRITICAL: Found ghost process (PID: {proc.info['pid']}). Nuking it...")
-                    proc.kill()
-                    time.sleep(2)
-        except (psutil.AccessDenied, psutil.NoSuchProcess):
-            pass
+    try:
+        if platform.system() == "Windows":
+            output = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True).decode()
+            for line in output.strip().split('\n'):
+                if "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    if str(pid) != str(os.getpid()):
+                        force_log(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
+                        subprocess.run(f"taskkill /PID {pid} /F", shell=True)
+        else:
+            try:
+                output = subprocess.check_output(f"lsof -t -i:{port}", shell=True).decode()
+                for pid in output.strip().split('\n'):
+                    if pid and str(pid) != str(os.getpid()):
+                        force_log(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
+                        os.system(f"kill -9 {pid}")
+            except Exception:
+                output = subprocess.check_output(f"fuser {port}/tcp 2>/dev/null", shell=True).decode()
+                for pid in output.strip().split():
+                    if pid and str(pid) != str(os.getpid()):
+                        force_log(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
+                        os.system(f"kill -9 {pid}")
+    except Exception as e:
+        pass
 
 if __name__ == "__main__":
     try:
         force_log("Scanning for zombie processes on Port 43888...")
         kill_zombie_port(43888)
         force_log("Port 43888 is clear. Starting Uvicorn server...")
-        uvicorn.run(app, host="0.0.0.0", port=43888, log_config=None)
+        print("[Backend] Starting Uvicorn server on http://0.0.0.0:43888 ...")
+        sys.stdout.flush()
+        uvicorn.run(app, host="0.0.0.0", port=43888)
     except Exception as e:
-        force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{traceback.format_exc()}")
+        err_str = traceback.format_exc()
+        force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{err_str}")
+        print(f"[Backend Fatal Error]: {err_str}", file=sys.stderr)
+        sys.stderr.flush()
         sys.exit(1)
