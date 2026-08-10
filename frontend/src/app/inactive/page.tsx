@@ -1,4 +1,5 @@
 "use client";
+
 import { useEffect, useState } from "react";
 import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -6,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { API_URL, fetchWithAuth } from "@/lib/api";
+import { API_URL, fetchWithAuth } from "@/lib/api"
 
 interface FranchiseRecord {
   id: string;
@@ -30,9 +31,9 @@ export default function InactiveLines() {
   const [sortBy, setSortBy] = useState("ROUTE_ASC");
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [isPrinting, setIsPrinting] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
-  
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [viewMember, setViewMember] = useState<FranchiseRecord | null>(null);
 
@@ -123,7 +124,6 @@ export default function InactiveLines() {
         a.style.display = 'none';
         a.href = url;
         
-        // Exact Naming Convention Enforced
         const year = new Date().getFullYear();
         const routePrefix = routeFilter === "ALL" ? "ALL_ROUTES" : routeFilter;
         a.download = `${routePrefix} ${year} - REVOKED.xlsx`;
@@ -154,7 +154,6 @@ export default function InactiveLines() {
         a.style.display = 'none';
         a.href = url;
         
-        // Exact Naming Convention Enforced
         a.download = `${member.sbn_no}.docx`;
         
         document.body.appendChild(a);
@@ -169,7 +168,10 @@ export default function InactiveLines() {
     }
   };
 
+  // BLAZING FAST NATIVE PRINT ENGINE - BULLETPROOF IFRAME FIX
   const handleNativePrint = async (member: FranchiseRecord) => {
+    if (isPrinting) return;
+    setIsPrinting(member.id);
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (response.ok) {
@@ -183,22 +185,26 @@ export default function InactiveLines() {
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
           iframe.style.position = 'fixed';
-          iframe.style.right = '-2000px';
-          iframe.style.bottom = '-2000px';
-          iframe.style.width = '500px';
-          iframe.style.height = '500px';
+          iframe.style.right = '0';
+          iframe.style.bottom = '0';
+          iframe.style.width = '2px';
+          iframe.style.height = '2px';
+          iframe.style.opacity = '0.01';
+          iframe.style.pointerEvents = 'none';
           iframe.src = url;
+          
           document.body.appendChild(iframe);
           
-          iframe.onload = () => {
+          // INSTANT EXECUTION: Bypass buggy OS onload events entirely
+          setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
               iframe.contentWindow?.print();
             } catch (e) {
-              console.error(e);
+              console.error("Print dialog failed:", e);
             }
-            setTimeout(() => window.URL.revokeObjectURL(url), 10000);
-          };
+            setIsPrinting(null); // Clear spinner instantly
+          }, 400); // 400ms delay ensures Blob is ready without freezing
           
         } else {
           const a = document.createElement('a');
@@ -208,10 +214,14 @@ export default function InactiveLines() {
           document.body.appendChild(a);
           a.click();
           setTimeout(() => document.body.removeChild(a), 100);
+          setIsPrinting(null);
         }
+      } else {
+        setIsPrinting(null);
       }
     } catch (error) {
       console.error(error);
+      setIsPrinting(null);
     }
   };
 
@@ -235,7 +245,7 @@ export default function InactiveLines() {
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
-              className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2"
+              className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
             >
               <option value="ROUTE_ASC">Sort: TODA Route (A Z)</option>
               <option value="YEAR_NEWEST">Sort: Renewal Year (Newest)</option>
@@ -251,7 +261,7 @@ export default function InactiveLines() {
             <select
               value={routeFilter}
               onChange={(e) => setRouteFilter(e.target.value)}
-              className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2"
+              className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
             >
               <option value="ALL">All TODA Routes</option>
               {uniqueRoutes.map(r => (
@@ -271,7 +281,7 @@ export default function InactiveLines() {
               placeholder="Search Operator, SBN..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-10 h-11 bg-card border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium" 
+              className="pl-10 h-11 bg-card border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
             />
           </div>
         </div>
@@ -342,8 +352,9 @@ export default function InactiveLines() {
                 <Button variant="outline" onClick={() => handleDownloadWord(viewMember)} className="font-bold">
                   <FileText className="mr-2 h-4 w-4 text-blue-600" /> Download Word File
                 </Button>
-                <Button onClick={() => handleNativePrint(viewMember)} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
-                  <Printer className="mr-2 h-4 w-4" /> Print MTOP
+                <Button onClick={() => handleNativePrint(viewMember)} disabled={isPrinting === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                  {isPrinting === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                  Print MTOP
                 </Button>
               </>
             )}
@@ -416,10 +427,10 @@ export default function InactiveLines() {
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
               <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
-              <select 
-                 value={rowsPerPage} 
-                 onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                className="h-8 w-20 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+              <select
+                value={rowsPerPage}
+                onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                className="h-8 w-20 rounded-md border border-input bg-background text-foreground px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
               >
                 <option value={50}>50</option>
                 <option value={100}>100</option>
