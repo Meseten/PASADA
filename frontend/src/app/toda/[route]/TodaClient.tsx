@@ -371,6 +371,7 @@ export default function TodaClient() {
     }
   };
 
+  // NATIVE PRINT ENGINE - VIEWPORT OCCLUSION FIX
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return; 
     setIsGeneratingId(member.id);
@@ -383,93 +384,52 @@ export default function TodaClient() {
         const url = window.URL.createObjectURL(blob);
         
         if (blob.type === "application/pdf") {
-          const isLinux = navigator.userAgent.toLowerCase().includes('linux');
-
-          if (isLinux) {
-            // LINUX WEBVIEW FIX: Hidden iframe auto-print
-            const existingIframe = document.getElementById('pasada-print-frame');
-            if (existingIframe) document.body.removeChild(existingIframe);
-            
-            const iframe = document.createElement('iframe');
-            iframe.id = 'pasada-print-frame';
-            iframe.style.position = 'fixed';
-            iframe.style.right = '-10000px';
-            iframe.style.bottom = '-10000px';
-            iframe.style.width = '1000px';
-            iframe.style.height = '1000px';
-            iframe.style.pointerEvents = 'none';
-            iframe.style.border = 'none';
-            iframe.src = url;
-            
-            document.body.appendChild(iframe);
-            
-            setTimeout(() => {
-              try {
-                iframe.contentWindow?.focus();
-                iframe.contentWindow?.print();
-              } catch (e) {
-                console.error("Print dialog failed:", e);
-              }
-              setIsGeneratingId(null);
-              setTimeout(() => window.URL.revokeObjectURL(url), 120000);
-            }, 2000);
-
-          } else {
-            // WINDOWS WEBVIEW2 FIX: Active Embed Overlay
-            const overlayId = 'pasada-print-overlay';
-            const existingOverlay = document.getElementById(overlayId);
-            if (existingOverlay) document.body.removeChild(existingOverlay);
-
-            const overlay = document.createElement('div');
-            overlay.id = overlayId;
-            Object.assign(overlay.style, {
-              position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
-              backgroundColor: 'rgba(0,0,0,0.85)', zIndex: '999999', display: 'flex',
-              flexDirection: 'column', backdropFilter: 'blur(4px)'
-            });
-
-            const toolbar = document.createElement('div');
-            Object.assign(toolbar.style, {
-              padding: '12px 24px', display: 'flex', justifyContent: 'space-between',
-              alignItems: 'center', backgroundColor: '#1e293b', color: 'white',
-              boxShadow: '0 4px 6px rgba(0,0,0,0.1)', fontFamily: 'system-ui, -apple-system, sans-serif'
-            });
-
-            const title = document.createElement('div');
-            title.innerText = 'Document Preview (Click the Print icon inside the viewer)';
-            title.style.fontWeight = 'bold';
-            title.style.fontSize = '16px';
-
-            const closeBtn = document.createElement('button');
-            closeBtn.innerText = 'Close Preview';
-            Object.assign(closeBtn.style, {
-              padding: '8px 16px', backgroundColor: '#ef4444', color: 'white',
-              border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold',
-              transition: 'background-color 0.2s'
-            });
-            closeBtn.onmouseover = () => closeBtn.style.backgroundColor = '#dc2626';
-            closeBtn.onmouseout = () => closeBtn.style.backgroundColor = '#ef4444';
-            closeBtn.onclick = () => {
-              document.body.removeChild(overlay);
-              window.URL.revokeObjectURL(url);
-            };
-
-            toolbar.appendChild(title);
-            toolbar.appendChild(closeBtn);
-
-            const embed = document.createElement('embed');
-            embed.src = url;
-            embed.type = 'application/pdf';
-            Object.assign(embed.style, {
-              flex: '1', width: '100%', height: '100%', border: 'none'
-            });
-
-            overlay.appendChild(toolbar);
-            overlay.appendChild(embed);
-            document.body.appendChild(overlay);
-
+          const existingIframe = document.getElementById('pasada-print-frame');
+          if (existingIframe) document.body.removeChild(existingIframe);
+          
+          const iframe = document.createElement('iframe');
+          iframe.id = 'pasada-print-frame';
+          
+          // THE FIX: Do NOT push it off-screen. Bring it full size into the viewport so 
+          // Windows WebView2 doesn't suspend it, but make it 100% transparent and unclickable.
+          iframe.style.position = 'fixed';
+          iframe.style.top = '0';
+          iframe.style.left = '0';
+          iframe.style.width = '100vw';
+          iframe.style.height = '100vh';
+          iframe.style.opacity = '0'; // Invisible
+          iframe.style.pointerEvents = 'none'; // Unclickable
+          iframe.style.zIndex = '-9999'; // Behind all elements
+          iframe.style.border = 'none';
+          iframe.src = url;
+          
+          document.body.appendChild(iframe);
+          
+          let printed = false;
+          
+          const triggerPrint = () => {
+            if (printed) return;
+            printed = true;
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (e) {
+              console.error("Print dialog failed:", e);
+            }
             setIsGeneratingId(null);
-          }
+            
+            // Cleanup memory after a safe period
+            setTimeout(() => {
+              if (iframe.parentNode) document.body.removeChild(iframe);
+              window.URL.revokeObjectURL(url);
+            }, 120000);
+          };
+
+          // Wait for the iframe to load to trigger the print. 
+          // Added a fallback timeout to guarantee it triggers if onload hangs.
+          iframe.onload = () => setTimeout(triggerPrint, 800);
+          setTimeout(triggerPrint, 3000);
+          
         } else {
           // DOCX Fallback
           const a = document.createElement('a');
@@ -490,6 +450,7 @@ export default function TodaClient() {
     }
   };
 
+  // NATIVE BATCH PRINT ENGINE - VIEWPORT OCCLUSION FIX
   const downloadBatchDocument = async (member: Member) => {
     try {
       const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: "POST" });
@@ -498,56 +459,44 @@ export default function TodaClient() {
         const url = window.URL.createObjectURL(blob);
         
         if (blob.type === "application/pdf") {
-          const isLinux = navigator.userAgent.toLowerCase().includes('linux');
-
-          if (isLinux) {
-            const iframe = document.createElement('iframe');
-            iframe.style.position = 'fixed';
-            iframe.style.right = '-10000px';
-            iframe.style.bottom = '-10000px';
-            iframe.style.width = '1000px';
-            iframe.style.height = '1000px';
-            iframe.style.pointerEvents = 'none';
-            iframe.style.border = 'none';
-            iframe.src = url;
-            document.body.appendChild(iframe);
+          const iframe = document.createElement('iframe');
+          iframe.style.position = 'fixed';
+          iframe.style.top = '0';
+          iframe.style.left = '0';
+          iframe.style.width = '100vw';
+          iframe.style.height = '100vh';
+          iframe.style.opacity = '0'; // Invisible
+          iframe.style.pointerEvents = 'none'; // Unclickable
+          iframe.style.zIndex = '-9999'; // Behind all elements
+          iframe.style.border = 'none';
+          iframe.src = url;
+          
+          document.body.appendChild(iframe);
+          
+          return new Promise<void>((resolve) => {
+            let printed = false;
             
-            return new Promise<void>((resolve) => { 
-               setTimeout(() => {
-                  try {
-                    iframe.contentWindow?.focus();
-                    iframe.contentWindow?.print();
-                  } catch (e) {
-                    console.error(e);
-                  }
-                  
-                  // Wait 1.5 seconds before moving to the next item so the OS spooler doesn't crash
-                  setTimeout(() => {
-                    window.URL.revokeObjectURL(url);
-                    if (iframe.parentNode) document.body.removeChild(iframe);
-                    resolve();
-                  }, 1500); 
-                 }, 2000);
-             });
-          } else {
-            // WINDOWS WEBVIEW2 BATCH FIX: Fallback to silent bulk download
-            // Because batching interactive overlays would be impossible for the user, 
-            // Windows automatically downloads batch documents directly to the system.
-            const a = document.createElement("a");
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `${member.sbn_no}_MTOP.pdf`;
-            document.body.appendChild(a);
-            a.click();
-
-            return new Promise<void>((resolve) => {
+            const triggerPrint = () => {
+              if (printed) return;
+              printed = true;
+              try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+              } catch (e) {
+                console.error(e);
+              }
+              
+              // Wait 2 seconds before resolving to give the OS spooler time to process the batch
               setTimeout(() => {
                 window.URL.revokeObjectURL(url);
-                if (a.parentNode) document.body.removeChild(a);
+                if (iframe.parentNode) document.body.removeChild(iframe);
                 resolve();
-              }, 1500); // 1.5s delay to pace out system download events safely
-            });
-          }
+              }, 2000);
+            };
+
+            iframe.onload = () => setTimeout(triggerPrint, 800);
+            setTimeout(triggerPrint, 3000);
+          });
         } else {
           const a = document.createElement("a");
           a.style.display = 'none';
