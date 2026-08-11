@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { API_URL, fetchWithAuth } from "@/lib/api"
+import { API_URL, fetchWithAuth } from "@/lib/api";
 
 interface FranchiseRecord {
   id: string;
@@ -168,49 +168,105 @@ export default function InactiveLines() {
     }
   };
 
-  // NATIVE PRINT ENGINE - 10000px WINDOWS FIX
   const handleNativePrint = async (member: FranchiseRecord) => {
     if (isPrinting) return;
     setIsPrinting(member.id);
+    
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
+      
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         
         if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame');
-          if (existingIframe) document.body.removeChild(existingIframe);
-          
-          const iframe = document.createElement('iframe');
-          iframe.id = 'pasada-print-frame';
-          
-          // WINDOWS GUARANTEE: Render it at 1000x1000 so the PDF engine turns on, but shove it completely off the screen
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-10000px';
-          iframe.style.bottom = '-10000px';
-          iframe.style.width = '1000px';
-          iframe.style.height = '1000px';
-          iframe.style.pointerEvents = 'none';
-          iframe.style.border = 'none';
-          iframe.src = url;
-          
-          document.body.appendChild(iframe);
-          
-          // Wait 2000ms to ensure slower computers fully buffer the PDF into the iframe
-          setTimeout(() => {
-            try {
-              iframe.contentWindow?.focus();
-              iframe.contentWindow?.print();
-            } catch (e) {
-              console.error("Print dialog failed:", e);
-            }
-            setIsPrinting(null); 
+          const isLinux = navigator.userAgent.toLowerCase().includes('linux');
+
+          if (isLinux) {
+            // LINUX WEBVIEW FIX: Hidden iframe auto-print
+            const existingIframe = document.getElementById('pasada-print-frame');
+            if (existingIframe) document.body.removeChild(existingIframe);
             
-            // Allow time for the user to close the print dialog before revoking memory
-            setTimeout(() => window.URL.revokeObjectURL(url), 120000);
-          }, 2000); 
-          
+            const iframe = document.createElement('iframe');
+            iframe.id = 'pasada-print-frame';
+            iframe.style.position = 'fixed';
+            iframe.style.right = '-10000px';
+            iframe.style.bottom = '-10000px';
+            iframe.style.width = '1000px';
+            iframe.style.height = '1000px';
+            iframe.style.pointerEvents = 'none';
+            iframe.style.border = 'none';
+            iframe.src = url;
+            
+            document.body.appendChild(iframe);
+            
+            setTimeout(() => {
+              try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+              } catch (e) {
+                console.error("Print dialog failed:", e);
+              }
+              setIsPrinting(null);
+              setTimeout(() => window.URL.revokeObjectURL(url), 120000);
+            }, 2000);
+
+          } else {
+            // WINDOWS WEBVIEW2 FIX: Active Embed Overlay
+            const overlayId = 'pasada-print-overlay';
+            const existingOverlay = document.getElementById(overlayId);
+            if (existingOverlay) document.body.removeChild(existingOverlay);
+
+            const overlay = document.createElement('div');
+            overlay.id = overlayId;
+            Object.assign(overlay.style, {
+              position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+              backgroundColor: 'rgba(0,0,0,0.85)', zIndex: '999999', display: 'flex',
+              flexDirection: 'column', backdropFilter: 'blur(4px)'
+            });
+
+            const toolbar = document.createElement('div');
+            Object.assign(toolbar.style, {
+              padding: '12px 24px', display: 'flex', justifyContent: 'space-between',
+              alignItems: 'center', backgroundColor: '#1e293b', color: 'white',
+              boxShadow: '0 4px 6px rgba(0,0,0,0.1)', fontFamily: 'system-ui, -apple-system, sans-serif'
+            });
+
+            const title = document.createElement('div');
+            title.innerText = 'Document Preview (Click the Print icon inside the viewer)';
+            title.style.fontWeight = 'bold';
+            title.style.fontSize = '16px';
+
+            const closeBtn = document.createElement('button');
+            closeBtn.innerText = 'Close Preview';
+            Object.assign(closeBtn.style, {
+              padding: '8px 16px', backgroundColor: '#ef4444', color: 'white',
+              border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold',
+              transition: 'background-color 0.2s'
+            });
+            closeBtn.onmouseover = () => closeBtn.style.backgroundColor = '#dc2626';
+            closeBtn.onmouseout = () => closeBtn.style.backgroundColor = '#ef4444';
+            closeBtn.onclick = () => {
+              document.body.removeChild(overlay);
+              window.URL.revokeObjectURL(url);
+            };
+
+            toolbar.appendChild(title);
+            toolbar.appendChild(closeBtn);
+
+            const embed = document.createElement('embed');
+            embed.src = url;
+            embed.type = 'application/pdf';
+            Object.assign(embed.style, {
+              flex: '1', width: '100%', height: '100%', border: 'none'
+            });
+
+            overlay.appendChild(toolbar);
+            overlay.appendChild(embed);
+            document.body.appendChild(overlay);
+
+            setIsPrinting(null);
+          }
         } else {
           // DOCX Fallback
           const a = document.createElement('a');
@@ -260,7 +316,6 @@ export default function InactiveLines() {
               <option value="NAME_ASC">Sort: Operator Name (A Z)</option>
             </select>
           </div>
-
           {/* FILTER BY TODA ROUTE */}
           <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
             <Filter className="h-4 w-4 text-muted-foreground" />
@@ -275,12 +330,10 @@ export default function InactiveLines() {
               ))}
             </select>
           </div>
-
           <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
             {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
             Export Excel
           </Button>
-
           <div className="relative w-full md:w-72 group">
             <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
             <Input 
