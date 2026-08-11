@@ -2,6 +2,18 @@
 
 import sys
 import os
+import subprocess
+
+# --- WINDOWS OS CRASH FIX ---
+# Prevents OSError: [Errno 22] Invalid argument when Pyinstaller runs windowless
+if sys.platform == "win32":
+    if sys.stdin is None:
+        sys.stdin = open(os.devnull, "r")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+
 import traceback
 import re
 import asyncio
@@ -13,7 +25,6 @@ import io
 import shutil
 import calendar
 import uuid
-import subprocess
 import platform
 import time
 from typing import List, Optional
@@ -237,7 +248,6 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
 
 def get_full_name(user: User) -> str:
-    """Failsafe to ensure clerk name is never blank in activity logs"""
     first = getattr(user, 'first_name', "") or ""
     last = getattr(user, 'last_name', "") or ""
     name = f"{first} {last}".strip()
@@ -1442,13 +1452,14 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
 def kill_zombie_port(port):
     try:
         if platform.system() == "Windows":
-            output = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True).decode()
+            # FIXED FOR WINDOWS - Avoid OSError by passing DEVNULL to handles
+            output = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL).decode()
             for line in output.strip().split('\n'):
                 if "LISTENING" in line:
                     pid = line.strip().split()[-1]
                     if str(pid) != str(os.getpid()):
                         force_log(f"CRITICAL: Found ghost process (PID: {pid}). Nuking it...")
-                        subprocess.run(f"taskkill /PID {pid} /F", shell=True)
+                        subprocess.run(f"taskkill /PID {pid} /F", shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             try:
                 output = subprocess.check_output(f"lsof -t -i:{port}", shell=True).decode()

@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown } from "lucide-react"
-import { API_URL, fetchWithAuth, computeRecordStatus } from "@/lib/api"
+import { API_URL, fetchWithAuth } from "@/lib/api"
 
 interface Member {
   id: string;
@@ -95,6 +95,13 @@ export default function TodaClient() {
     if (!dateStr) return "None";
     const d = new Date(dateStr);
     return isNaN(d.getTime()) ? "Invalid Date" : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
+  const getLocalDateString = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   };
 
   const fetchMembers = useCallback(async () => {
@@ -313,7 +320,7 @@ export default function TodaClient() {
         const a = document.createElement('a')
         a.style.display = 'none'
         a.href = url
-        a.download = `${safeRouteName}_MASTERLIST_${new Date().getFullYear()}${statusFilter !== "ALL" ? `_${statusFilter}` : ""}.xlsx`
+        a.download = `${safeRouteName} ${new Date().getFullYear()} - ${statusFilter.toUpperCase()}.xlsx`
         document.body.appendChild(a)
         a.click()
         setTimeout(() => {
@@ -341,8 +348,7 @@ export default function TodaClient() {
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        const safeName = String(member.operator_name || "VACANT").replace(/\s+/g, '_');
-        a.download = `MTOP_${member.sbn_no}_${safeName}.docx`;
+        a.download = `${member.sbn_no}.docx`;
         document.body.appendChild(a);
         a.click();
         
@@ -358,7 +364,7 @@ export default function TodaClient() {
     }
   };
 
-  // BLAZING FAST NATIVE PRINT ENGINE - 100% BULLETPROOF IFRAME
+  // NATIVE PRINT ENGINE - 10000px WINDOWS FIX
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return; 
     setIsGeneratingId(member.id);
@@ -374,19 +380,20 @@ export default function TodaClient() {
           
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
-          // DO NOT USE display: 'none' (Breaks Tauri Webviews)
+          
+          // WINDOWS GUARANTEE: Render it at 1000x1000 so the PDF engine turns on, but shove it completely off the screen
           iframe.style.position = 'fixed';
-          iframe.style.right = '0';
-          iframe.style.bottom = '0';
-          iframe.style.width = '2px';
-          iframe.style.height = '2px';
-          iframe.style.opacity = '0.01';
+          iframe.style.right = '-10000px';
+          iframe.style.bottom = '-10000px';
+          iframe.style.width = '1000px';
+          iframe.style.height = '1000px';
           iframe.style.pointerEvents = 'none';
+          iframe.style.border = 'none';
           iframe.src = url;
           
           document.body.appendChild(iframe);
           
-          // INSTANT EXECUTION: Bypass buggy OS onload events entirely
+          // Wait 2000ms to ensure slower computers fully buffer the PDF into the iframe
           setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
@@ -394,14 +401,18 @@ export default function TodaClient() {
             } catch (e) {
               console.error("Print dialog failed:", e);
             }
-            setIsGeneratingId(null); // Clear spinner instantly
-          }, 400); // 400ms delay ensures Blob is ready without freezing
+            setIsGeneratingId(null); 
+            
+            // Allow time for the user to close the print dialog before revoking memory
+            setTimeout(() => window.URL.revokeObjectURL(url), 120000);
+          }, 2000); 
           
         } else {
+          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${member.sbn_no}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => document.body.removeChild(a), 100);
@@ -426,17 +437,16 @@ export default function TodaClient() {
         if (blob.type === "application/pdf") {
           const iframe = document.createElement('iframe');
           iframe.style.position = 'fixed';
-          iframe.style.right = '0';
-          iframe.style.bottom = '0';
-          iframe.style.width = '2px';
-          iframe.style.height = '2px';
-          iframe.style.opacity = '0.01';
+          iframe.style.right = '-10000px';
+          iframe.style.bottom = '-10000px';
+          iframe.style.width = '1000px';
+          iframe.style.height = '1000px';
           iframe.style.pointerEvents = 'none';
+          iframe.style.border = 'none';
           iframe.src = url;
           document.body.appendChild(iframe);
           
           return new Promise<void>((resolve) => {
-             // INSTANT BATCH EXECUTION: No more infinite hangs
              setTimeout(() => {
                 try {
                   iframe.contentWindow?.focus();
@@ -444,18 +454,20 @@ export default function TodaClient() {
                 } catch (e) {
                   console.error(e);
                 }
+                
+                // Wait 1.5 seconds before moving to the next item so the OS spooler doesn't crash
                 setTimeout(() => {
                   window.URL.revokeObjectURL(url);
                   if (iframe.parentNode) document.body.removeChild(iframe);
                   resolve();
-                }, 1000); // Wait 1 second before moving to next batch item
-              }, 400); 
+                }, 1500); 
+              }, 2000); 
           });
         } else {
           const a = document.createElement("a");
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${String(member.operator_name || "VACANT").replace(/\s+/g, '_')}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => {
@@ -474,7 +486,7 @@ export default function TodaClient() {
     let targetRecords: Member[] = []
     
     const now = new Date()
-    const todayString = now.toISOString().split('T')[0]
+    const todayString = getLocalDateString(now);
     
     targetRecords = members.filter(record => {
       if (!record.issue_date) return false
@@ -482,7 +494,7 @@ export default function TodaClient() {
       const recordDateObj = new Date(record.issue_date)
       if (isNaN(recordDateObj.getTime())) return false; 
       
-      const recordDateString = recordDateObj.toISOString().split('T')[0]
+      const recordDateString = getLocalDateString(recordDateObj);
       const hour = recordDateObj.getHours()
       
       switch (batchFilterType) {
