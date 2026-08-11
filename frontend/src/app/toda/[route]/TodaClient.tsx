@@ -40,14 +40,14 @@ export default function TodaClient() {
   const router = useRouter()
   const params = useParams()
   const pathname = usePathname()
+  
   const fallbackRoute = pathname?.split('/').pop()?.toUpperCase() || ""
   const safeRouteName = (params?.route as string)?.toUpperCase() || fallbackRoute
-  
+
   const [members, setMembers] = useState<Member[]>([])
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("ALL")
   const [sortBy, setSortBy] = useState("SBN_ASC")
-  
   const [isAddOpen, setIsAddOpen] = useState(false)
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -73,7 +73,7 @@ export default function TodaClient() {
   
   const [currentPage, setCurrentPage] = useState(1)
   const [rowsPerPage, setRowsPerPage] = useState(50)
-  
+
   const [formData, setFormData] = useState({
     id: "",
     sbn_no: "",
@@ -88,7 +88,7 @@ export default function TodaClient() {
     issue_date: "",
     valid_until: ""
   })
-  
+
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const formatSafeDate = (dateStr: string | null | undefined) => {
@@ -172,6 +172,7 @@ export default function TodaClient() {
       const cleanRoute = route.replace(/TODA/g, '').trim();
       prefix = cleanRoute.length <= 4 ? cleanRoute : cleanRoute.substring(0, 3);
     }
+
     let nextNum = maxNum + 1;
     while (nextNum === 0 || String(nextNum).endsWith("000") || String(nextNum).endsWith("0000")) {
       nextNum += 1;
@@ -189,27 +190,27 @@ export default function TodaClient() {
   const handleOpenAdd = () => {
     const nextSbn = getNextSbnPreview(safeRouteName, members);
     setFormData({ 
-      id: "", 
-      sbn_no: nextSbn, 
-      operator_name: "", 
-      address: "", 
-      motor_no: "", 
-      chassis_no: "", 
-      make: "", 
-      plate_no: "", 
-      route: safeRouteName, 
-      driving_route: "",
+       id: "", 
+       sbn_no: nextSbn, 
+       operator_name: "", 
+       address: "", 
+       motor_no: "", 
+       chassis_no: "", 
+       make: "", 
+       plate_no: "", 
+       route: safeRouteName, 
+       driving_route: "",
       issue_date: "",
       valid_until: "" 
-    })
+     })
     setIsAddOpen(true)
   }
 
   const handleOpenEdit = (member: Member) => {
     setActiveMember(member); 
     setFormData({ 
-      ...member, 
-      route: safeRouteName,
+       ...member, 
+       route: safeRouteName,
       issue_date: member.issue_date ? member.issue_date.split('T')[0] : "",
       valid_until: member.valid_until ? member.valid_until.split('T')[0] : ""
     })
@@ -224,6 +225,7 @@ export default function TodaClient() {
   const handleRefreshDatabase = async () => {
     const confirmRefresh = window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?");
     if (!confirmRefresh) return;
+
     setIsRefreshing(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/admin/refresh-db`, { method: "POST" });
@@ -245,6 +247,7 @@ export default function TodaClient() {
   const handleDeleteOne = async (member: Member) => {
     const confirmDelete = window.confirm(`Are you sure you want to delete operator ${member.sbn_no} (${member.operator_name || "VACANT"})?`);
     if (!confirmDelete) return;
+
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
@@ -266,6 +269,7 @@ export default function TodaClient() {
 
   const handleBulkDelete = async () => {
     if (selectedSbns.length === 0) return;
+    
     const confirmDelete = window.confirm(`Are you sure you want to delete ${selectedSbns.length} selected operator(s)? This action cannot be undone.`);
     if (!confirmDelete) return;
     
@@ -276,6 +280,7 @@ export default function TodaClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sbn_list: selectedSbns })
       });
+
       if (res.ok) {
         const result = await res.json();
         alert(result.message || `${selectedSbns.length} operator(s) deleted successfully.`);
@@ -340,8 +345,10 @@ export default function TodaClient() {
   const handleDownloadWord = async (member: Member) => {
     if (isDownloadingId) return;
     setIsDownloadingId(member.id);
+    
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
+      
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -364,49 +371,105 @@ export default function TodaClient() {
     }
   };
 
-  // NATIVE PRINT ENGINE - 10000px WINDOWS FIX
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return; 
     setIsGeneratingId(member.id);
+    
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
+      
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         
         if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame');
-          if (existingIframe) document.body.removeChild(existingIframe);
-          
-          const iframe = document.createElement('iframe');
-          iframe.id = 'pasada-print-frame';
-          
-          // WINDOWS GUARANTEE: Render it at 1000x1000 so the PDF engine turns on, but shove it completely off the screen
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-10000px';
-          iframe.style.bottom = '-10000px';
-          iframe.style.width = '1000px';
-          iframe.style.height = '1000px';
-          iframe.style.pointerEvents = 'none';
-          iframe.style.border = 'none';
-          iframe.src = url;
-          
-          document.body.appendChild(iframe);
-          
-          // Wait 2000ms to ensure slower computers fully buffer the PDF into the iframe
-          setTimeout(() => {
-            try {
-              iframe.contentWindow?.focus();
-              iframe.contentWindow?.print();
-            } catch (e) {
-              console.error("Print dialog failed:", e);
-            }
-            setIsGeneratingId(null); 
+          const isLinux = navigator.userAgent.toLowerCase().includes('linux');
+
+          if (isLinux) {
+            // LINUX WEBVIEW FIX: Hidden iframe auto-print
+            const existingIframe = document.getElementById('pasada-print-frame');
+            if (existingIframe) document.body.removeChild(existingIframe);
             
-            // Allow time for the user to close the print dialog before revoking memory
-            setTimeout(() => window.URL.revokeObjectURL(url), 120000);
-          }, 2000); 
-          
+            const iframe = document.createElement('iframe');
+            iframe.id = 'pasada-print-frame';
+            iframe.style.position = 'fixed';
+            iframe.style.right = '-10000px';
+            iframe.style.bottom = '-10000px';
+            iframe.style.width = '1000px';
+            iframe.style.height = '1000px';
+            iframe.style.pointerEvents = 'none';
+            iframe.style.border = 'none';
+            iframe.src = url;
+            
+            document.body.appendChild(iframe);
+            
+            setTimeout(() => {
+              try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+              } catch (e) {
+                console.error("Print dialog failed:", e);
+              }
+              setIsGeneratingId(null);
+              setTimeout(() => window.URL.revokeObjectURL(url), 120000);
+            }, 2000);
+
+          } else {
+            // WINDOWS WEBVIEW2 FIX: Active Embed Overlay
+            const overlayId = 'pasada-print-overlay';
+            const existingOverlay = document.getElementById(overlayId);
+            if (existingOverlay) document.body.removeChild(existingOverlay);
+
+            const overlay = document.createElement('div');
+            overlay.id = overlayId;
+            Object.assign(overlay.style, {
+              position: 'fixed', top: '0', left: '0', width: '100vw', height: '100vh',
+              backgroundColor: 'rgba(0,0,0,0.85)', zIndex: '999999', display: 'flex',
+              flexDirection: 'column', backdropFilter: 'blur(4px)'
+            });
+
+            const toolbar = document.createElement('div');
+            Object.assign(toolbar.style, {
+              padding: '12px 24px', display: 'flex', justifyContent: 'space-between',
+              alignItems: 'center', backgroundColor: '#1e293b', color: 'white',
+              boxShadow: '0 4px 6px rgba(0,0,0,0.1)', fontFamily: 'system-ui, -apple-system, sans-serif'
+            });
+
+            const title = document.createElement('div');
+            title.innerText = 'Document Preview (Click the Print icon inside the viewer)';
+            title.style.fontWeight = 'bold';
+            title.style.fontSize = '16px';
+
+            const closeBtn = document.createElement('button');
+            closeBtn.innerText = 'Close Preview';
+            Object.assign(closeBtn.style, {
+              padding: '8px 16px', backgroundColor: '#ef4444', color: 'white',
+              border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold',
+              transition: 'background-color 0.2s'
+            });
+            closeBtn.onmouseover = () => closeBtn.style.backgroundColor = '#dc2626';
+            closeBtn.onmouseout = () => closeBtn.style.backgroundColor = '#ef4444';
+            closeBtn.onclick = () => {
+              document.body.removeChild(overlay);
+              window.URL.revokeObjectURL(url);
+            };
+
+            toolbar.appendChild(title);
+            toolbar.appendChild(closeBtn);
+
+            const embed = document.createElement('embed');
+            embed.src = url;
+            embed.type = 'application/pdf';
+            Object.assign(embed.style, {
+              flex: '1', width: '100%', height: '100%', border: 'none'
+            });
+
+            overlay.appendChild(toolbar);
+            overlay.appendChild(embed);
+            document.body.appendChild(overlay);
+
+            setIsGeneratingId(null);
+          }
         } else {
           // DOCX Fallback
           const a = document.createElement('a');
@@ -435,34 +498,56 @@ export default function TodaClient() {
         const url = window.URL.createObjectURL(blob);
         
         if (blob.type === "application/pdf") {
-          const iframe = document.createElement('iframe');
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-10000px';
-          iframe.style.bottom = '-10000px';
-          iframe.style.width = '1000px';
-          iframe.style.height = '1000px';
-          iframe.style.pointerEvents = 'none';
-          iframe.style.border = 'none';
-          iframe.src = url;
-          document.body.appendChild(iframe);
-          
-          return new Promise<void>((resolve) => {
-             setTimeout(() => {
-                try {
-                  iframe.contentWindow?.focus();
-                  iframe.contentWindow?.print();
-                } catch (e) {
-                  console.error(e);
-                }
-                
-                // Wait 1.5 seconds before moving to the next item so the OS spooler doesn't crash
-                setTimeout(() => {
-                  window.URL.revokeObjectURL(url);
-                  if (iframe.parentNode) document.body.removeChild(iframe);
-                  resolve();
-                }, 1500); 
-              }, 2000); 
-          });
+          const isLinux = navigator.userAgent.toLowerCase().includes('linux');
+
+          if (isLinux) {
+            const iframe = document.createElement('iframe');
+            iframe.style.position = 'fixed';
+            iframe.style.right = '-10000px';
+            iframe.style.bottom = '-10000px';
+            iframe.style.width = '1000px';
+            iframe.style.height = '1000px';
+            iframe.style.pointerEvents = 'none';
+            iframe.style.border = 'none';
+            iframe.src = url;
+            document.body.appendChild(iframe);
+            
+            return new Promise<void>((resolve) => { 
+               setTimeout(() => {
+                  try {
+                    iframe.contentWindow?.focus();
+                    iframe.contentWindow?.print();
+                  } catch (e) {
+                    console.error(e);
+                  }
+                  
+                  // Wait 1.5 seconds before moving to the next item so the OS spooler doesn't crash
+                  setTimeout(() => {
+                    window.URL.revokeObjectURL(url);
+                    if (iframe.parentNode) document.body.removeChild(iframe);
+                    resolve();
+                  }, 1500); 
+                 }, 2000);
+             });
+          } else {
+            // WINDOWS WEBVIEW2 BATCH FIX: Fallback to silent bulk download
+            // Because batching interactive overlays would be impossible for the user, 
+            // Windows automatically downloads batch documents directly to the system.
+            const a = document.createElement("a");
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `${member.sbn_no}_MTOP.pdf`;
+            document.body.appendChild(a);
+            a.click();
+
+            return new Promise<void>((resolve) => {
+              setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                if (a.parentNode) document.body.removeChild(a);
+                resolve();
+              }, 1500); // 1.5s delay to pace out system download events safely
+            });
+          }
         } else {
           const a = document.createElement("a");
           a.style.display = 'none';
@@ -493,7 +578,7 @@ export default function TodaClient() {
       
       const recordDateObj = new Date(record.issue_date)
       if (isNaN(recordDateObj.getTime())) return false; 
-      
+        
       const recordDateString = getLocalDateString(recordDateObj);
       const hour = recordDateObj.getHours()
       
@@ -520,11 +605,13 @@ export default function TodaClient() {
     }
     
     setBatchProgress({ current: 0, total: targetRecords.length })
+
     for (let i = 0; i < targetRecords.length; i++) {
       setBatchProgress({ current: i + 1, total: targetRecords.length })
       await downloadBatchDocument(targetRecords[i])
       await new Promise(resolve => setTimeout(resolve, 800))
     }
+
     setBatchPrinting(false)
     setBatchModalOpen(false)
     setBatchProgress({ current: 0, total: 0 })
@@ -557,12 +644,12 @@ export default function TodaClient() {
       }
 
       const payload = { 
-        ...formData, 
-        issue_date: finalIssueDate,
+         ...formData, 
+         issue_date: finalIssueDate,
         valid_until: finalValidUntil,
         driving_route: finalDrivingRoute, 
-        route: safeRouteName 
-      }
+         route: safeRouteName 
+       }
       
       const response = await fetchWithAuth(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
         method: isAdd ? "POST" : "PUT",
@@ -600,6 +687,7 @@ export default function TodaClient() {
     if (statusFilter !== "ALL" && computedStatus !== statusFilter) {
       return false;
     }
+
     const term = search.toLowerCase();
     return (
       String(m.operator_name || "").toLowerCase().includes(term) ||
@@ -642,7 +730,7 @@ export default function TodaClient() {
 
   const totalPages = Math.ceil(sortedMembers.length / rowsPerPage);
   const paginatedMembers = sortedMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
-  
+
   const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedSbns.includes(m.sbn_no));
 
   if (!safeRouteName) {
@@ -928,6 +1016,7 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Add Operator / Slot</DialogTitle>
             <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
           </DialogHeader>
+
           <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
@@ -994,6 +1083,7 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Edit / Renew Operator</DialogTitle>
             <DialogDescription>Update record details or clear fields to set as Vacant.</DialogDescription>
           </DialogHeader>
+
           <form onSubmit={(e) => handleSubmitForm(e, false)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
