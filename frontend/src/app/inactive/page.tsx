@@ -168,7 +168,7 @@ export default function InactiveLines() {
     }
   };
 
-  // BLAZING FAST NATIVE PRINT ENGINE - BULLETPROOF IFRAME FIX
+  // NATIVE PRINT ENGINE - 10000px WINDOWS FIX
   const handleNativePrint = async (member: FranchiseRecord) => {
     if (isPrinting) return;
     setIsPrinting(member.id);
@@ -184,18 +184,20 @@ export default function InactiveLines() {
           
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
+          
+          // WINDOWS GUARANTEE: Render it at 1000x1000 so the PDF engine turns on, but shove it completely off the screen
           iframe.style.position = 'fixed';
-          iframe.style.right = '0';
-          iframe.style.bottom = '0';
-          iframe.style.width = '2px';
-          iframe.style.height = '2px';
-          iframe.style.opacity = '0.01';
+          iframe.style.right = '-10000px';
+          iframe.style.bottom = '-10000px';
+          iframe.style.width = '1000px';
+          iframe.style.height = '1000px';
           iframe.style.pointerEvents = 'none';
+          iframe.style.border = 'none';
           iframe.src = url;
           
           document.body.appendChild(iframe);
           
-          // INSTANT EXECUTION: Bypass buggy OS onload events entirely
+          // Wait 2000ms to ensure slower computers fully buffer the PDF into the iframe
           setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
@@ -203,10 +205,14 @@ export default function InactiveLines() {
             } catch (e) {
               console.error("Print dialog failed:", e);
             }
-            setIsPrinting(null); // Clear spinner instantly
-          }, 400); // 400ms delay ensures Blob is ready without freezing
+            setIsPrinting(null); 
+            
+            // Allow time for the user to close the print dialog before revoking memory
+            setTimeout(() => window.URL.revokeObjectURL(url), 120000);
+          }, 2000); 
           
         } else {
+          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
