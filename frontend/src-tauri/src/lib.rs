@@ -36,43 +36,48 @@ fn print_pdf_fallback(request: PrintPdfRequest) -> Result<String, String> {
         .map_err(|error| format!("failed to decode PDF payload: {error}"))?;
 
     let temp_path = unique_temp_pdf_path(&request.file_name);
-    fs::write(&temp_path, pdf_bytes)
+    fs::write(&temp_path, &pdf_bytes)
         .map_err(|error| format!("failed to write temporary PDF: {error}"))?;
 
     #[cfg(target_os = "windows")]
     {
-        log::info!("using Windows print verb for {}", temp_path.display());
         let path_string = temp_path.to_string_lossy().to_string();
-        let escaped_path = path_string.replace('"', "\"");
-        let status = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "Start-Process -FilePath \"{}\" -Verb Print",
-                    escaped_path
-                ),
-            ])
-            .status()
-            .map_err(|error| format!("failed to launch Windows print verb: {error}"))?;
+        // Prevent PowerShell string injection by properly escaping single quotes
+        let escaped_path = path_string.replace("'", "''");
 
-        if !status.success() {
-            return Err(format!("Windows print verb exited with status: {status}"));
-        }
+        // THE FIX: Bulletproof PowerShell try/catch. 
+        // 1. Tries to invoke the native Print verb (Works flawlessly for Acrobat).
+        // 2. If it fails (Because Edge/Chrome is default and blocks it), it catches the error and forces the PDF to open on screen so the user can manually print.
+        let ps_script = format!(
+            "try {{ Start-Process -LiteralPath '{}' -Verb Print -WindowStyle Hidden -ErrorAction Stop }} catch {{ Start-Process -LiteralPath '{}' }}",
+            escaped_path, escaped_path
+        );
+
+        log::info!("executing Windows print fallback: {}", ps_script);
+
+        // spawn() instead of status() prevents Tauri from locking up, unfreezing the UI instantly.
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .spawn()
+            .map_err(|error| format!("failed to launch Windows print process: {error}"))?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        log::info!("using native viewer fallback for {}", temp_path.display());
-        let status = Command::new("xdg-open")
+        log::info!("using native lpr fallback for {}", temp_path.display());
+        let _ = Command::new("lpr")
             .arg(&temp_path)
-            .status()
-            .map_err(|error| format!("failed to launch native viewer: {error}"))?;
-
-        if !status.success() {
-            return Err(format!("native viewer exited with status: {status}"));
-        }
+            .spawn()
+            .map_err(|error| format!("failed to launch native printer: {error}"))?;
     }
+
+    // Memory Leak Prevention: Spawn a thread to delete the temp file after 5 minutes 
+    // giving the OS spooler enough time to process it.
+    let temp_path_clone = temp_path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        let _ = fs::remove_file(temp_path_clone);
+    });
 
     Ok(temp_path.to_string_lossy().to_string())
 }
