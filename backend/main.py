@@ -1238,7 +1238,7 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
     csv_data = []
     for r in filtered_records:
         is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
-        formatted_sbn = format_sbn_with_year(r.sbn_no, r.issue_date, is_vacant)
+        formatted_sbn = normalize_base_sbn(r.sbn_no)
         
         csv_data.append({
             "SBN NO.": escape_excel(formatted_sbn),

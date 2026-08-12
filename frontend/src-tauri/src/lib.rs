@@ -1,10 +1,81 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::Deserialize;
 use tauri::{Manager, RunEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+#[derive(Deserialize)]
+struct PrintPdfRequest {
+    file_name: String,
+    pdf_base64: String,
+}
+
 // Holds the background Python process so we can kill it safely when closing the app
 struct BackendState(Arc<Mutex<Option<CommandChild>>>);
+
+fn unique_temp_pdf_path(file_name: &str) -> PathBuf {
+    let temp_dir = std::env::temp_dir();
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    temp_dir.join(format!("pasada-{}-{}", suffix, file_name))
+}
+
+#[tauri::command]
+fn print_pdf_fallback(request: PrintPdfRequest) -> Result<String, String> {
+    log::info!("print_pdf_fallback requested for {}", request.file_name);
+    let pdf_bytes = STANDARD
+        .decode(request.pdf_base64)
+        .map_err(|error| format!("failed to decode PDF payload: {error}"))?;
+
+    let temp_path = unique_temp_pdf_path(&request.file_name);
+    fs::write(&temp_path, pdf_bytes)
+        .map_err(|error| format!("failed to write temporary PDF: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        log::info!("using Windows print verb for {}", temp_path.display());
+        let path_string = temp_path.to_string_lossy().to_string();
+        let escaped_path = path_string.replace('"', "\"");
+        let status = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Start-Process -FilePath \"{}\" -Verb Print",
+                    escaped_path
+                ),
+            ])
+            .status()
+            .map_err(|error| format!("failed to launch Windows print verb: {error}"))?;
+
+        if !status.success() {
+            return Err(format!("Windows print verb exited with status: {status}"));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        log::info!("using native viewer fallback for {}", temp_path.display());
+        let status = Command::new("xdg-open")
+            .arg(&temp_path)
+            .status()
+            .map_err(|error| format!("failed to launch native viewer: {error}"))?;
+
+        if !status.success() {
+            return Err(format!("native viewer exited with status: {status}"));
+        }
+    }
+
+    Ok(temp_path.to_string_lossy().to_string())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,6 +92,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .invoke_handler(tauri::generate_handler![print_pdf_fallback])
         .manage(BackendState(backend_child))
         .setup(move |app| {
             // Gracefully attempt to launch Python Backend

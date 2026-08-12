@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { useParams, usePathname, useRouter } from "next/navigation"
+import { useParams, usePathname } from "next/navigation"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -37,7 +37,6 @@ interface LogEntry {
 }
 
 export default function TodaClient() {
-  const router = useRouter()
   const params = useParams()
   const pathname = usePathname()
   
@@ -104,6 +103,107 @@ export default function TodaClient() {
     return `${year}-${month}-${day}`;
   };
 
+  const isTauriDesktop = typeof window !== "undefined" && "__TAURI__" in window;
+
+  const openPdfInExternalViewer = async (blob: Blob, fileName: string) => {
+    if (!isTauriDesktop) {
+      throw new Error("Native viewer unavailable outside Tauri desktop mode.");
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const arrayBuffer = await blob.arrayBuffer();
+      const uint8Array = new Uint8Array(arrayBuffer);
+      let binary = "";
+
+      for (let index = 0; index < uint8Array.length; index += 1) {
+        binary += String.fromCharCode(uint8Array[index]);
+      }
+
+      const pdfBase64 = btoa(binary);
+
+      await invoke("print_pdf_fallback", {
+        request: {
+          file_name: fileName,
+          pdf_base64: pdfBase64,
+        },
+      });
+    } catch (err) {
+      console.error("Failed to open PDF in native viewer", err);
+      throw err;
+    }
+  };
+
+  const createPrintIframe = (id: string, url: string) => {
+    let iframe = document.getElementById(id) as HTMLIFrameElement | null;
+    if (iframe) {
+      iframe.src = url;
+    } else {
+      iframe = document.createElement('iframe');
+      iframe.id = id;
+      iframe.style.position = 'fixed';
+      iframe.style.top = '0';
+      iframe.style.left = '0';
+      iframe.style.width = '100vw';
+      iframe.style.height = '100vh';
+      iframe.style.opacity = '0.01';
+      iframe.style.pointerEvents = 'none';
+      iframe.style.zIndex = '9999';
+      iframe.style.border = 'none';
+      iframe.src = url;
+      document.body.appendChild(iframe);
+    }
+    return iframe;
+  };
+
+  const printPdfUrl = async (url: string): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      const iframe = createPrintIframe('pasada-print-frame', url);
+      let completed = false;
+
+      const cleanup = () => {
+        if (iframe.parentNode) document.body.removeChild(iframe);
+        window.URL.revokeObjectURL(url);
+      };
+
+      const finish = (success: boolean) => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        resolve(success);
+      };
+
+      const triggerPrint = () => {
+        if (completed) return;
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch (e) {
+          console.error('Print dialog failed:', e);
+          finish(false);
+        }
+      };
+
+      iframe.onload = () => {
+        if (iframe.contentWindow) {
+          try {
+            iframe.contentWindow.onafterprint = () => finish(true);
+          } catch {
+            // Ignore browsers that do not allow assigning onafterprint.
+          }
+        }
+        setTimeout(triggerPrint, 800);
+      };
+
+      setTimeout(() => {
+        if (!completed) {
+          console.warn('Print timeout: no afterprint event detected.');
+          finish(false);
+        }
+      }, 25000);
+    });
+  };
+
   const fetchMembers = useCallback(async () => {
     if (!safeRouteName) return;
     try {
@@ -118,36 +218,15 @@ export default function TodaClient() {
   }, [safeRouteName])
 
   useEffect(() => {
-    fetchMembers();
+    const initialLoadId = window.setTimeout(() => {
+      void fetchMembers();
+    }, 0);
     const intervalId = setInterval(fetchMembers, 15000); 
-    return () => clearInterval(intervalId);
-  }, [fetchMembers])
-
-  useEffect(() => {
-    setCurrentPage(1)
-    setSelectedSbns([])
-  }, [search, statusFilter, sortBy])
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const isTyping = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA' || document.activeElement?.tagName === 'SELECT';
-      
-      if (e.key === '/' && !isTyping) {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-      }
-      if (e.altKey && e.key.toLowerCase() === 'n') {
-        e.preventDefault();
-        handleOpenAdd();
-      }
-      if (e.altKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        setBatchModalOpen(true);
-      }
+    return () => {
+      window.clearTimeout(initialLoadId);
+      clearInterval(intervalId);
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [fetchMembers])
 
   const getNextSbnPreview = (route: string, list: Member[]): string => {
     let prefix = "";
@@ -181,29 +260,58 @@ export default function TodaClient() {
     return `${prefix}-${String(nextNum).padStart(padding, '0')}`;
   };
 
+  const handleOpenAdd = useCallback(() => {
+    const nextSbn = getNextSbnPreview(safeRouteName, members);
+    setFormData({
+      id: "",
+      sbn_no: nextSbn,
+      operator_name: "",
+      address: "",
+      motor_no: "",
+      chassis_no: "",
+      make: "",
+      plate_no: "",
+      route: safeRouteName,
+      driving_route: "",
+      issue_date: "",
+      valid_until: ""
+    });
+    setIsAddOpen(true);
+  }, [members, safeRouteName]);
+
+  useEffect(() => {
+    const resetId = window.setTimeout(() => {
+      setCurrentPage(1);
+      setSelectedSbns([]);
+    }, 0);
+    return () => window.clearTimeout(resetId);
+  }, [search, statusFilter, sortBy])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isTyping = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA' || document.activeElement?.tagName === 'SELECT';
+      
+      if (e.key === '/' && !isTyping) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+      if (e.altKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        handleOpenAdd();
+      }
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setBatchModalOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleOpenAdd]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const isDate = e.target.name === "issue_date" || e.target.name === "valid_until";
     const val = isDate ? e.target.value : e.target.value.toUpperCase();
     setFormData({ ...formData, [e.target.name]: val })
-  }
-
-  const handleOpenAdd = () => {
-    const nextSbn = getNextSbnPreview(safeRouteName, members);
-    setFormData({ 
-       id: "", 
-       sbn_no: nextSbn, 
-       operator_name: "", 
-       address: "", 
-       motor_no: "", 
-       chassis_no: "", 
-       make: "", 
-       plate_no: "", 
-       route: safeRouteName, 
-       driving_route: "",
-      issue_date: "",
-      valid_until: "" 
-     })
-    setIsAddOpen(true)
   }
 
   const handleOpenEdit = (member: Member) => {
@@ -237,7 +345,7 @@ export default function TodaClient() {
         const err = await res.json();
         alert(err.detail || "Failed to refresh database.");
       }
-    } catch (err) {
+    } catch {
       alert("Network error while trying to refresh the database.");
     } finally {
       setIsRefreshing(false);
@@ -260,7 +368,7 @@ export default function TodaClient() {
         const err = await res.json();
         alert(err.detail || "Failed to delete operator.");
       }
-    } catch (err) {
+    } catch {
       alert("Network error while trying to delete operator.");
     } finally {
       setIsDeleting(false);
@@ -290,7 +398,7 @@ export default function TodaClient() {
         const err = await res.json();
         alert(err.detail || "Failed to delete selected operators.");
       }
-    } catch (err) {
+    } catch {
       alert("Network error while deleting selected operators.");
     } finally {
       setIsDeleting(false);
@@ -335,7 +443,7 @@ export default function TodaClient() {
       } else {
         alert("Failed to export masterlist.")
       }
-    } catch (error) {
+    } catch {
       alert("Network error while exporting.")
     } finally {
       setIsExporting(false)
@@ -371,81 +479,46 @@ export default function TodaClient() {
     }
   };
 
-  // NATIVE PRINT ENGINE - VIEWPORT OCCLUSION FIX
+  // NATIVE PRINT ENGINE - WINDOWS-FRIENDLY PDF PRINT
   const handleNativePrint = async (member: Member) => {
-    if (isGeneratingId) return; 
+    if (isGeneratingId) return;
     setIsGeneratingId(member.id);
-    
+
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
-      
+
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
-        
-        if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame');
-          if (existingIframe) document.body.removeChild(existingIframe);
-          
-          const iframe = document.createElement('iframe');
-          iframe.id = 'pasada-print-frame';
-          
-          // THE FIX: Do NOT push it off-screen. Bring it full size into the viewport so 
-          // Windows WebView2 doesn't suspend it, but make it 100% transparent and unclickable.
-          iframe.style.position = 'fixed';
-          iframe.style.top = '0';
-          iframe.style.left = '0';
-          iframe.style.width = '100vw';
-          iframe.style.height = '100vh';
-          iframe.style.opacity = '0'; // Invisible
-          iframe.style.pointerEvents = 'none'; // Unclickable
-          iframe.style.zIndex = '-9999'; // Behind all elements
-          iframe.style.border = 'none';
-          iframe.src = url;
-          
-          document.body.appendChild(iframe);
-          
-          let printed = false;
-          
-          const triggerPrint = () => {
-            if (printed) return;
-            printed = true;
-            try {
-              iframe.contentWindow?.focus();
-              iframe.contentWindow?.print();
-            } catch (e) {
-              console.error("Print dialog failed:", e);
-            }
-            setIsGeneratingId(null);
-            
-            // Cleanup memory after a safe period
-            setTimeout(() => {
-              if (iframe.parentNode) document.body.removeChild(iframe);
-              window.URL.revokeObjectURL(url);
-            }, 120000);
-          };
+        console.info("[print] generated document", { id: member.id, sbn: member.sbn_no, type: blob.type });
 
-          // Wait for the iframe to load to trigger the print. 
-          // Added a fallback timeout to guarantee it triggers if onload hangs.
-          iframe.onload = () => setTimeout(triggerPrint, 800);
-          setTimeout(triggerPrint, 3000);
-          
+        if (blob.type === 'application/pdf') {
+          console.info("[print] trying iframe print first");
+          const didPrint = await printPdfUrl(url);
+          if (!didPrint && isTauriDesktop) {
+            try {
+              console.info("[print] iframe print failed, using Tauri fallback");
+              await openPdfInExternalViewer(blob, `${member.sbn_no}.pdf`);
+            } catch (err) {
+              console.error('Native fallback failed', err);
+            }
+          }
         } else {
-          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
           a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
-          setTimeout(() => document.body.removeChild(a), 100);
-          setIsGeneratingId(null);
+          setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+          }, 1000);
         }
-      } else {
-         setIsGeneratingId(null);
       }
     } catch (error) {
-      console.error(error);
+      console.error("Print failed", error);
+    } finally {
       setIsGeneratingId(null);
     }
   };
@@ -453,52 +526,25 @@ export default function TodaClient() {
   // NATIVE BATCH PRINT ENGINE - VIEWPORT OCCLUSION FIX
   const downloadBatchDocument = async (member: Member) => {
     try {
-      const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: "POST" });
+      const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
-        
-        if (blob.type === "application/pdf") {
-          const iframe = document.createElement('iframe');
-          iframe.style.position = 'fixed';
-          iframe.style.top = '0';
-          iframe.style.left = '0';
-          iframe.style.width = '100vw';
-          iframe.style.height = '100vh';
-          iframe.style.opacity = '0'; // Invisible
-          iframe.style.pointerEvents = 'none'; // Unclickable
-          iframe.style.zIndex = '-9999'; // Behind all elements
-          iframe.style.border = 'none';
-          iframe.src = url;
-          
-          document.body.appendChild(iframe);
-          
-          return new Promise<void>((resolve) => {
-            let printed = false;
-            
-            const triggerPrint = () => {
-              if (printed) return;
-              printed = true;
-              try {
-                iframe.contentWindow?.focus();
-                iframe.contentWindow?.print();
-              } catch (e) {
-                console.error(e);
-              }
-              
-              // Wait 2 seconds before resolving to give the OS spooler time to process the batch
-              setTimeout(() => {
-                window.URL.revokeObjectURL(url);
-                if (iframe.parentNode) document.body.removeChild(iframe);
-                resolve();
-              }, 2000);
-            };
+        console.info("[batch-print] generated document", { id: member.id, sbn: member.sbn_no, type: blob.type });
 
-            iframe.onload = () => setTimeout(triggerPrint, 800);
-            setTimeout(triggerPrint, 3000);
-          });
+        if (blob.type === 'application/pdf') {
+          console.info("[batch-print] trying iframe print first");
+          const didPrint = await printPdfUrl(url);
+          if (!didPrint && isTauriDesktop) {
+            try {
+              console.info("[batch-print] iframe print failed, using Tauri fallback");
+              await openPdfInExternalViewer(blob, `${member.sbn_no}.pdf`);
+            } catch (err) {
+              console.error('Native fallback failed', err);
+            }
+          }
         } else {
-          const a = document.createElement("a");
+          const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
           a.download = `${member.sbn_no}.docx`;
@@ -510,8 +556,8 @@ export default function TodaClient() {
           }, 1000);
         }
       }
-    } catch (err) {
-      console.error(err);
+    } catch (error) {
+      console.error("Batch print failed", error);
     }
   };
 
@@ -572,7 +618,9 @@ export default function TodaClient() {
       const res = await fetchWithAuth(`${API_URL}/logs/record/${member.id}`)
       if (res.ok) setHistoryLogs(await res.json())
       setIsHistoryOpen(true)
-    } catch (e) {}
+    } catch (error) {
+      console.error("Failed to load history", error)
+    }
   };
 
   const handleSubmitForm = async (e: React.FormEvent, isAdd: boolean) => {
@@ -607,13 +655,17 @@ export default function TodaClient() {
       })
       
       if (response.ok) {
-        isAdd ? setIsAddOpen(false) : setIsEditOpen(false)
+        if (isAdd) {
+          setIsAddOpen(false)
+        } else {
+          setIsEditOpen(false)
+        }
         window.location.reload();
       } else {
         const err = await response.json()
         alert(err.detail || "Failed to save record.")
       }
-    } catch (error) {
+    } catch {
       alert("Network error while trying to save record.")
     }
   };

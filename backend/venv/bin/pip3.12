@@ -1,4 +1,4 @@
-#!/home/reben/pasada/backend/venv/bin/python3
+#!/home/reben/Downloads/broken_pasada_isoiec/pasada/backend/venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys
