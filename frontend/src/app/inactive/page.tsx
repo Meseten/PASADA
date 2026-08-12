@@ -168,81 +168,106 @@ export default function InactiveLines() {
     }
   };
 
-  // NATIVE PRINT ENGINE - VIEWPORT OCCLUSION FIX
+  const executePdfPrint = async (blob: Blob, fileName: string) => {
+    const isWindows = typeof window !== "undefined" && navigator.userAgent.includes("Windows NT");
+    const isTauriDesktop = typeof window !== "undefined" && "__TAURI__" in window;
+
+    if (isTauriDesktop && isWindows) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        return new Promise<void>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = async () => {
+            try {
+              const base64data = (reader.result as string).split(',')[1];
+              await invoke("print_pdf_fallback", {
+                request: { file_name: fileName, pdf_base64: base64data },
+              });
+              resolve(); // Instantly unblocks the UI loader
+            } catch (err) {
+              console.error("Tauri print invoke failed", err);
+              reject(err);
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } catch (err) {
+        console.error("Failed to load Tauri core", err);
+      }
+      return;
+    }
+
+    // Linux / WebKitGTK / Browser Fallback
+    const url = window.URL.createObjectURL(blob);
+    const existingIframe = document.getElementById('pasada-print-frame') as HTMLIFrameElement;
+    if (existingIframe) document.body.removeChild(existingIframe);
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'pasada-print-frame';
+    
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+
+    return new Promise<void>((resolve) => {
+      let completed = false;
+      const triggerPrint = () => {
+        if (completed) return;
+        completed = true;
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch (e) {
+          console.warn("Iframe print blocked:", e);
+        }
+        resolve();
+      };
+
+      iframe.onload = () => setTimeout(triggerPrint, 500);
+      setTimeout(triggerPrint, 2500); // safety fallback
+
+      setTimeout(() => {
+        if (iframe.parentNode) document.body.removeChild(iframe);
+        window.URL.revokeObjectURL(url);
+      }, 10000);
+    });
+  };
+
   const handleNativePrint = async (member: FranchiseRecord) => {
     if (isPrinting) return;
     setIsPrinting(member.id);
     
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
-      
       if (response.ok) {
         const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        
-        if (blob.type === "application/pdf") {
-          const existingIframe = document.getElementById('pasada-print-frame');
-          if (existingIframe) document.body.removeChild(existingIframe);
-          
-          const iframe = document.createElement('iframe');
-          iframe.id = 'pasada-print-frame';
-          
-          // THE FIX: Do NOT push it off-screen. Bring it full size into the viewport so 
-          // Windows WebView2 doesn't suspend it, but make it 100% transparent and unclickable.
-          iframe.style.position = 'fixed';
-          iframe.style.top = '0';
-          iframe.style.left = '0';
-          iframe.style.width = '100vw';
-          iframe.style.height = '100vh';
-          iframe.style.opacity = '0';
-          iframe.style.pointerEvents = 'none';
-          iframe.style.zIndex = '-9999';
-          iframe.style.border = 'none';
-          iframe.src = url;
-          
-          document.body.appendChild(iframe);
-          
-          let printed = false;
-          
-          const triggerPrint = () => {
-            if (printed) return;
-            printed = true;
-            try {
-              iframe.contentWindow?.focus();
-              iframe.contentWindow?.print();
-            } catch (e) {
-              console.error("Print dialog failed:", e);
-            }
-            setIsPrinting(null);
-            
-            // Allow time for the user to close the print dialog before revoking memory
-            setTimeout(() => {
-              if (iframe.parentNode) document.body.removeChild(iframe);
-              window.URL.revokeObjectURL(url);
-            }, 120000);
-          };
-
-          // Wait for load, then trigger. Added fallback timeout in case onload doesn't fire.
-          iframe.onload = () => setTimeout(triggerPrint, 800);
-          setTimeout(triggerPrint, 3000);
-
+        if (blob.type === 'application/pdf') {
+          await executePdfPrint(blob, `${member.sbn_no}.pdf`);
         } else {
-          // DOCX Fallback
+          // DOCX fallback
+          const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
           a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
-          setTimeout(() => document.body.removeChild(a), 100);
-          setIsPrinting(null);
+          setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+          }, 1000);
         }
-      } else {
-        setIsPrinting(null);
       }
     } catch (error) {
       console.error(error);
-      setIsPrinting(null);
+    } finally {
+      setIsPrinting(null); // Force stop the loader immediately.
     }
   };
 
@@ -275,6 +300,7 @@ export default function InactiveLines() {
               <option value="NAME_ASC">Sort: Operator Name (A Z)</option>
             </select>
           </div>
+
           {/* FILTER BY TODA ROUTE */}
           <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
             <Filter className="h-4 w-4 text-muted-foreground" />
@@ -289,10 +315,12 @@ export default function InactiveLines() {
               ))}
             </select>
           </div>
+
           <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
             {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
             Export Excel
           </Button>
+
           <div className="relative w-full md:w-72 group">
             <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
             <Input 

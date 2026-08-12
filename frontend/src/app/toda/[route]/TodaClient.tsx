@@ -39,7 +39,6 @@ interface LogEntry {
 export default function TodaClient() {
   const params = useParams()
   const pathname = usePathname()
-  
   const fallbackRoute = pathname?.split('/').pop()?.toUpperCase() || ""
   const safeRouteName = (params?.route as string)?.toUpperCase() || fallbackRoute
 
@@ -58,8 +57,8 @@ export default function TodaClient() {
   const [isExporting, setIsExporting] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  
   const [selectedSbns, setSelectedSbns] = useState<string[]>([])
+  
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
   const [batchSpecificDate, setBatchSpecificDate] = useState("")
@@ -67,9 +66,9 @@ export default function TodaClient() {
   const [batchEndDate, setBatchEndDate] = useState("")
   const [batchPrinting, setBatchPrinting] = useState(false)
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 })
+
   const [historyLogs, setHistoryLogs] = useState<LogEntry[]>([])
   const [activeMember, setActiveMember] = useState<Member | null>(null)
-  
   const [currentPage, setCurrentPage] = useState(1)
   const [rowsPerPage, setRowsPerPage] = useState(50)
 
@@ -103,104 +102,77 @@ export default function TodaClient() {
     return `${year}-${month}-${day}`;
   };
 
-  const isTauriDesktop = typeof window !== "undefined" && "__TAURI__" in window;
+  // NATIVE PRINT ENGINE - ALL-IN-ONE ROBUST PDF PIPELINE
+  const executePdfPrint = async (blob: Blob, fileName: string) => {
+    const isWindows = typeof window !== "undefined" && navigator.userAgent.includes("Windows NT");
+    const isTauriDesktop = typeof window !== "undefined" && "__TAURI__" in window;
 
-  const openPdfInExternalViewer = async (blob: Blob, fileName: string) => {
-    if (!isTauriDesktop) {
-      throw new Error("Native viewer unavailable outside Tauri desktop mode.");
-    }
-
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const arrayBuffer = await blob.arrayBuffer();
-      const uint8Array = new Uint8Array(arrayBuffer);
-      let binary = "";
-
-      for (let index = 0; index < uint8Array.length; index += 1) {
-        binary += String.fromCharCode(uint8Array[index]);
+    if (isTauriDesktop && isWindows) {
+      console.info("[print] Windows detected, bypassing iframe to use native Rust shell print");
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        return new Promise<void>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = async () => {
+            try {
+              const base64data = (reader.result as string).split(',')[1];
+              await invoke("print_pdf_fallback", {
+                request: { file_name: fileName, pdf_base64: base64data },
+              });
+              resolve(); // Instantly unblocks the UI loader
+            } catch (err) {
+              console.error("Tauri print invoke failed", err);
+              reject(err);
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } catch (err) {
+        console.error("Failed to load Tauri core", err);
       }
-
-      const pdfBase64 = btoa(binary);
-
-      await invoke("print_pdf_fallback", {
-        request: {
-          file_name: fileName,
-          pdf_base64: pdfBase64,
-        },
-      });
-    } catch (err) {
-      console.error("Failed to open PDF in native viewer", err);
-      throw err;
+      return;
     }
-  };
 
-  const createPrintIframe = (id: string, url: string) => {
-    let iframe = document.getElementById(id) as HTMLIFrameElement | null;
-    if (iframe) {
-      iframe.src = url;
-    } else {
-      iframe = document.createElement('iframe');
-      iframe.id = id;
-      iframe.style.position = 'fixed';
-      iframe.style.top = '0';
-      iframe.style.left = '0';
-      iframe.style.width = '100vw';
-      iframe.style.height = '100vh';
-      iframe.style.opacity = '0.01';
-      iframe.style.pointerEvents = 'none';
-      iframe.style.zIndex = '9999';
-      iframe.style.border = 'none';
-      iframe.src = url;
-      document.body.appendChild(iframe);
-    }
-    return iframe;
-  };
+    // Linux / WebKitGTK / Standard Browser Fallback
+    console.info("[print] using iframe print fallback");
+    const url = window.URL.createObjectURL(blob);
+    const existingIframe = document.getElementById('pasada-print-frame') as HTMLIFrameElement;
+    if (existingIframe) document.body.removeChild(existingIframe);
 
-  const printPdfUrl = async (url: string): Promise<boolean> => {
-    return new Promise<boolean>((resolve) => {
-      const iframe = createPrintIframe('pasada-print-frame', url);
+    const iframe = document.createElement('iframe');
+    iframe.id = 'pasada-print-frame';
+    
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+
+    return new Promise<void>((resolve) => {
       let completed = false;
-
-      const cleanup = () => {
-        if (iframe.parentNode) document.body.removeChild(iframe);
-        window.URL.revokeObjectURL(url);
-      };
-
-      const finish = (success: boolean) => {
-        if (completed) return;
-        completed = true;
-        cleanup();
-        resolve(success);
-      };
-
       const triggerPrint = () => {
         if (completed) return;
+        completed = true;
         try {
           iframe.contentWindow?.focus();
           iframe.contentWindow?.print();
         } catch (e) {
-          console.error('Print dialog failed:', e);
-          finish(false);
+          console.warn("Iframe print blocked:", e);
         }
+        resolve();
       };
 
-      iframe.onload = () => {
-        if (iframe.contentWindow) {
-          try {
-            iframe.contentWindow.onafterprint = () => finish(true);
-          } catch {
-            // Ignore browsers that do not allow assigning onafterprint.
-          }
-        }
-        setTimeout(triggerPrint, 800);
-      };
+      iframe.onload = () => setTimeout(triggerPrint, 500);
+      setTimeout(triggerPrint, 2500);
 
       setTimeout(() => {
-        if (!completed) {
-          console.warn('Print timeout: no afterprint event detected.');
-          finish(false);
-        }
-      }, 25000);
+        if (iframe.parentNode) document.body.removeChild(iframe);
+        window.URL.revokeObjectURL(url);
+      }, 10000);
     });
   };
 
@@ -222,6 +194,7 @@ export default function TodaClient() {
       void fetchMembers();
     }, 0);
     const intervalId = setInterval(fetchMembers, 15000); 
+
     return () => {
       window.clearTimeout(initialLoadId);
       clearInterval(intervalId);
@@ -316,9 +289,9 @@ export default function TodaClient() {
 
   const handleOpenEdit = (member: Member) => {
     setActiveMember(member); 
-    setFormData({ 
-       ...member, 
-       route: safeRouteName,
+    setFormData({
+        ...member,
+        route: safeRouteName,
       issue_date: member.issue_date ? member.issue_date.split('T')[0] : "",
       valid_until: member.valid_until ? member.valid_until.split('T')[0] : ""
     })
@@ -388,7 +361,6 @@ export default function TodaClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sbn_list: selectedSbns })
       });
-
       if (res.ok) {
         const result = await res.json();
         alert(result.message || `${selectedSbns.length} operator(s) deleted successfully.`);
@@ -479,31 +451,19 @@ export default function TodaClient() {
     }
   };
 
-  // NATIVE PRINT ENGINE - WINDOWS-FRIENDLY PDF PRINT
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return;
     setIsGeneratingId(member.id);
 
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
-
       if (response.ok) {
         const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        console.info("[print] generated document", { id: member.id, sbn: member.sbn_no, type: blob.type });
-
         if (blob.type === 'application/pdf') {
-          console.info("[print] trying iframe print first");
-          const didPrint = await printPdfUrl(url);
-          if (!didPrint && isTauriDesktop) {
-            try {
-              console.info("[print] iframe print failed, using Tauri fallback");
-              await openPdfInExternalViewer(blob, `${member.sbn_no}.pdf`);
-            } catch (err) {
-              console.error('Native fallback failed', err);
-            }
-          }
+          await executePdfPrint(blob, `${member.sbn_no}.pdf`);
         } else {
+          // DOCX fallback
+          const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
@@ -519,31 +479,19 @@ export default function TodaClient() {
     } catch (error) {
       console.error("Print failed", error);
     } finally {
-      setIsGeneratingId(null);
+      setIsGeneratingId(null); // Force stop the loader immediately.
     }
   };
 
-  // NATIVE BATCH PRINT ENGINE - VIEWPORT OCCLUSION FIX
   const downloadBatchDocument = async (member: Member) => {
     try {
       const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (res.ok) {
         const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
-        console.info("[batch-print] generated document", { id: member.id, sbn: member.sbn_no, type: blob.type });
-
         if (blob.type === 'application/pdf') {
-          console.info("[batch-print] trying iframe print first");
-          const didPrint = await printPdfUrl(url);
-          if (!didPrint && isTauriDesktop) {
-            try {
-              console.info("[batch-print] iframe print failed, using Tauri fallback");
-              await openPdfInExternalViewer(blob, `${member.sbn_no}.pdf`);
-            } catch (err) {
-              console.error('Native fallback failed', err);
-            }
-          }
+          await executePdfPrint(blob, `${member.sbn_no}.pdf`);
         } else {
+          const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
@@ -572,8 +520,8 @@ export default function TodaClient() {
       if (!record.issue_date) return false
       
       const recordDateObj = new Date(record.issue_date)
-      if (isNaN(recordDateObj.getTime())) return false; 
-        
+      if (isNaN(recordDateObj.getTime())) return false;
+          
       const recordDateString = getLocalDateString(recordDateObj);
       const hour = recordDateObj.getHours()
       
@@ -641,12 +589,12 @@ export default function TodaClient() {
       }
 
       const payload = { 
-         ...formData, 
-         issue_date: finalIssueDate,
+        ...formData, 
+        issue_date: finalIssueDate,
         valid_until: finalValidUntil,
-        driving_route: finalDrivingRoute, 
-         route: safeRouteName 
-       }
+        driving_route: finalDrivingRoute,
+        route: safeRouteName
+      }
       
       const response = await fetchWithAuth(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
         method: isAdd ? "POST" : "PUT",
@@ -731,7 +679,6 @@ export default function TodaClient() {
 
   const totalPages = Math.ceil(sortedMembers.length / rowsPerPage);
   const paginatedMembers = sortedMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
-
   const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedSbns.includes(m.sbn_no));
 
   if (!safeRouteName) {
@@ -1017,7 +964,6 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Add Operator / Slot</DialogTitle>
             <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
           </DialogHeader>
-
           <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
@@ -1069,7 +1015,6 @@ export default function TodaClient() {
                 </div>
             </div>
             <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
-
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white">Save Operator</Button>
             </DialogFooter>
@@ -1084,7 +1029,6 @@ export default function TodaClient() {
             <DialogTitle className="text-2xl font-bold">Edit / Renew Operator</DialogTitle>
             <DialogDescription>Update record details or clear fields to set as Vacant.</DialogDescription>
           </DialogHeader>
-
           <form onSubmit={(e) => handleSubmitForm(e, false)} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">
@@ -1118,7 +1062,6 @@ export default function TodaClient() {
                 </div>
             </div>
             <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
-
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Changes</Button>
             </DialogFooter>
@@ -1299,8 +1242,8 @@ export default function TodaClient() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
                 <select
-                     value={rowsPerPage}
-                     onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                    value={rowsPerPage}
+                    onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
                   className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:16px_16px] h-8 w-20 rounded-md border border-input bg-background text-foreground px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer pr-8"
                 >
                   <option value={50}>50</option>
