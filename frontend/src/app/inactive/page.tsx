@@ -168,106 +168,63 @@ export default function InactiveLines() {
     }
   };
 
-  const executePdfPrint = async (blob: Blob, fileName: string) => {
-    const isWindows = typeof window !== "undefined" && navigator.userAgent.includes("Windows NT");
-    const isTauriDesktop = typeof window !== "undefined" && "__TAURI__" in window;
-
-    if (isTauriDesktop && isWindows) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        return new Promise<void>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onloadend = async () => {
-            try {
-              const base64data = (reader.result as string).split(',')[1];
-              await invoke("print_pdf_fallback", {
-                request: { file_name: fileName, pdf_base64: base64data },
-              });
-              resolve(); // Instantly unblocks the UI loader
-            } catch (err) {
-              console.error("Tauri print invoke failed", err);
-              reject(err);
-            }
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      } catch (err) {
-        console.error("Failed to load Tauri core", err);
-      }
-      return;
-    }
-
-    // Linux / WebKitGTK / Browser Fallback
-    const url = window.URL.createObjectURL(blob);
-    const existingIframe = document.getElementById('pasada-print-frame') as HTMLIFrameElement;
-    if (existingIframe) document.body.removeChild(existingIframe);
-
-    const iframe = document.createElement('iframe');
-    iframe.id = 'pasada-print-frame';
-    
-    iframe.style.position = 'fixed';
-    iframe.style.right = '0';
-    iframe.style.bottom = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = 'none';
-    iframe.src = url;
-    document.body.appendChild(iframe);
-
-    return new Promise<void>((resolve) => {
-      let completed = false;
-      const triggerPrint = () => {
-        if (completed) return;
-        completed = true;
-        try {
-          iframe.contentWindow?.focus();
-          iframe.contentWindow?.print();
-        } catch (e) {
-          console.warn("Iframe print blocked:", e);
-        }
-        resolve();
-      };
-
-      iframe.onload = () => setTimeout(triggerPrint, 500);
-      setTimeout(triggerPrint, 2500); // safety fallback
-
-      setTimeout(() => {
-        if (iframe.parentNode) document.body.removeChild(iframe);
-        window.URL.revokeObjectURL(url);
-      }, 10000);
-    });
-  };
-
+  // YOUR PROVEN PRINT LOGIC (100% Native Iframe)
   const handleNativePrint = async (member: FranchiseRecord) => {
     if (isPrinting) return;
     setIsPrinting(member.id);
     
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
+      
       if (response.ok) {
         const blob = await response.blob();
-        if (blob.type === 'application/pdf') {
-          await executePdfPrint(blob, `${member.sbn_no}.pdf`);
+        const url = window.URL.createObjectURL(blob);
+        
+        if (blob.type === "application/pdf") {
+          const existingIframe = document.getElementById('pasada-print-frame');
+          if (existingIframe) document.body.removeChild(existingIframe);
+          
+          const iframe = document.createElement('iframe');
+          iframe.id = 'pasada-print-frame';
+          
+          // Exact dimensions and off-screen positioning from your old working code
+          iframe.style.position = 'fixed';
+          iframe.style.right = '-2000px';
+          iframe.style.bottom = '-2000px';
+          iframe.style.width = '500px';
+          iframe.style.height = '500px';
+          iframe.src = url;
+          
+          document.body.appendChild(iframe);
+          
+          // Exact 1.5s timeout from your old working code (Bypasses WebView2 onload bug)
+          setTimeout(() => {
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (e) {
+              console.error(e);
+            }
+            setIsPrinting(null);
+            setTimeout(() => window.URL.revokeObjectURL(url), 300000);
+          }, 1500); 
         } else {
-          // DOCX fallback
-          const url = window.URL.createObjectURL(blob);
+          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `${member.sbn_no}.docx`;
+          a.download = `MTOP_${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
-          setTimeout(() => {
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
-          }, 1000);
+          setIsPrinting(null);
+          setTimeout(() => document.body.removeChild(a), 100);
         }
+      } else {
+        setIsPrinting(null);
       }
     } catch (error) {
       console.error(error);
-    } finally {
-      setIsPrinting(null); // Force stop the loader immediately.
+      setIsPrinting(null);
     }
   };
 
