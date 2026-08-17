@@ -141,14 +141,39 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PASADA Registry API", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"]
-)
+app.add_middleware(  
+    CORSMiddleware,  
+    allow_origins=["*"],  
+    allow_credentials=False,  
+    allow_methods=["*"],  
+    allow_headers=["*"],  
+    expose_headers=["Content-Disposition"]  
+)  
+  
+# --- WINDOWS 11 PRIVATE NETWORK ACCESS (PNA) FIX ---  
+# Newer WebView2/Edge Chromium (default on Win11) blocks requests from the  
+# secure context (tauri.localhost) to 127.0.0.1 unless the preflight response  
+# carries Access-Control-Allow-Private-Network: true. FastAPI's CORSMiddleware  
+# does not emit this header, which caused the login screen to spin forever on  
+# Windows 11 while working on Windows 10 (older WebView2, no PNA enforcement).  
+from starlette.requests import Request as _StarletteRequest  
+from starlette.responses import Response as _StarletteResponse  
+  
+@app.middleware("http")  
+async def allow_private_network_access(request: _StarletteRequest, call_next):  
+    # Answer the CORS preflight (OPTIONS) directly with the PNA header so  
+    # WebView2 permits the actual request that follows.  
+    if request.method == "OPTIONS":  
+        response = _StarletteResponse(status_code=200)  
+    else:  
+        response = await call_next(request)  
+  
+    origin = request.headers.get("origin", "*")  
+    response.headers["Access-Control-Allow-Origin"] = origin  
+    response.headers["Access-Control-Allow-Methods"] = "*"  
+    response.headers["Access-Control-Allow-Headers"] = "*"  
+    response.headers["Access-Control-Allow-Private-Network"] = "true"  
+    return response
 
 # --- JWT AUTHENTICATION CONFIGURATION ---
 SECRET_KEY_PATH = os.path.join(BASE_DIR, "jwt_secret.key")
