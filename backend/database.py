@@ -15,17 +15,22 @@ import shutil
 old_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
 OLD_BASE_DIR = os.path.join(old_app_data, "PASADA_DATA")
 old_db_path = os.path.join(OLD_BASE_DIR, 'pasada_production.db')
+old_jwt_path = os.path.join(OLD_BASE_DIR, 'jwt_secret.key')
 
 # New cross-platform secure directory
 NEW_BASE_DIR = platformdirs.user_data_dir("PASADA", "LGU")
 new_db_path = os.path.join(NEW_BASE_DIR, 'pasada_production.db')
+new_jwt_path = os.path.join(NEW_BASE_DIR, 'jwt_secret.key')
 
 if not os.path.exists(NEW_BASE_DIR):
     os.makedirs(NEW_BASE_DIR)
 
-# 2. AUTO-MIGRATION: Rescues the old database so no data is lost
+# 2. AUTO-MIGRATION: Rescues the old database and JWT secrets so no data or session is lost
 if os.path.exists(old_db_path) and not os.path.exists(new_db_path):
     shutil.copy2(old_db_path, new_db_path)
+
+if os.path.exists(old_jwt_path) and not os.path.exists(new_jwt_path):
+    shutil.copy2(old_jwt_path, new_jwt_path)
 
 # INCREASED TIMEOUT to 30 seconds (Restored from non-ISO) to allow queries to queue
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{new_db_path}"
@@ -78,7 +83,6 @@ class FranchiseRecord(Base):
     is_active = Column(Boolean, default=True)
     processed_by = Column(String)
     updated_at = Column(DateTime, default=get_pht_now, onupdate=get_pht_now)
-    # REQUIRED FOR ISO MAIN.PY COMPATIBILITY
     is_deleted = Column(Boolean, default=False, index=True)
 
 class AuditLog(Base):
@@ -106,14 +110,42 @@ class RouteData(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- LEGACY DB MIGRATION HEALING ---
+# --- UNIVERSAL DB MIGRATION HEALING ---
 def ensure_schema_upgrades(engine):
     inspector = inspect(engine)
-    if "franchise_records" in inspector.get_table_names():
-        columns = [col['name'] for col in inspector.get_columns("franchise_records")]
-        if "is_deleted" not in columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE franchise_records ADD COLUMN is_deleted BOOLEAN DEFAULT 0"))
+    existing_tables = inspector.get_table_names()
+    
+    with engine.begin() as conn:
+        for table_name, model_class in [
+            ("users", User),
+            ("franchise_records", FranchiseRecord),
+            ("audit_logs", AuditLog),
+            ("system_settings", SystemSettings),
+            ("route_data", RouteData)
+        ]:
+            if table_name in existing_tables:
+                db_columns = [col['name'] for col in inspector.get_columns(table_name)]
+                for column in model_class.__table__.columns:
+                    if column.name not in db_columns:
+                        col_type_str = str(column.type).upper()
+                        
+                        if "INT" in col_type_str:
+                            sql_type = "INTEGER"
+                            default_val = "0"
+                        elif "BOOL" in col_type_str:
+                            sql_type = "BOOLEAN"
+                            default_val = "0"
+                        elif "FLOAT" in col_type_str:
+                            sql_type = "FLOAT"
+                            default_val = "0.0"
+                        elif "DATETIME" in col_type_str:
+                            sql_type = "DATETIME"
+                            default_val = "NULL"
+                        else:
+                            sql_type = "VARCHAR"
+                            default_val = "''"
+                            
+                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column.name} {sql_type} DEFAULT {default_val}"))
 
 ensure_schema_upgrades(engine)
 
