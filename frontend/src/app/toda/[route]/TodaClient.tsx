@@ -415,6 +415,8 @@ export default function TodaClient() {
           setWordSuccessId(member.id);
           showToast(`${filename} downloaded successfully.`, "success");
           setTimeout(() => setWordSuccessId(null), 2000);
+        } else {
+          showToast(`Failed to download ${filename}.`, "error");
         }
       } catch (error) {
         console.error("Download Error", error);
@@ -519,7 +521,7 @@ export default function TodaClient() {
           const a = document.createElement("a");
           a.style.display = 'none';
           a.href = url;
-          a.download = `${String(member.operator_name || "VACANT").replace(/\s+/g, '_')}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => {
@@ -543,14 +545,14 @@ export default function TodaClient() {
       try {
         const res = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
         if (res.ok) targetRecords = await res.json();
-      } catch (e) {
+      } catch {
         showToast("Failed to fetch ALL records.", "error");
       }
     } else if (batchScope === "CUSTOM" && customRoutes.length > 0) {
       try {
         const res = await fetchWithAuth(`${API_URL}/franchise/route/${customRoutes.join(',')}`);
         if (res.ok) targetRecords = await res.json();
-      } catch (e) {
+      } catch {
         showToast("Failed to fetch Custom records.", "error");
       }
     }
@@ -742,10 +744,8 @@ export default function TodaClient() {
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500">
       
-      {/* PAGE HEADER - Responsive Full-Width Layout */}
+      {/* PAGE HEADER */}
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-6">
-        
-        {/* Title Area */}
         <div className="shrink-0">
           <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
           <p className="text-muted-foreground mt-1 text-sm md:text-base">
@@ -753,10 +753,8 @@ export default function TodaClient() {
           </p>
         </div>
         
-        {/* Controls Area */}
         <div className="flex flex-col gap-3 w-full xl:w-auto">
-          
-          {/* Row 1: Filters & Sorting - Full Width Expansion */}
+          {/* Row 1: Filters & Sorting */}
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full">
             <div className="relative flex-1 w-full sm:w-auto">
               <ArrowUpDown className="absolute left-3 top-3.5 h-4 w-4 text-muted-foreground pointer-events-none" />
@@ -794,7 +792,7 @@ export default function TodaClient() {
             </Button>
           </div>
 
-          {/* Row 2: Actions - Full Width Expansion */}
+          {/* Row 2: Actions */}
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full xl:justify-end">
             <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
               {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
@@ -809,7 +807,6 @@ export default function TodaClient() {
               <PlusCircle className="mr-2 h-5 w-5" /> Add Operator
             </Button>
           </div>
-          
         </div>
       </div>
 
@@ -897,8 +894,20 @@ export default function TodaClient() {
           <DialogFooter className="flex gap-2 sm:justify-end">
             {viewMember && (
               <>
-                <Button variant="outline" onClick={() => handleDownloadWord(viewMember)} className="font-bold">
-                  {wordSuccessId === viewMember.id ? <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" /> : <FileText className="mr-2 h-4 w-4 text-blue-600" />} Download Word File
+                <Button 
+                  variant="outline" 
+                  onClick={() => handleDownloadWord(viewMember)} 
+                  disabled={isDownloadingId === viewMember.id}
+                  className="font-bold"
+                >
+                  {isDownloadingId === viewMember.id ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
+                  ) : wordSuccessId === viewMember.id ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4 text-blue-600" />
+                  )}
+                  Download Word File
                 </Button>
                 <Button onClick={() => handleNativePrint(viewMember)} disabled={isGeneratingId === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
                   {isGeneratingId === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
