@@ -35,6 +35,9 @@ export default function Login() {
   const [serverReady, setServerReady] = useState(false);  
   const [isCheckingSession, setIsCheckingSession] = useState(true);  
   
+  // DIAGNOSTIC STATE
+  const [connError, setConnError] = useState("");
+
   useEffect(() => {  
     if (typeof window !== "undefined" && (localStorage.getItem("token") || localStorage.getItem("pasada_token"))) {  
       router.replace("/dashboard");  
@@ -45,20 +48,20 @@ export default function Login() {
     let interval: NodeJS.Timeout;  
     const checkServer = async () => {  
       try {  
-        // WIN11 PNA FIX: keep this a CORS "simple request" — no custom headers  
-        // (Pragma/Cache-Control forced a preflight that WebView2 on Windows 11  
-        // blocked, causing the endless "Connecting to server..." spinner).  
-        // The ?_t= cache-buster alone prevents any cached response.  
         const res = await fetch(`http://127.0.0.1:43888/health?_t=${Date.now()}`, {  
           method: "GET",  
           cache: "no-store"  
         });  
         if (res.ok) {  
           setServerReady(true);  
+          setConnError(""); // Clear error on success
           if (interval) clearInterval(interval);  
-        }  
-      } catch (e) {  
+        } else {
+          setConnError(`Server returned status: ${res.status}`);
+        }
+      } catch (e: any) {  
         setServerReady(false);  
+        setConnError(e.message || String(e));
       }  
     };  
     checkServer();  
@@ -126,6 +129,13 @@ export default function Login() {
           <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">  
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />  
             <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>  
+            
+            {/* ON-SCREEN DIAGNOSTIC OUTPUT */}
+            {connError && (
+              <p className="text-[10px] font-mono text-red-500 max-w-xs text-center break-words opacity-80 px-4">
+                Diagnostic: {connError}
+              </p>
+            )}
           </div>  
         ) : (  
           <form onSubmit={handleLogin} className="space-y-5 animate-in fade-in">  
