@@ -390,7 +390,7 @@ export default function TodaClient() {
 
   const handleDownloadWord = (member: Member) => {
     if (isDownloadingId) return;
-    const filename = `MTOP_${member.sbn_no}.docx`;
+    const filename = `${member.sbn_no}.docx`;
     
     const action = async () => {
       setIsDownloadingId(member.id);
@@ -466,7 +466,7 @@ export default function TodaClient() {
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${member.sbn_no}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setIsGeneratingId(null);
@@ -519,7 +519,7 @@ export default function TodaClient() {
           const a = document.createElement("a");
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${String(member.operator_name || "VACANT").replace(/\s+/g, '_')}.docx`;
+          a.download = `${String(member.operator_name || "VACANT").replace(/\s+/g, '_')}.docx`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => {
