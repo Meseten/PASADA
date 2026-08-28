@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield, X, CheckCircle2, XCircle } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,32 +24,70 @@ interface FranchiseRecord {
   is_active: boolean;
 }
 
+interface Toast {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
+
 export default function InactiveLines() {
   const [records, setRecords] = useState<FranchiseRecord[]>([]);
   const [search, setSearch] = useState("");
   const [routeFilter, setRouteFilter] = useState("ALL");
   const [sortBy, setSortBy] = useState("ROUTE_ASC");
   const [loading, setLoading] = useState(true);
+  
+  // UX State Hooks
   const [isExporting, setIsExporting] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
+  const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null);
+  const [wordSuccessId, setWordSuccessId] = useState<string | null>(null);
   const [isPrinting, setIsPrinting] = useState<string | null>(null);
+  
+  // Duplicate Guard & Toast States
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [downloadedFiles, setDownloadedFiles] = useState<Set<string>>(new Set());
+  const [dupModalOpen, setDupModalOpen] = useState(false);
+  const [pendingDownload, setPendingDownload] = useState<{name: string, action: () => void} | null>(null);
+
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(50);
   const [isViewOpen, setIsViewOpen] = useState(false);
   const [viewMember, setViewMember] = useState<FranchiseRecord | null>(null);
 
-  useEffect(() => {
-    const fetchInactive = async () => {
-      try {
-        const res = await fetchWithAuth(`${API_URL}/franchise/status/inactive`);
-        if (res.ok) setRecords(await res.json());
-      } catch (e) {
-        console.error("Failed to fetch inactive operators", e);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchInactive();
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 4000);
   }, []);
+
+  const executeDownloadWithGuard = (filename: string, action: () => void) => {
+    if (downloadedFiles.has(filename)) {
+      setPendingDownload({ name: filename, action });
+      setDupModalOpen(true);
+    } else {
+      action();
+      setDownloadedFiles(prev => new Set(prev).add(filename));
+    }
+  };
+
+  const fetchInactive = useCallback(async () => {
+    try {
+      const res = await fetchWithAuth(`${API_URL}/franchise/status/inactive`);
+      if (res.ok) setRecords(await res.json());
+    } catch (e) {
+      console.error("Failed to fetch inactive operators", e);
+      showToast("Failed to fetch inactive records.", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    fetchInactive();
+  }, [fetchInactive]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -113,8 +151,12 @@ export default function InactiveLines() {
     setIsViewOpen(true);
   };
 
-  const handleExportInactive = async () => {
+  const executeExport = async () => {
     setIsExporting(true);
+    const year = new Date().getFullYear();
+    const routePrefix = routeFilter === "ALL" ? "ALL_ROUTES" : routeFilter;
+    const filename = `${routePrefix} ${year} - REVOKED.xlsx`;
+
     try {
       const response = await fetchWithAuth(`${API_URL}/export/masterlist/${routeFilter}?status_filter=REVOKED`);
       if (response.ok) {
@@ -123,10 +165,7 @@ export default function InactiveLines() {
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        
-        const year = new Date().getFullYear();
-        const routePrefix = routeFilter === "ALL" ? "ALL_ROUTES" : routeFilter;
-        a.download = `${routePrefix} ${year} - REVOKED.xlsx`;
+        a.download = filename;
         
         document.body.appendChild(a);
         a.click();
@@ -134,41 +173,67 @@ export default function InactiveLines() {
           document.body.removeChild(a);
           window.URL.revokeObjectURL(url);
         }, 1000);
+
+        setExportSuccess(true);
+        showToast("Inactive masterlist exported successfully.", "success");
+        setTimeout(() => setExportSuccess(false), 2000);
       } else {
-        alert("Failed to export inactive records.");
+        showToast("Failed to export inactive records.", "error");
       }
-    } catch (error) {
-      alert("Network error while exporting.");
+    } catch {
+      showToast("Network error while exporting.", "error");
     } finally {
       setIsExporting(false);
     }
   };
 
-  const handleDownloadWord = async (member: FranchiseRecord) => {
-    try {
-      const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
-      if (response.ok) {
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        
-        a.download = `${member.sbn_no}.docx`;
-        
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-        }, 1000);
-      }
-    } catch (error) {
-      console.error("Download Error", error);
-    }
+  const handleExportInactive = () => {
+    const year = new Date().getFullYear();
+    const routePrefix = routeFilter === "ALL" ? "ALL_ROUTES" : routeFilter;
+    const filename = `${routePrefix} ${year} - REVOKED.xlsx`;
+    executeDownloadWithGuard(filename, executeExport);
   };
 
-  // YOUR PROVEN PRINT LOGIC (100% Native Iframe)
+  const handleDownloadWord = (member: FranchiseRecord) => {
+    if (isDownloadingId) return;
+    const filename = `${member.sbn_no}.docx`;
+
+    const action = async () => {
+      setIsDownloadingId(member.id);
+      try {
+        const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
+        if (response.ok) {
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          a.download = filename;
+          
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+          }, 1000);
+
+          setWordSuccessId(member.id);
+          showToast(`${filename} downloaded successfully.`, "success");
+          setTimeout(() => setWordSuccessId(null), 2000);
+        } else {
+          showToast(`Failed to download ${filename}.`, "error");
+        }
+      } catch (error) {
+        console.error("Download Error", error);
+        showToast("Network error while downloading Word file.", "error");
+      } finally {
+        setIsDownloadingId(null);
+      }
+    };
+
+    executeDownloadWithGuard(filename, action);
+  };
+
   const handleNativePrint = async (member: FranchiseRecord) => {
     if (isPrinting) return;
     setIsPrinting(member.id);
@@ -186,8 +251,6 @@ export default function InactiveLines() {
           
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
-          
-          // Exact dimensions and off-screen positioning from your old working code
           iframe.style.position = 'fixed';
           iframe.style.right = '-2000px';
           iframe.style.bottom = '-2000px';
@@ -197,7 +260,6 @@ export default function InactiveLines() {
           
           document.body.appendChild(iframe);
           
-          // Exact 1.5s timeout from your old working code (Bypasses WebView2 onload bug)
           setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
@@ -206,10 +268,10 @@ export default function InactiveLines() {
               console.error(e);
             }
             setIsPrinting(null);
+            showToast(`Print dialog opened for ${member.sbn_no}.`, "success");
             setTimeout(() => window.URL.revokeObjectURL(url), 300000);
           }, 1500); 
         } else {
-          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
@@ -217,21 +279,24 @@ export default function InactiveLines() {
           document.body.appendChild(a);
           a.click();
           setIsPrinting(null);
+          showToast(`Downloaded ${member.sbn_no}.docx successfully.`, "success");
           setTimeout(() => document.body.removeChild(a), 100);
         }
       } else {
         setIsPrinting(null);
+        showToast("Print generation failed.", "error");
       }
     } catch (error) {
       console.error(error);
       setIsPrinting(null);
+      showToast("Network error during print generation.", "error");
     }
   };
 
   return (
     <div className="p-6 md:p-8 animate-in fade-in duration-500 min-h-screen bg-muted/5">
       
-      {/* HEADER WITH CONTROLS - GILID RIGHT ALIGNED */}
+      {/* HEADER WITH CONTROLS */}
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-8">
         <div className="flex items-center gap-3 shrink-0">
           <ArchiveX className="w-8 h-8 text-red-600" />
@@ -274,7 +339,7 @@ export default function InactiveLines() {
           </div>
 
           <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
-            {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
+            {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
             Export Excel
           </Button>
 
@@ -352,8 +417,20 @@ export default function InactiveLines() {
           <DialogFooter className="flex gap-2 sm:justify-end">
             {viewMember && (
               <>
-                <Button variant="outline" onClick={() => handleDownloadWord(viewMember)} className="font-bold">
-                  <FileText className="mr-2 h-4 w-4 text-blue-600" /> Download Word File
+                <Button 
+                  variant="outline" 
+                  onClick={() => handleDownloadWord(viewMember)} 
+                  disabled={isDownloadingId === viewMember.id}
+                  className="font-bold"
+                >
+                  {isDownloadingId === viewMember.id ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
+                  ) : wordSuccessId === viewMember.id ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4 text-blue-600" />
+                  )}
+                  Download Word File
                 </Button>
                 <Button onClick={() => handleNativePrint(viewMember)} disabled={isPrinting === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
                   {isPrinting === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
@@ -361,6 +438,35 @@ export default function InactiveLines() {
                 </Button>
               </>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* DUPLICATE DOWNLOAD GUARD MODAL */}
+      <Dialog open={dupModalOpen} onOpenChange={setDupModalOpen}>
+        <DialogContent className="sm:max-w-[400px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold flex items-center gap-2">
+              <Download className="h-5 w-5 text-orange-500" /> Re-download File?
+            </DialogTitle>
+            <DialogDescription className="text-sm mt-2 font-medium">
+              You have already downloaded <span className="font-bold text-foreground">"{pendingDownload?.name}"</span> during this session. Do you want to download it again?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4 flex gap-2">
+            <Button variant="outline" onClick={() => { setDupModalOpen(false); setPendingDownload(null); }} className="font-bold">
+              Cancel
+            </Button>
+            <Button 
+              onClick={() => {
+                if (pendingDownload) pendingDownload.action();
+                setDupModalOpen(false);
+                setPendingDownload(null);
+              }} 
+              className="font-bold bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              Download Again
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -447,6 +553,17 @@ export default function InactiveLines() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* CUSTOM TOAST CONTAINER */}
+      <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 pointer-events-none">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-800 border-red-200'}`}>
+            {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
+            <span className="flex-1">{toast.message}</span>
+            <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="ml-4 opacity-50 hover:opacity-100 transition-opacity shrink-0"><X className="h-4 w-4" /></button>
+          </div>
+        ))}
       </div>
     </div>
   );
