@@ -150,19 +150,11 @@ app.add_middleware(
     expose_headers=["Content-Disposition"]  
 )  
   
-# --- WINDOWS 11 PRIVATE NETWORK ACCESS (PNA) FIX ---  
-# Newer WebView2/Edge Chromium (default on Win11) blocks requests from the  
-# secure context (tauri.localhost) to 127.0.0.1 unless the preflight response  
-# carries Access-Control-Allow-Private-Network: true. FastAPI's CORSMiddleware  
-# does not emit this header, which caused the login screen to spin forever on  
-# Windows 11 while working on Windows 10 (older WebView2, no PNA enforcement).  
 from starlette.requests import Request as _StarletteRequest  
 from starlette.responses import Response as _StarletteResponse  
   
 @app.middleware("http")  
 async def allow_private_network_access(request: _StarletteRequest, call_next):  
-    # Answer the CORS preflight (OPTIONS) directly with the PNA header so  
-    # WebView2 permits the actual request that follows.  
     if request.method == "OPTIONS":  
         response = _StarletteResponse(status_code=200)  
     else:  
@@ -170,7 +162,7 @@ async def allow_private_network_access(request: _StarletteRequest, call_next):
   
     origin = request.headers.get("origin", "*")  
     response.headers["Access-Control-Allow-Origin"] = origin  
-    response.headers["Access-Control-Allow-Methods"] = "*"  
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"  
     response.headers["Access-Control-Allow-Headers"] = "*"  
     response.headers["Access-Control-Allow-Private-Network"] = "true"  
     return response
@@ -1220,12 +1212,67 @@ def get_audit_logs(current_user: User = Depends(get_current_user), db: Session =
 
 @app.get("/franchise/route/{route_name}")
 def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name, FranchiseRecord.is_deleted == False).all()
-    deduped = deduplicate_records_by_base_sbn(records_query)
-    for r in deduped:
-        is_vac = not r.operator_name or str(r.operator_name).strip() == ""
-        r.sbn_no = format_sbn_with_year(r.sbn_no, r.issue_date, is_vac)
-    return [attach_status(r) for r in sorted(deduped, key=get_sbn_sort_key)]
+    route_upper = route_name.upper()
+    
+    # CASE 1: Fetch ALL Routes
+    if route_upper == "ALL":
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
+        unique_map = {}
+        for r in records:
+            base_id = normalize_base_sbn(r.sbn_no)
+            r.sbn_no = base_id
+            route_key = (r.route, base_id)
+            if route_key not in unique_map:
+                unique_map[route_key] = r
+            else:
+                curr = unique_map[route_key]
+                curr_year = get_record_year(curr.issue_date)
+                new_year = get_record_year(r.issue_date)
+                if new_year > curr_year:
+                    unique_map[route_key] = r
+                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr.operator_name).strip()):
+                    unique_map[route_key] = r
+        deduped_records = list(unique_map.values())
+        
+    # CASE 2: Fetch CUSTOM routes (Comma separated)
+    elif "," in route_upper:
+        route_list = [r.strip() for r in route_upper.split(",")]
+        records = db.query(FranchiseRecord).filter(
+            FranchiseRecord.route.in_(route_list), 
+            FranchiseRecord.is_deleted == False
+        ).all()
+        unique_map = {}
+        for r in records:
+            base_id = normalize_base_sbn(r.sbn_no)
+            r.sbn_no = base_id
+            route_key = (r.route, base_id)
+            if route_key not in unique_map:
+                unique_map[route_key] = r
+            else:
+                curr = unique_map[route_key]
+                curr_year = get_record_year(curr.issue_date)
+                new_year = get_record_year(r.issue_date)
+                if new_year > curr_year:
+                    unique_map[route_key] = r
+                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr.operator_name).strip()):
+                    unique_map[route_key] = r
+        deduped_records = list(unique_map.values())
+        
+    # CASE 3: Fetch SINGLE Exact Route (Current behavior)
+    else:
+        records = db.query(FranchiseRecord).filter(
+            FranchiseRecord.route == route_upper, 
+            FranchiseRecord.is_deleted == False
+        ).all()
+        deduped_records = deduplicate_records_by_base_sbn(records)
+
+    # Format the SBNs and attach status
+    for record in deduped_records:
+        is_vac = not record.operator_name or str(record.operator_name).strip() == ""
+        record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant=is_vac)
+
+    sorted_records = sorted(deduped_records, key=get_sbn_sort_key)
+    return [attach_status(r) for r in sorted_records]
 
 @app.get("/franchise/status/inactive")
 def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

@@ -31,7 +31,8 @@ export default function Signup() {
     let interval: NodeJS.Timeout;
     const checkServer = async () => {
       try {
-        const res = await fetch(`${API_URL}/stats/global`);
+        // FIX: Probing the unauthenticated /health endpoint unblocks the UI from spinning infinitely
+        const res = await fetch(`${API_URL}/health?_t=${Date.now()}`, { method: "GET", cache: "no-store" });
         if (res.ok) {
           setServerReady(true);
           clearInterval(interval);
@@ -40,6 +41,7 @@ export default function Signup() {
         setServerReady(false);
       }
     };
+    
     checkServer();
     interval = setInterval(checkServer, 1500);
     return () => clearInterval(interval);
@@ -58,10 +60,10 @@ export default function Signup() {
       setError("Password must be at least 8 characters.");
       return;
     }
-
+    
     setLoading(true);
     setError("");
-
+    
     try {
       const res = await fetch(`${API_URL}/signup`, {
         method: "POST",
@@ -74,7 +76,7 @@ export default function Signup() {
           role: "Clerk", 
         }),
       });
-
+      
       if (res.ok) {
         router.push("/");
       } else {

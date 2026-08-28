@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2 } from "lucide-react"
 import { API_URL, fetchWithAuth } from "@/lib/api"
 
 interface Member {
@@ -36,6 +36,19 @@ interface LogEntry {
   details: string;
 }
 
+interface Toast {
+  id: number;
+  message: string;
+  type: 'success' | 'error';
+}
+
+const KNOWN_ROUTES = [
+  'BATODA', 'BBSTODA', 'CNTODA', 'CO1TODA', 'CO2TODA', 'DOMMSATODA', 
+  'HCTODA', 'HMTODA', 'HVRTODA', 'MALATODA', 'MMGTODA', 'MMTODA', 
+  'NCTODA', 'NPTODA', 'PAL1TODA', 'PAL2TODA', 'SABANGTODA', 'SMSTODA', 
+  'TCTODA', 'VASTODA', 'VISTODA'
+];
+
 export default function TodaClient() {
   const params = useParams()
   const pathname = usePathname()
@@ -54,13 +67,19 @@ export default function TodaClient() {
   
   const [isGeneratingId, setIsGeneratingId] = useState<string | null>(null)
   const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null)
+  const [wordSuccessId, setWordSuccessId] = useState<string | null>(null)
+  
   const [isExporting, setIsExporting] = useState(false)
+  const [exportSuccess, setExportSuccess] = useState(false)
+  
   const [isDeleting, setIsDeleting] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [selectedSbns, setSelectedSbns] = useState<string[]>([])
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
+  const [batchScope, setBatchScope] = useState("THIS")
+  const [customRoutes, setCustomRoutes] = useState<string[]>([safeRouteName])
   const [batchSpecificDate, setBatchSpecificDate] = useState("")
   const [batchStartDate, setBatchStartDate] = useState("")
   const [batchEndDate, setBatchEndDate] = useState("")
@@ -71,6 +90,11 @@ export default function TodaClient() {
   const [activeMember, setActiveMember] = useState<Member | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [rowsPerPage, setRowsPerPage] = useState(50)
+
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const [downloadedFiles, setDownloadedFiles] = useState<Set<string>>(new Set())
+  const [dupModalOpen, setDupModalOpen] = useState(false)
+  const [pendingDownload, setPendingDownload] = useState<{name: string, action: () => void} | null>(null)
 
   const [formData, setFormData] = useState({
     id: "",
@@ -88,6 +112,24 @@ export default function TodaClient() {
   })
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    const id = Date.now()
+    setToasts(prev => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 4000)
+  }, [])
+
+  const executeDownloadWithGuard = (filename: string, action: () => void) => {
+    if (downloadedFiles.has(filename)) {
+      setPendingDownload({ name: filename, action });
+      setDupModalOpen(true);
+    } else {
+      action();
+      setDownloadedFiles(prev => new Set(prev).add(filename));
+    }
+  };
 
   const formatSafeDate = (dateStr: string | null | undefined) => {
     if (!dateStr) return "None";
@@ -112,8 +154,9 @@ export default function TodaClient() {
       }
     } catch (error) {
       console.error("Failed to fetch operators", error)
+      showToast("Failed to fetch records. Ensure backend is running.", "error")
     }
-  }, [safeRouteName])
+  }, [safeRouteName, showToast])
 
   useEffect(() => {
     const initialLoadId = window.setTimeout(() => {
@@ -230,45 +273,37 @@ export default function TodaClient() {
   }
 
   const handleRefreshDatabase = async () => {
-    const confirmRefresh = window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?");
-    if (!confirmRefresh) return;
-
     setIsRefreshing(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/admin/refresh-db`, { method: "POST" });
       if (res.ok) {
-        const result = await res.json();
-        alert(result.message || "Database refreshed successfully!");
-        window.location.reload(); 
+        await fetchMembers();
+        showToast("Database refreshed successfully!", "success");
       } else {
         const err = await res.json();
-        alert(err.detail || "Failed to refresh database.");
+        showToast(err.detail || "Failed to refresh database.", "error");
       }
     } catch {
-      alert("Network error while trying to refresh the database.");
+      showToast("Network error while trying to refresh the database.", "error");
     } finally {
       setIsRefreshing(false);
     }
   };
 
   const handleDeleteOne = async (member: Member) => {
-    const confirmDelete = window.confirm(`Are you sure you want to delete operator ${member.sbn_no} (${member.operator_name || "VACANT"})?`);
-    if (!confirmDelete) return;
-
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
       if (res.ok) {
-        const result = await res.json();
-        alert(result.message || "Operator deleted successfully.");
         setSelectedSbns(prev => prev.filter(id => id !== member.sbn_no));
-        window.location.reload(); 
+        await fetchMembers();
+        showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
       } else {
         const err = await res.json();
-        alert(err.detail || "Failed to delete operator.");
+        showToast(err.detail || "Failed to delete operator.", "error");
       }
     } catch {
-      alert("Network error while trying to delete operator.");
+      showToast("Network error while trying to delete operator.", "error");
     } finally {
       setIsDeleting(false);
     }
@@ -276,10 +311,6 @@ export default function TodaClient() {
 
   const handleBulkDelete = async () => {
     if (selectedSbns.length === 0) return;
-    
-    const confirmDelete = window.confirm(`Are you sure you want to delete ${selectedSbns.length} selected operator(s)? This action cannot be undone.`);
-    if (!confirmDelete) return;
-    
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/bulk-delete`, {
@@ -288,16 +319,15 @@ export default function TodaClient() {
         body: JSON.stringify({ sbn_list: selectedSbns })
       });
       if (res.ok) {
-        const result = await res.json();
-        alert(result.message || `${selectedSbns.length} operator(s) deleted successfully.`);
         setSelectedSbns([]);
-        window.location.reload(); 
+        await fetchMembers();
+        showToast(`${selectedSbns.length} operator(s) deleted successfully.`, "success");
       } else {
         const err = await res.json();
-        alert(err.detail || "Failed to delete selected operators.");
+        showToast(err.detail || "Failed to delete selected operators.", "error");
       }
     } catch {
-      alert("Network error while deleting selected operators.");
+      showToast("Network error while deleting selected operators.", "error");
     } finally {
       setIsDeleting(false);
     }
@@ -321,7 +351,7 @@ export default function TodaClient() {
     }
   };
 
-  const handleExportMasterlist = async () => {
+  const executeExport = async () => {
     setIsExporting(true)
     try {
       const response = await fetchWithAuth(`${API_URL}/export/masterlist/${safeRouteName}?status_filter=${statusFilter}`);
@@ -331,72 +361,87 @@ export default function TodaClient() {
         const a = document.createElement('a')
         a.style.display = 'none'
         a.href = url
-        a.download = `${safeRouteName} ${new Date().getFullYear()} - ${statusFilter.toUpperCase()}.xlsx`
+        const filename = `${safeRouteName} ${new Date().getFullYear()} - ${statusFilter.toUpperCase()}.xlsx`;
+        a.download = filename;
         document.body.appendChild(a)
         a.click()
         setTimeout(() => {
           document.body.removeChild(a)
           window.URL.revokeObjectURL(url)
         }, 1000)
+        
+        setExportSuccess(true);
+        showToast(`Masterlist exported successfully.`, "success");
+        setTimeout(() => setExportSuccess(false), 2000);
       } else {
-        alert("Failed to export masterlist.")
+        showToast("Failed to export masterlist.", "error")
       }
     } catch {
-      alert("Network error while exporting.")
+      showToast("Network error while exporting.", "error")
     } finally {
       setIsExporting(false)
     }
+  }
+
+  const handleExportMasterlist = () => {
+    const filename = `${safeRouteName} ${new Date().getFullYear()} - ${statusFilter.toUpperCase()}.xlsx`;
+    executeDownloadWithGuard(filename, executeExport);
   };
 
-  const handleDownloadWord = async (member: Member) => {
+  const handleDownloadWord = (member: Member) => {
     if (isDownloadingId) return;
-    setIsDownloadingId(member.id);
+    const filename = `MTOP_${member.sbn_no}.docx`;
     
-    try {
-      const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
-      
-      if (response.ok) {
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        a.download = `${member.sbn_no}.docx`;
-        document.body.appendChild(a);
-        a.click();
+    const action = async () => {
+      setIsDownloadingId(member.id);
+      try {
+        const response = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
         
-        setTimeout(() => {
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-        }, 1000);
+        if (response.ok) {
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          
+          setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+          }, 1000);
+
+          setWordSuccessId(member.id);
+          showToast(`${filename} downloaded successfully.`, "success");
+          setTimeout(() => setWordSuccessId(null), 2000);
+        }
+      } catch (error) {
+        console.error("Download Error", error);
+        showToast(`Failed to download ${filename}.`, "error");
+      } finally {
+        setIsDownloadingId(null);
       }
-    } catch (error) {
-      console.error("Download Error", error);
-    } finally {
-      setIsDownloadingId(null);
-    }
+    };
+
+    executeDownloadWithGuard(filename, action);
   };
 
-  // YOUR PROVEN PRINT LOGIC (100% Native Iframe)
   const handleNativePrint = async (member: Member) => {
     if (isGeneratingId) return;
     setIsGeneratingId(member.id);
 
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
-      
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
-        
         if (blob.type === "application/pdf") {
           const existingIframe = document.getElementById('pasada-print-frame');
           if (existingIframe) document.body.removeChild(existingIframe);
           
           const iframe = document.createElement('iframe');
           iframe.id = 'pasada-print-frame';
-          
-          // Exact dimensions and off-screen positioning from your old working code
           iframe.style.position = 'fixed';
           iframe.style.right = '-2000px';
           iframe.style.bottom = '-2000px';
@@ -406,7 +451,6 @@ export default function TodaClient() {
           
           document.body.appendChild(iframe);
           
-          // Exact 1.5s timeout from your old working code
           setTimeout(() => {
             try {
               iframe.contentWindow?.focus();
@@ -415,10 +459,10 @@ export default function TodaClient() {
               console.error(e);
             }
             setIsGeneratingId(null);
+            showToast(`Print dialog opened for ${member.sbn_no}.`, "success");
             setTimeout(() => window.URL.revokeObjectURL(url), 300000);
           }, 1500); 
         } else {
-          // DOCX Fallback
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
@@ -426,41 +470,37 @@ export default function TodaClient() {
           document.body.appendChild(a);
           a.click();
           setIsGeneratingId(null);
+          showToast(`Downloaded ${member.sbn_no}.docx successfully.`, "success");
           setTimeout(() => document.body.removeChild(a), 100);
         }
       } else {
         setIsGeneratingId(null);
+        showToast("Print generation failed.", "error");
       }
     } catch (error) {
-      console.error("Print failed", error);
+      console.error(error);
       setIsGeneratingId(null);
+      showToast("Network error during print generation.", "error");
     }
   };
 
-  // YOUR PROVEN BATCH PRINT LOGIC (100% Native Iframe)
   const downloadBatchDocument = async (member: Member) => {
     try {
       const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
-      
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
-        
         if (blob.type === "application/pdf") {
           const iframe = document.createElement('iframe');
-          
-          // Exact dimensions and off-screen positioning from your old working code
           iframe.style.position = 'fixed';
           iframe.style.right = '-2000px';
           iframe.style.bottom = '-2000px';
           iframe.style.width = '500px';
           iframe.style.height = '500px';
           iframe.src = url;
-          
           document.body.appendChild(iframe);
           
           return new Promise<void>((resolve) => {
-            // Exact 1.5s timeout from your old working code
             setTimeout(() => {
               try {
                 iframe.contentWindow?.focus();
@@ -497,10 +537,34 @@ export default function TodaClient() {
     setBatchPrinting(true)
     let targetRecords: Member[] = []
     
+    if (batchScope === "THIS") {
+      targetRecords = members;
+    } else if (batchScope === "ALL") {
+      try {
+        const res = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
+        if (res.ok) targetRecords = await res.json();
+      } catch (e) {
+        showToast("Failed to fetch ALL records.", "error");
+      }
+    } else if (batchScope === "CUSTOM" && customRoutes.length > 0) {
+      try {
+        const res = await fetchWithAuth(`${API_URL}/franchise/route/${customRoutes.join(',')}`);
+        if (res.ok) targetRecords = await res.json();
+      } catch (e) {
+        showToast("Failed to fetch Custom records.", "error");
+      }
+    }
+
+    if (targetRecords.length === 0) {
+      showToast("No route records found for selected scope.", "error")
+      setBatchPrinting(false)
+      return
+    }
+    
     const now = new Date()
     const todayString = getLocalDateString(now);
     
-    targetRecords = members.filter(record => {
+    const filteredTargetRecords = targetRecords.filter(record => {
       if (!record.issue_date) return false
       
       const recordDateObj = new Date(record.issue_date)
@@ -525,23 +589,24 @@ export default function TodaClient() {
       }
     })
     
-    if (targetRecords.length === 0) {
-      alert("No records found for the selected date filter.")
+    if (filteredTargetRecords.length === 0) {
+      showToast("No records found for the selected date filter.", "error")
       setBatchPrinting(false)
       return
     }
     
-    setBatchProgress({ current: 0, total: targetRecords.length })
+    setBatchProgress({ current: 0, total: filteredTargetRecords.length })
 
-    for (let i = 0; i < targetRecords.length; i++) {
-      setBatchProgress({ current: i + 1, total: targetRecords.length })
-      await downloadBatchDocument(targetRecords[i])
+    for (let i = 0; i < filteredTargetRecords.length; i++) {
+      setBatchProgress({ current: i + 1, total: filteredTargetRecords.length })
+      await downloadBatchDocument(filteredTargetRecords[i])
       await new Promise(resolve => setTimeout(resolve, 800))
     }
 
     setBatchPrinting(false)
     setBatchModalOpen(false)
     setBatchProgress({ current: 0, total: 0 })
+    showToast(`Batch print complete. Processed ${filteredTargetRecords.length} document(s).`, "success");
   };
 
   const handleOpenHistory = async (member: Member) => {
@@ -592,13 +657,14 @@ export default function TodaClient() {
         } else {
           setIsEditOpen(false)
         }
-        window.location.reload();
+        await fetchMembers();
+        showToast(`Record ${isAdd ? "added" : "updated"} successfully.`, "success");
       } else {
         const err = await response.json()
-        alert(err.detail || "Failed to save record.")
+        showToast(err.detail || "Failed to save record.", "error")
       }
     } catch {
-      alert("Network error while trying to save record.")
+      showToast("Network error while trying to save record.", "error")
     }
   };
 
@@ -722,7 +788,7 @@ export default function TodaClient() {
               </select>
             </div>
 
-            <Button variant="outline" onClick={handleRefreshDatabase} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
+            <Button variant="outline" onClick={() => { if(window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
               {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
               Refresh DB
             </Button>
@@ -731,7 +797,7 @@ export default function TodaClient() {
           {/* Row 2: Actions - Full Width Expansion */}
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full xl:justify-end">
             <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
-              {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
+              {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
               Export Excel
             </Button>
             
@@ -832,7 +898,7 @@ export default function TodaClient() {
             {viewMember && (
               <>
                 <Button variant="outline" onClick={() => handleDownloadWord(viewMember)} className="font-bold">
-                  <FileText className="mr-2 h-4 w-4 text-blue-600" /> Download Word File
+                  {wordSuccessId === viewMember.id ? <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" /> : <FileText className="mr-2 h-4 w-4 text-blue-600" />} Download Word File
                 </Button>
                 <Button onClick={() => handleNativePrint(viewMember)} disabled={isGeneratingId === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
                   {isGeneratingId === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
@@ -844,15 +910,44 @@ export default function TodaClient() {
         </DialogContent>
       </Dialog>
 
+      {/* DUPLICATE DOWNLOAD GUARD MODAL */}
+      <Dialog open={dupModalOpen} onOpenChange={setDupModalOpen}>
+        <DialogContent className="sm:max-w-[400px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold flex items-center gap-2">
+              <Download className="h-5 w-5 text-orange-500" /> Re-download File?
+            </DialogTitle>
+            <DialogDescription className="text-sm mt-2 font-medium">
+              You have already downloaded <span className="font-bold text-foreground">"{pendingDownload?.name}"</span> during this session. Do you want to download it again?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4 flex gap-2">
+            <Button variant="outline" onClick={() => { setDupModalOpen(false); setPendingDownload(null); }} className="font-bold">
+              Cancel
+            </Button>
+            <Button 
+              onClick={() => {
+                if (pendingDownload) pendingDownload.action();
+                setDupModalOpen(false);
+                setPendingDownload(null);
+              }} 
+              className="font-bold bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              Download Again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* BATCH PRINT DIALOG */}
       <Dialog open={batchModalOpen} onOpenChange={setBatchModalOpen}>
-        <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl">
+        <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold flex items-center gap-2">
               <Printer className="h-6 w-6 text-blue-600" /> Print Documents
             </DialogTitle>
             <DialogDescription>
-              Select date filter for document printing.
+              Select scope and date filter for document batch printing.
             </DialogDescription>
           </DialogHeader>
           
@@ -874,6 +969,46 @@ export default function TodaClient() {
             </div>
           ) : (
             <div className="space-y-6 mt-4">
+              {/* SCOPE SELECTOR */}
+              <div className="space-y-3">
+                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                  <Shield size={14} /> Batch Scope
+                </Label>
+                <select
+                  value={batchScope}
+                  onChange={(e) => setBatchScope(e.target.value)}
+                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                >
+                  <option value="THIS">This TODA Only ({safeRouteName})</option>
+                  <option value="ALL">All TODAs (Whole System)</option>
+                  <option value="CUSTOM">Custom Selection</option>
+                </select>
+              </div>
+
+              {/* CUSTOM ROUTE CHECKLIST */}
+              {batchScope === "CUSTOM" && (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select TODAs</Label>
+                  <div className="grid grid-cols-2 gap-2 p-3 border border-border rounded-lg bg-muted/10 max-h-48 overflow-y-auto">
+                    {KNOWN_ROUTES.map(route => (
+                      <label key={route} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={customRoutes.includes(route)}
+                          onChange={(e) => {
+                            if (e.target.checked) setCustomRoutes(prev => [...prev, route]);
+                            else setCustomRoutes(prev => prev.filter(r => r !== route));
+                          }}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        {route}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* DATE FILTER */}
               <div className="space-y-3">
                 <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
                   <Filter size={14} /> Date Filter
@@ -930,7 +1065,8 @@ export default function TodaClient() {
                 onClick={executeBatchPrint}
                 disabled={
                   (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
-                  (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate))
+                  (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate)) ||
+                  (batchScope === "CUSTOM" && customRoutes.length === 0)
                 }
                 className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
               >
@@ -1244,6 +1380,17 @@ export default function TodaClient() {
           </div>
         </CardContent>
       </Card>
+
+      {/* CUSTOM TOAST CONTAINER */}
+      <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 pointer-events-none">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-800 border-red-200'}`}>
+            {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
+            <span className="flex-1">{toast.message}</span>
+            <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="ml-4 opacity-50 hover:opacity-100 transition-opacity shrink-0"><X className="h-4 w-4" /></button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
