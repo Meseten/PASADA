@@ -333,7 +333,8 @@ def parse_safe_date(raw_date, fallback_year):
 
 def get_base_sbn(sbn):
     sbn = str(sbn).strip().upper()
-    match = re.match(r'^([A-Z0-9]+[\-\_]\d+)[\-\_](\d{2}|\d{4})$', sbn)
+    # FIX: Restrict year matching to 2-digits OR plausible 4-digit years (19xx, 20xx) so we don't accidentally match the 4-digit sequence "1000"
+    match = re.match(r'^([A-Z0-9]+[\-\_]\d+)[\-\_](\d{2}|19\d{2}|20\d{2})$', sbn)
     if match:
         return match.group(1)
     return sbn
@@ -341,7 +342,8 @@ def get_base_sbn(sbn):
 def normalize_base_sbn(sbn):
     if pd.isna(sbn) or not sbn: return ""
     sbn = str(sbn).strip().upper()
-    match = re.match(r'^(.*?)[\s\-\_]+(\d{2}|\d{4})$', sbn)
+    # FIX: Restrict year matching here too
+    match = re.match(r'^(.*?)[\s\-\_]+(\d{2}|19\d{2}|20\d{2})$', sbn)
     base = match.group(1) if match else sbn
         
     match = re.match(r'^(.*?)[\s\-\_]+(\d+)$', base)
@@ -428,7 +430,8 @@ def generate_next_sbn(db: Session, route: str) -> str:
         prefix = clean_route if len(clean_route) <= 4 else clean_route[:3]
         
     next_num = max(max_num + 1, 1)
-    while next_num == 0 or str(next_num).endswith("000") or str(next_num).endswith("0000"):
+    # FIX: Safely ensure we don't accidentally skip valid sequences like 1000
+    while next_num == 0:
         next_num += 1
         
     return f"{prefix}-{next_num:0{padding_len}d}"
@@ -572,7 +575,9 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
     
     for r in all_records:
         sbn_str = str(r.sbn_no).strip().upper()
-        if sbn_str in ["0", "00", "000", "0000", ""] or sbn_str.endswith("-000") or sbn_str.endswith("-0000") or "-000-" in sbn_str:
+        # FIX: Only drop true placeholders (where the extracted sequence integer is exactly 0)
+        sbn_int = extract_sbn_integer(sbn_str)
+        if not sbn_str or sbn_int == 0:
             r.is_deleted = True
             r.updated_at = get_pht_now()
             deleted_count += 1
@@ -1060,7 +1065,9 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                     existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, existing_record.issue_date, is_vacant)
                     imported_count += 1
                 else:
-                    if "000" not in incoming_base_sbn:
+                    # FIX: Safely extract integer to drop true placeholders instead of blindly rejecting if it contains "000"
+                    sbn_int = extract_sbn_integer(incoming_base_sbn)
+                    if sbn_int is None or sbn_int != 0:
                         record = FranchiseRecord(
                             sbn_no=format_sbn_with_year(incoming_base_sbn, issue_date, is_vacant),
                             operator_name=extracted['operator_name'].upper() if extracted['operator_name'] else "",

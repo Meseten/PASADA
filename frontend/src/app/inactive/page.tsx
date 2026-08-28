@@ -213,7 +213,7 @@ export default function InactiveLines() {
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `MTOP_${member.sbn_no}.docx`;
+          a.download = `${member.sbn_no}.docx`;
           document.body.appendChild(a);
           a.click();
           setIsPrinting(null);
