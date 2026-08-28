@@ -83,6 +83,7 @@ class FranchiseRecord(Base):
     is_active = Column(Boolean, default=True)
     processed_by = Column(String)
     updated_at = Column(DateTime, default=get_pht_now, onupdate=get_pht_now)
+    # REQUIRED FOR ISO MAIN.PY COMPATIBILITY
     is_deleted = Column(Boolean, default=False, index=True)
 
 class AuditLog(Base):
