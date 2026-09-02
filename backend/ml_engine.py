@@ -1,7 +1,10 @@
+# 25010 Characteristic: Reliability
+
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import FranchiseRecord, RouteData
@@ -66,18 +69,29 @@ def run_kmeans_clustering(db: Session, target_route: str):
         
         # DYNAMIC CLUSTERING TO PREVENT SKLEARN CRASHES
         unique_densities = df['density'].nunique()
+        silhouette_val = 0.0
+        
         if len(df) < 3 or unique_densities < 2:
             df['cluster'] = 0
             df['severity'] = 0
         else:
-            features = ['fleet_size', 'population', 'road_length']
+            # FIX: Cluster directly on density to ensure strict monotonic severity mapping
+            features = ['density']
             X = df[features]
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
             
             n_clusters = min(3, unique_densities)
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            df['cluster'] = kmeans.fit_predict(X_scaled)
+            labels = kmeans.fit_predict(X_scaled)
+            df['cluster'] = labels
+            
+            # Calculate silhouette score for model confidence
+            if len(df) >= 3 and n_clusters >= 2:
+                try:
+                    silhouette_val = silhouette_score(X_scaled, labels)
+                except Exception:
+                    silhouette_val = 0.0
             
             cluster_densities = df.groupby('cluster')['density'].mean().sort_values()
             ranking_map = {cluster_id: rank for rank, (cluster_id, _) in enumerate(cluster_densities.items())}
@@ -116,6 +130,7 @@ def run_kmeans_clustering(db: Session, target_route: str):
             "forecast_period": status_map.get(severity, "GREEN CLUSTER: Under-saturated (Accept Applications)"), 
             "expected_renewals": fleet_val,  
             "model_confidence": f"Density Score: {round(density_val, 2)}",
+            "silhouette": round(silhouette_val, 2),
             "feature_importances": importance_data,
             "historical_trend": [] 
         }]
