@@ -334,12 +334,12 @@ export default function Dashboard() {
               </div>
             ) : summaryData ? (
               <div className="space-y-4">
-                <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-xl flex justify-between items-center">
+                {/* <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-xl flex justify-between items-center">
                   <span className="text-sm font-bold text-blue-800 dark:text-blue-300">AS OF DATE</span>
                   <Badge variant="outline" className="bg-white dark:bg-slate-900 border-blue-300 dark:border-blue-700 font-bold text-sm">
                     {summaryData.as_of_date}
                   </Badge>
-                </div>
+                </div> */}
                 
                 <div className="border rounded-xl overflow-hidden shadow-sm">
                   <Table>
