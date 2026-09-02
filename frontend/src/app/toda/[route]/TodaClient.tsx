@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2 } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe } from "lucide-react"
 import { API_URL, fetchWithAuth } from "@/lib/api"
 
 interface Member {
@@ -56,6 +56,11 @@ export default function TodaClient() {
   const safeRouteName = (params?.route as string)?.toUpperCase() || fallbackRoute
 
   const [members, setMembers] = useState<Member[]>([])
+  const [globalMembers, setGlobalMembers] = useState<Member[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [isGlobalSearch, setIsGlobalSearch] = useState(false)
+  const [isFetchingGlobal, setIsFetchingGlobal] = useState(false)
+  
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("ALL")
   const [sortBy, setSortBy] = useState("SBN_ASC")
@@ -151,10 +156,14 @@ export default function TodaClient() {
       if (response.ok) {
         const data = await response.json()
         setMembers(data)
+      } else {
+        showToast("Failed to fetch route records. Server responded with an error.", "error")
       }
     } catch (error) {
       console.error("Failed to fetch operators", error)
-      showToast("Failed to fetch records. Ensure backend is running.", "error")
+      showToast("Network error. Ensure backend is running and connected.", "error")
+    } finally {
+      setIsLoading(false);
     }
   }, [safeRouteName, showToast])
 
@@ -169,6 +178,26 @@ export default function TodaClient() {
       clearInterval(intervalId);
     };
   }, [fetchMembers])
+
+  const toggleGlobalSearch = async () => {
+    if (!isGlobalSearch && globalMembers.length === 0) {
+      setIsFetchingGlobal(true);
+      try {
+        const res = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
+        if (res.ok) {
+          setGlobalMembers(await res.json());
+          showToast("Global directory loaded. Search will now span all routes.", "success");
+        } else {
+          showToast("Failed to load global directory.", "error");
+        }
+      } catch (error) {
+        showToast("Network error loading global directory.", "error");
+      } finally {
+        setIsFetchingGlobal(false);
+      }
+    }
+    setIsGlobalSearch(!isGlobalSearch);
+  };
 
   const getNextSbnPreview = (route: string, list: Member[]): string => {
     let prefix = "";
@@ -297,6 +326,7 @@ export default function TodaClient() {
       if (res.ok) {
         setSelectedSbns(prev => prev.filter(id => id !== member.sbn_no));
         await fetchMembers();
+        if (isGlobalSearch) setGlobalMembers(prev => prev.filter(m => m.sbn_no !== member.sbn_no));
         showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
       } else {
         const err = await res.json();
@@ -321,6 +351,9 @@ export default function TodaClient() {
       if (res.ok) {
         setSelectedSbns([]);
         await fetchMembers();
+        if (isGlobalSearch) {
+          setGlobalMembers(prev => prev.filter(m => !selectedSbns.includes(m.sbn_no)));
+        }
         showToast(`${selectedSbns.length} operator(s) deleted successfully.`, "success");
       } else {
         const err = await res.json();
@@ -420,7 +453,7 @@ export default function TodaClient() {
         }
       } catch (error) {
         console.error("Download Error", error);
-        showToast(`Failed to download ${filename}.`, "error");
+        showToast(`Network error downloading ${filename}.`, "error");
       } finally {
         setIsDownloadingId(null);
       }
@@ -472,12 +505,12 @@ export default function TodaClient() {
           document.body.appendChild(a);
           a.click();
           setIsGeneratingId(null);
-          showToast(`Downloaded ${member.sbn_no}.docx successfully.`, "success");
+          showToast(`Downloaded fallback ${member.sbn_no}.docx successfully.`, "success");
           setTimeout(() => document.body.removeChild(a), 100);
         }
       } else {
         setIsGeneratingId(null);
-        showToast("Print generation failed.", "error");
+        showToast("Print generation failed on the server.", "error");
       }
     } catch (error) {
       console.error(error);
@@ -546,14 +579,14 @@ export default function TodaClient() {
         const res = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
         if (res.ok) targetRecords = await res.json();
       } catch {
-        showToast("Failed to fetch ALL records.", "error");
+        showToast("Failed to fetch ALL records. Network Error.", "error");
       }
     } else if (batchScope === "CUSTOM" && customRoutes.length > 0) {
       try {
         const res = await fetchWithAuth(`${API_URL}/franchise/route/${customRoutes.join(',')}`);
         if (res.ok) targetRecords = await res.json();
       } catch {
-        showToast("Failed to fetch Custom records.", "error");
+        showToast("Failed to fetch Custom records. Network Error.", "error");
       }
     }
 
@@ -619,6 +652,7 @@ export default function TodaClient() {
       setIsHistoryOpen(true)
     } catch (error) {
       console.error("Failed to load history", error)
+      showToast("Network error while fetching record history.", "error")
     }
   };
 
@@ -628,16 +662,8 @@ export default function TodaClient() {
     try {
       const finalDrivingRoute = formData.driving_route.trim() !== "" ? formData.driving_route : formData.route;
       
-      let finalIssueDate = formData.issue_date;
-      let finalValidUntil = formData.valid_until;
-      
-      if (!isAdd && activeMember) {
-        const origIssue = activeMember.issue_date ? activeMember.issue_date.split('T')[0] : "";
-        const origValid = activeMember.valid_until ? activeMember.valid_until.split('T')[0] : "";
-        
-        if (finalIssueDate === origIssue) finalIssueDate = "";
-        if (finalValidUntil === origValid) finalValidUntil = "";
-      }
+      const finalIssueDate = formData.issue_date;
+      const finalValidUntil = formData.valid_until;
 
       const payload = { 
         ...formData, 
@@ -654,25 +680,42 @@ export default function TodaClient() {
       })
       
       if (response.ok) {
+        const data = await response.json();
         if (isAdd) {
           setIsAddOpen(false)
         } else {
           setIsEditOpen(false)
         }
+        
+        // Re-fetch appropriately depending on Global Search State
+        if (isGlobalSearch && globalMembers.length > 0) {
+          const resGlobal = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
+          if (resGlobal.ok) setGlobalMembers(await resGlobal.json());
+        }
         await fetchMembers();
-        showToast(`Record ${isAdd ? "added" : "updated"} successfully.`, "success");
+        
+        const returnedIssue = data.issue_date ? data.issue_date.split('T')[0] : "None";
+        const returnedValid = data.valid_until ? data.valid_until.split('T')[0] : "None";
+        const returnedSBN = data.sbn_no || payload.sbn_no;
+        
+        showToast(`Record ${isAdd ? "added" : "updated"}. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success");
       } else {
         const err = await response.json()
         showToast(err.detail || "Failed to save record.", "error")
       }
     } catch {
-      showToast("Network error while trying to save record.", "error")
+      showToast("Network error while trying to save record. Please check your connection.", "error")
     }
   };
 
   const currentYear = new Date().getFullYear()
 
-  const filteredMembers = members.filter(m => {
+  // Select the correct data source based on Global Search Toggle
+  const sourceMembers = (isGlobalSearch && globalMembers.length > 0 && search.trim() !== "") 
+    ? globalMembers 
+    : members;
+
+  const filteredMembers = sourceMembers.filter(m => {
     const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
     const isVacant = !m.operator_name || m.operator_name.trim() === "";
     
@@ -746,6 +789,7 @@ export default function TodaClient() {
       
       {/* PAGE HEADER */}
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-6">
+        
         <div className="shrink-0">
           <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
           <p className="text-muted-foreground mt-1 text-sm md:text-base">
@@ -1240,20 +1284,31 @@ export default function TodaClient() {
               <CardDescription className="mt-1 font-medium">Total of {filteredMembers.length} operator records found.</CardDescription>
             </div>
             
-            <div className="relative w-full md:w-96 group">
-              <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
-              <Input
-                ref={searchInputRef}
-                placeholder="Search Operator, SBN, Make... (Press '/' to focus)"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
-              />
+            <div className="relative w-full md:w-[32rem] flex items-center gap-2 group">
+              <div className="relative flex-1">
+                <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
+                <Input
+                  ref={searchInputRef}
+                  placeholder={isGlobalSearch ? "Search entire municipality..." : "Search Operator, SBN, Make... (Press '/' to focus)"}
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
+                />
+              </div>
+              <Button 
+                variant={isGlobalSearch ? "default" : "outline"} 
+                onClick={toggleGlobalSearch} 
+                className={`h-10 px-4 font-bold shadow-sm transition-all ${isGlobalSearch ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-background hover:bg-muted text-muted-foreground border-border/60'}`}
+                title="Toggle Global Search across all TODAs"
+              >
+                {isFetchingGlobal ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4 mr-2" />}
+                {isGlobalSearch ? "Global ON" : "Global"}
+              </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto min-h-[400px]">
             <Table>
               <TableHeader className="bg-muted/20 border-b border-border/60">
                 <TableRow className="hover:bg-transparent">
@@ -1274,12 +1329,36 @@ export default function TodaClient() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {paginatedMembers.length === 0 ? (
+                {isLoading || isFetchingGlobal ? (
+                  // PULSING SKELETON LOADER
+                  Array.from({ length: Math.min(rowsPerPage, 10) }).map((_, i) => (
+                    <TableRow key={`skeleton-${i}`} className="animate-pulse hover:bg-transparent">
+                      <TableCell className="pl-6"><div className="w-4 h-4 bg-muted/60 rounded" /></TableCell>
+                      <TableCell><div className="h-4 w-20 bg-muted/60 rounded" /></TableCell>
+                      <TableCell>
+                        <div className="h-4 w-40 bg-muted/60 rounded mb-2" />
+                        <div className="h-3 w-24 bg-muted/60 rounded" />
+                      </TableCell>
+                      <TableCell><div className="h-6 w-24 bg-muted/60 rounded-md" /></TableCell>
+                      <TableCell><div className="h-4 w-24 bg-muted/60 rounded" /></TableCell>
+                      <TableCell><div className="h-6 w-24 bg-muted/60 rounded-full" /></TableCell>
+                      <TableCell>
+                         <div className="flex justify-center gap-1">
+                           <div className="h-8 w-8 bg-muted/60 rounded-md" />
+                           <div className="h-8 w-8 bg-muted/60 rounded-md" />
+                           <div className="h-8 w-8 bg-muted/60 rounded-md" />
+                           <div className="h-8 w-8 bg-muted/60 rounded-md" />
+                         </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                ) : paginatedMembers.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="h-48 text-center text-muted-foreground font-medium">
+                    <TableCell colSpan={7} className="h-64 text-center text-muted-foreground font-medium">
                       <div className="flex flex-col items-center justify-center">
-                        <ArchiveX className="h-8 w-8 mb-2 opacity-20" />
+                        <ArchiveX className="h-10 w-10 mb-3 opacity-20" />
                         No records matched your search parameters.
+                        {isGlobalSearch && <span className="text-xs mt-1">Try adjusting the filter or search query.</span>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1312,7 +1391,17 @@ export default function TodaClient() {
                             className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                           />
                         </TableCell>
-                        <TableCell className="font-mono font-bold text-[13px] text-foreground/90 whitespace-nowrap">{member.sbn_no}</TableCell>
+                        <TableCell className="font-mono font-bold text-[13px] text-foreground/90 whitespace-nowrap">
+                          <div className="flex flex-col items-start gap-1">
+                            <span>{member.sbn_no}</span>
+                            {/* FIX: Show route badge if global search pulled a record from outside the current view */}
+                            {isGlobalSearch && member.route !== safeRouteName && (
+                              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300 text-[9px] px-1.5 py-0 shadow-sm leading-none h-4">
+                                {member.route}
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell className="py-3">
                           <div className="font-bold text-foreground truncate max-w-[200px]" title={member.operator_name || "VACANT"}>
                             {member.operator_name || <span className="text-blue-600 italic">VACANT SLOT</span>}
@@ -1382,8 +1471,8 @@ export default function TodaClient() {
                 </select>
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}>Previous</Button>
-                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0}>Next</Button>
+                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1 || isLoading}>Previous</Button>
+                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0 || isLoading}>Next</Button>
               </div>
             </div>
           </div>

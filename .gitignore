@@ -4,3 +4,4 @@ frontend/src-tauri/bin/pasada-backend-*
 backend/build/
 backend/dist/
 frontend/src-tauri/bin/pasada-backend-*
+backend/pasada-backend-x86_64-unknown-linux-gnu.spec

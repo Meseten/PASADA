@@ -51,7 +51,7 @@ from openpyxl.utils import get_column_letter
 # --- CORE SETTINGS & LOGGING ---
 from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now
 from ml_engine import run_kmeans_clustering, invalidate_ml_cache
-from doc_generator import generate_certificate
+from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
 from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
 from pydantic import BaseModel
@@ -323,7 +323,17 @@ def parse_safe_date(raw_date, fallback_year):
     try:
         if isinstance(raw_date, datetime):
             return raw_date
-        dt = pd.to_datetime(str(raw_date), errors='coerce', dayfirst=True)
+        
+        raw_str = str(raw_date).strip()
+        
+        try:
+            iso_str = raw_str.split('T')[0]
+            dt = datetime.fromisoformat(iso_str)
+            return dt
+        except ValueError:
+            pass
+
+        dt = pd.to_datetime(raw_str, errors='coerce', dayfirst=True)
         if pd.isna(dt):
             return None
         return dt.to_pydatetime()
@@ -331,9 +341,23 @@ def parse_safe_date(raw_date, fallback_year):
         force_log(f"Date parsing failed: {e}")
         return None
 
+# --- NATIVE PYTHON OPTIMIZATION: Memoization Cache for regex operations ---
+_SBN_MEMO = {}
+
+# --- LIGHTNING CACHE: Fixes 4-Second Dashboard Lags ---
+_GLOBAL_STATS_CACHE = {"time": 0, "data": None}
+_TODA_SUMMARY_CACHE = {"time": 0, "data": None}
+_ROUTE_DIST_CACHE = {"time": 0, "data": None}
+
+def clear_api_caches():
+    """Flushes the lightning RAM cache when a record is added, edited, or deleted."""
+    global _GLOBAL_STATS_CACHE, _TODA_SUMMARY_CACHE, _ROUTE_DIST_CACHE
+    _GLOBAL_STATS_CACHE["time"] = 0
+    _TODA_SUMMARY_CACHE["time"] = 0
+    _ROUTE_DIST_CACHE["time"] = 0
+
 def get_base_sbn(sbn):
     sbn = str(sbn).strip().upper()
-    # FIX: Restrict year matching to 2-digits OR plausible 4-digit years (19xx, 20xx) so we don't accidentally match the 4-digit sequence "1000"
     match = re.match(r'^([A-Z0-9]+[\-\_]\d+)[\-\_](\d{2}|19\d{2}|20\d{2})$', sbn)
     if match:
         return match.group(1)
@@ -341,17 +365,23 @@ def get_base_sbn(sbn):
 
 def normalize_base_sbn(sbn):
     if pd.isna(sbn) or not sbn: return ""
-    sbn = str(sbn).strip().upper()
-    # FIX: Restrict year matching here too
-    match = re.match(r'^(.*?)[\s\-\_]+(\d{2}|19\d{2}|20\d{2})$', sbn)
-    base = match.group(1) if match else sbn
+    sbn_str = str(sbn).strip().upper()
+    
+    # Memoization intercept (returns instantly if seen before)
+    if sbn_str in _SBN_MEMO:
+        return _SBN_MEMO[sbn_str]
+
+    match = re.match(r'^(.*?)[\s\-\_]+(\d{2}|19\d{2}|20\d{2})$', sbn_str)
+    base = match.group(1) if match else sbn_str
         
     match = re.match(r'^(.*?)[\s\-\_]+(\d+)$', base)
     if match:
         prefix = re.sub(r'[^A-Z0-9]', '', match.group(1))
         num_str = match.group(2)
         padding = 4 if int(num_str) >= 1000 else 3
-        return f"{prefix}-{int(num_str):0{padding}d}"
+        result = f"{prefix}-{int(num_str):0{padding}d}"
+        _SBN_MEMO[sbn_str] = result
+        return result
 
     clean_base = re.sub(r'[^A-Z0-9]', '', base)
     match = re.match(r'^([A-Z]+)(\d+)$', clean_base)
@@ -359,9 +389,13 @@ def normalize_base_sbn(sbn):
         prefix = match.group(1)
         num_str = match.group(2)
         padding = 4 if int(num_str) >= 1000 else 3
-        return f"{prefix}-{int(num_str):0{padding}d}"
+        result = f"{prefix}-{int(num_str):0{padding}d}"
+        _SBN_MEMO[sbn_str] = result
+        return result
 
-    return base.replace(" ", "")
+    result = base.replace(" ", "")
+    _SBN_MEMO[sbn_str] = result
+    return result
 
 def format_sbn_with_year(sbn, issue_date, is_vacant=False):
     base_sbn = normalize_base_sbn(sbn)
@@ -430,7 +464,6 @@ def generate_next_sbn(db: Session, route: str) -> str:
         prefix = clean_route if len(clean_route) <= 4 else clean_route[:3]
         
     next_num = max(max_num + 1, 1)
-    # FIX: Safely ensure we don't accidentally skip valid sequences like 1000
     while next_num == 0:
         next_num += 1
         
@@ -474,22 +507,7 @@ def deduplicate_records_by_base_sbn(records):
 
 def get_all_deduplicated_records(db: Session):
     all_records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
-    unique_map = {}
-    for r in all_records:
-        base_id = normalize_base_sbn(r.sbn_no)
-        r.sbn_no = base_id
-        route_key = (r.route, base_id)
-        if route_key not in unique_map:
-            unique_map[route_key] = r
-        else:
-            curr_existing = unique_map[route_key]
-            curr_year = get_record_year(curr_existing.issue_date)
-            new_year = get_record_year(r.issue_date)
-            if new_year > curr_year:
-                unique_map[route_key] = r
-            elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr_existing.operator_name).strip()):
-                unique_map[route_key] = r
-    return list(unique_map.values())
+    return deduplicate_records_by_base_sbn(all_records)
 
 def escape_excel(val):
     if not val:
@@ -498,6 +516,74 @@ def escape_excel(val):
     if s.startswith(('=', '+', '-', '@', '\t', '\r')):
         return f"'{s}"
     return s
+
+def get_toda_summary_data(db: Session):
+    global _TODA_SUMMARY_CACHE
+    if time.time() - _TODA_SUMMARY_CACHE["time"] < 60 and _TODA_SUMMARY_CACHE["data"]:
+        return _TODA_SUMMARY_CACHE["data"]
+
+    current_time = get_pht_now()
+    current_year = current_time.year
+    as_of_date = current_time.strftime("%B %d, %Y").upper()
+    
+    deduped_all = get_all_deduplicated_records(db)
+    route_counts = {}
+    route_totals = {}
+    
+    for r in deduped_all:
+        route_totals[r.route] = route_totals.get(r.route, 0) + 1
+        if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
+            route_counts[r.route] = route_counts.get(r.route, 0) + 1
+
+    ROUTE_DISPLAY_MAP = {
+        "BATODA": "BA TODA (BANCAAN/SAPA)",
+        "BBSTODA": "BBS TODA (BUCANA/BAGONG KALSADA/SAPA)",
+        "CNTODA": "CN TODA (CIUDAD NUEVO)",
+        "CO1TODA": "CO1 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+        "CO2TODA": "CO2 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+        "DOMMSATODA": "DOMMSA TODA (MUZON)",
+        "HCTODA": "HC TODA (HALANG/CALUBCOB)",
+        "HMTODA": "HM TODA (HUMBAC/MAKINA)",
+        "HVRTODA": "HVR TODA (HILLSVIEW/TIMALAN BALSAHAN)",
+        "MALATODA": "MALA TODA (MABULO/LABAC)",
+        "MMTODA": "MM TODA (MALAINEN LUMA/MOLINO)",
+        "MMGTODA": "MMG TODA (MUNTING MAPINO)",
+        "NCTODA": "NC TODA (POBLACION)",
+        "NPTODA": "NP TODA (NAIC PROPER)", 
+        "PAL1TODA": "PAL1 TODA (PALANGUE CENTRAL)",
+        "PAL2TODA": "PAL2&3 TODA (PALANGUE 2&3)",
+        "SABANGTODA": "SABANG TODA (SABANG)",
+        "SMSTODA": "SMS TODA (SAN ROQUE/M. BAGO/SANTULAN)",
+        "TCTODA": "TC TODA (TIMALAN CONCEPCION)",
+        "VASTODA": "VAS TODA (VILLA APOLONIA)",
+        "VISTODA": "VIS TODA (FREEDOMVILLE)"
+    }
+            
+    rows = [
+        {
+            "route": ROUTE_DISPLAY_MAP.get(route, route),
+            "total": route_totals[route], 
+            "renewed": route_counts.get(route, 0)
+        } 
+        for route in sorted(route_totals.keys())
+    ]
+    
+    total_toda = len(rows)
+    grand_total = sum(r["total"] for r in rows)
+    grand_renewed = sum(r["renewed"] for r in rows)
+    
+    res = {
+        "as_of_date": as_of_date,
+        "rows": rows,
+        "total_toda": total_toda,
+        "grand_total": grand_total,
+        "grand_renewed": grand_renewed,
+        "year": current_year
+    }
+    
+    _TODA_SUMMARY_CACHE["data"] = res
+    _TODA_SUMMARY_CACHE["time"] = time.time()
+    return res
 
 # --- API ENDPOINTS ---
 
@@ -525,6 +611,7 @@ def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current
         
     db.commit()
     invalidate_ml_cache(target_route)
+    clear_api_caches()
     log_action(db, get_full_name(current_user), "DELETE_RECORD", clean_sbn, "ALL", f"Soft deleted operator record {clean_sbn}.")
     return {"message": f"{count} operator(s) deleted successfully."}
 
@@ -543,6 +630,7 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
             deleted_count += 1
     db.commit()
     invalidate_ml_cache() 
+    clear_api_caches()
     log_action(db, get_full_name(current_user), "BULK_DELETE", "0", "ALL", f"Bulk deleted {deleted_count} operator record(s).")
     return {"message": f"{deleted_count} operator(s) deleted successfully."}
 
@@ -562,6 +650,7 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
             count += 1
     db.commit()
     invalidate_ml_cache(route_to_delete)
+    clear_api_caches()
     log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
     return {"message": f"Route '{route_to_delete}' deleted successfully."}
 
@@ -575,7 +664,6 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
     
     for r in all_records:
         sbn_str = str(r.sbn_no).strip().upper()
-        # FIX: Only drop true placeholders (where the extracted sequence integer is exactly 0)
         sbn_int = extract_sbn_integer(sbn_str)
         if not sbn_str or sbn_int == 0:
             r.is_deleted = True
@@ -641,6 +729,7 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
 
     db.commit()
     invalidate_ml_cache() 
+    clear_api_caches()
     log_action(db, get_full_name(current_user), "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, reversed phantom dates, and removed {deleted_count} duplicates.")
     return {
         "status": "success",
@@ -724,6 +813,7 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
         route_info.road_length_km = payload.road_length_km
     db.commit()
     invalidate_ml_cache(route_name) 
+    clear_api_caches()
     log_action(db, get_full_name(current_user), "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
     return {"status": "success", "message": f"Updated demographic data for {route_name.upper()}"}
 
@@ -787,9 +877,17 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     db.commit()
     db.refresh(new_record)
     invalidate_ml_cache(new_record.route)
+    clear_api_caches()
     
     log_action(db, full_name, "CREATE_RECORD", new_record.id, new_record.route, f"Registered new operator {record.operator_name or 'VACANT'} under SBN {record.sbn_no} ({record.route})")
-    return {"status": "success", "message": f"Franchise operator added successfully with SBN {record.sbn_no}."}
+    
+    return {
+        "status": "success", 
+        "message": f"Franchise operator added successfully with SBN {new_record.sbn_no}.",
+        "issue_date": new_record.issue_date.isoformat() if new_record.issue_date else None,
+        "valid_until": new_record.valid_until.isoformat() if new_record.valid_until else None,
+        "sbn_no": new_record.sbn_no
+    }
 
 @app.put("/franchise/{record_id}")
 def update_franchise(record_id: str, record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -831,10 +929,15 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
             db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
             db_record.is_active = True
 
-        elif manual_issue: 
-            db_record.issue_date = manual_issue
-            db_record.valid_until = manual_valid if manual_valid else datetime(manual_issue.year, 12, 31)
-            db_record.is_active = determine_status(db_record.issue_date)
+        else:
+            if manual_issue: 
+                db_record.issue_date = manual_issue
+                db_record.is_active = determine_status(db_record.issue_date)
+            
+            if manual_valid:
+                db_record.valid_until = manual_valid
+            elif manual_issue:
+                db_record.valid_until = datetime(manual_issue.year, 12, 31)
 
     record.sbn_no = format_sbn_with_year(new_base_sbn, db_record.issue_date, is_vacant)
 
@@ -847,6 +950,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
 
     db.commit()
     invalidate_ml_cache(db_record.route)
+    clear_api_caches()
     full_name = get_full_name(current_user)
     
     if is_change_motor:
@@ -855,7 +959,13 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
         log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
     else:
         log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated record for {db_record.operator_name or 'VACANT'} - SBN {db_record.sbn_no} ({db_record.route})")
-    return {"status": "success"}
+        
+    return {
+        "status": "success",
+        "issue_date": db_record.issue_date.isoformat() if db_record.issue_date else None,
+        "valid_until": db_record.valid_until.isoformat() if db_record.valid_until else None,
+        "sbn_no": db_record.sbn_no
+    }
 
 @app.post("/upload/database")
 async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
@@ -904,6 +1014,7 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
             
         db.commit()
         invalidate_ml_cache()
+        clear_api_caches()
         temp_db.close()
         os.remove(temp_db_path)
         log_action(db, get_full_name(current_user), "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
@@ -1065,7 +1176,6 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                     existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, existing_record.issue_date, is_vacant)
                     imported_count += 1
                 else:
-                    # FIX: Safely extract integer to drop true placeholders instead of blindly rejecting if it contains "000"
                     sbn_int = extract_sbn_integer(incoming_base_sbn)
                     if sbn_int is None or sbn_int != 0:
                         record = FranchiseRecord(
@@ -1103,6 +1213,7 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                 pr.driving_route = dominant_route
         db.commit()
 
+    clear_api_caches()
     log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records. Errors: {len(error_log)}")
     
     return {
@@ -1166,114 +1277,26 @@ async def generate_doc(record_id: str, current_user: User = Depends(get_current_
         
     raise HTTPException(status_code=500)
 
-@app.get("/logs/record/{record_id}")
-def get_record_history(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logs = db.query(AuditLog).filter(AuditLog.target_id == record_id).order_by(AuditLog.timestamp.desc()).all()
-    result = []
-    
-    for log in logs:
-        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
-        
-        cname = str(log_dict.get("clerk_name", "")).strip()
-        if not cname or cname.lower() in ["none", "null"]:
-            cname = "SYSTEM ADMIN"
-            
-        log_dict["clerk_name"] = cname
-        log_dict["user"] = cname
-        
-        result.append(log_dict)
-        
-    return result
-
-@app.get("/logs")
-def get_audit_logs(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200).all()
-    result = []
-    
-    for log in logs:
-        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
-        
-        tid = str(log_dict.get("target_id", ""))
-        if len(tid) > 10:  
-            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == tid).first()
-            if rec:
-                val = f"{rec.sbn_no} ({rec.operator_name or 'VACANT'})"
-            else:
-                val = "Unknown / Deleted Record"
-        else:
-            val = tid if tid and tid != "0" else "SYSTEM"
-            
-        log_dict["target_id"] = val
-        log_dict["target_record"] = val 
-        
-        cname = str(log_dict.get("clerk_name", "")).strip()
-        if not cname or cname.lower() in ["none", "null"]:
-            cname = "SYSTEM ADMIN"
-            
-        log_dict["clerk_name"] = cname
-        log_dict["user"] = cname 
-        
-        result.append(log_dict)
-        
-    return result
-
 @app.get("/franchise/route/{route_name}")
 def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     route_upper = route_name.upper()
     
-    # CASE 1: Fetch ALL Routes
     if route_upper == "ALL":
         records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
-        unique_map = {}
-        for r in records:
-            base_id = normalize_base_sbn(r.sbn_no)
-            r.sbn_no = base_id
-            route_key = (r.route, base_id)
-            if route_key not in unique_map:
-                unique_map[route_key] = r
-            else:
-                curr = unique_map[route_key]
-                curr_year = get_record_year(curr.issue_date)
-                new_year = get_record_year(r.issue_date)
-                if new_year > curr_year:
-                    unique_map[route_key] = r
-                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr.operator_name).strip()):
-                    unique_map[route_key] = r
-        deduped_records = list(unique_map.values())
-        
-    # CASE 2: Fetch CUSTOM routes (Comma separated)
     elif "," in route_upper:
         route_list = [r.strip() for r in route_upper.split(",")]
         records = db.query(FranchiseRecord).filter(
             FranchiseRecord.route.in_(route_list), 
             FranchiseRecord.is_deleted == False
         ).all()
-        unique_map = {}
-        for r in records:
-            base_id = normalize_base_sbn(r.sbn_no)
-            r.sbn_no = base_id
-            route_key = (r.route, base_id)
-            if route_key not in unique_map:
-                unique_map[route_key] = r
-            else:
-                curr = unique_map[route_key]
-                curr_year = get_record_year(curr.issue_date)
-                new_year = get_record_year(r.issue_date)
-                if new_year > curr_year:
-                    unique_map[route_key] = r
-                elif new_year == curr_year and (r.operator_name and str(r.operator_name).strip() and not str(curr.operator_name).strip()):
-                    unique_map[route_key] = r
-        deduped_records = list(unique_map.values())
-        
-    # CASE 3: Fetch SINGLE Exact Route (Current behavior)
     else:
         records = db.query(FranchiseRecord).filter(
             FranchiseRecord.route == route_upper, 
             FranchiseRecord.is_deleted == False
         ).all()
-        deduped_records = deduplicate_records_by_base_sbn(records)
 
-    # Format the SBNs and attach status
+    deduped_records = deduplicate_records_by_base_sbn(records)
+
     for record in deduped_records:
         is_vac = not record.operator_name or str(record.operator_name).strip() == ""
         record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant=is_vac)
@@ -1283,12 +1306,18 @@ def get_route_records(route_name: str, current_user: User = Depends(get_current_
 
 @app.get("/franchise/status/inactive")
 def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    records = db.query(FranchiseRecord).filter(FranchiseRecord.is_active == False, FranchiseRecord.is_deleted == False).all()
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
     deduped = deduplicate_records_by_base_sbn(records)
+    
+    inactive_records = []
     for r in deduped:
-        is_vac = not r.operator_name or str(r.operator_name).strip() == ""
-        r.sbn_no = format_sbn_with_year(r.sbn_no, r.issue_date, is_vac)
-    return [attach_status(r) for r in sorted(deduped, key=get_sbn_sort_key)]
+        r_with_status = attach_status(r)
+        if r_with_status.status in ["REVOKED", "VACANT"]:
+            is_vac = not r_with_status.operator_name or str(r_with_status.operator_name).strip() == ""
+            r_with_status.sbn_no = format_sbn_with_year(r_with_status.sbn_no, r_with_status.issue_date, is_vac)
+            inactive_records.append(r_with_status)
+            
+    return sorted(inactive_records, key=get_sbn_sort_key)
 
 @app.get("/predict/{route}")
 def get_prediction(route: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1443,6 +1472,10 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
 
 @app.get("/api/route-distribution")
 def get_route_distribution(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    global _ROUTE_DIST_CACHE
+    if time.time() - _ROUTE_DIST_CACHE["time"] < 60 and _ROUTE_DIST_CACHE["data"]:
+        return _ROUTE_DIST_CACHE["data"]
+        
     current_year = get_pht_now().year
     deduped_all = get_all_deduplicated_records(db)
     route_counts = {}
@@ -1450,6 +1483,9 @@ def get_route_distribution(db: Session = Depends(get_db), current_user: User = D
         if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
             route_counts[r.route] = route_counts.get(r.route, 0) + 1
     route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
+    
+    _ROUTE_DIST_CACHE["data"] = route_data
+    _ROUTE_DIST_CACHE["time"] = time.time()
     return route_data
 
 @app.get("/api/stats")
@@ -1462,6 +1498,10 @@ def get_api_dashboard(db: Session = Depends(get_db), current_user: User = Depend
 
 @app.get("/stats/global")
 def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    global _GLOBAL_STATS_CACHE
+    if time.time() - _GLOBAL_STATS_CACHE["time"] < 60 and _GLOBAL_STATS_CACHE["data"]:
+        return _GLOBAL_STATS_CACHE["data"]
+
     current_time = get_pht_now()
     current_year = current_time.year
     current_month = current_time.month
@@ -1482,10 +1522,21 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
     yearly_apps = active_operators
 
     route_counts = {}
+    route_totals = {}
     for r in deduped_all:
+        route_totals[r.route] = route_totals.get(r.route, 0) + 1
         if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
             route_counts[r.route] = route_counts.get(r.route, 0) + 1
-    route_data = [{"route": route, "count": count} for route, count in sorted(route_counts.items())]
+            
+    route_data = [
+        {
+            "route": route, 
+            "total": route_totals[route], 
+            "active": route_counts.get(route, 0), 
+            "count": route_counts.get(route, 0) 
+        } 
+        for route in sorted(route_totals.keys())
+    ]
 
     days_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat'}
     daily_trend_dict = {d: 0 for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}
@@ -1517,7 +1568,7 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
         count = sum(1 for r in deduped_all if r.issue_date and r.issue_date.year == target_year and r.issue_date.month == target_month)
         monthly_trend.append({"name": month_name, "val": count})
 
-    return {
+    res = {
         "total_system_capacity": total_system_capacity,
         "vacant_slots": inactive_and_vacant,
         "daily_apps": daily_apps, "weekly_apps": weekly_apps, "monthly_apps": monthly_apps, "yearly_apps": yearly_apps,
@@ -1527,11 +1578,173 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
         "weekly_trend": weekly_trend,
         "monthly_trend": monthly_trend
     }
+    
+    _GLOBAL_STATS_CACHE["data"] = res
+    _GLOBAL_STATS_CACHE["time"] = time.time()
+    return res
+
+def get_toda_summary_data(db: Session):
+    global _TODA_SUMMARY_CACHE
+    if time.time() - _TODA_SUMMARY_CACHE["time"] < 60 and _TODA_SUMMARY_CACHE["data"]:
+        return _TODA_SUMMARY_CACHE["data"]
+
+    current_time = get_pht_now()
+    current_year = current_time.year
+    as_of_date = current_time.strftime("%B %d, %Y").upper()
+    
+    deduped_all = get_all_deduplicated_records(db)
+    route_counts = {}
+    route_totals = {}
+    
+    for r in deduped_all:
+        route_totals[r.route] = route_totals.get(r.route, 0) + 1
+        if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
+            route_counts[r.route] = route_counts.get(r.route, 0) + 1
+
+    ROUTE_DISPLAY_MAP = {
+        "BATODA": "BA TODA (BANCAAN/SAPA)",
+        "BBSTODA": "BBS TODA (BUCANA/BAGONG KALSADA/SAPA)",
+        "CNTODA": "CN TODA (CIUDAD NUEVO)",
+        "CO1TODA": "CO1 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+        "CO2TODA": "CO2 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+        "DOMMSATODA": "DOMMSA TODA (MUZON)",
+        "HCTODA": "HC TODA (HALANG/CALUBCOB)",
+        "HMTODA": "HM TODA (HUMBAC/MAKINA)",
+        "HVRTODA": "HVR TODA (HILLSVIEW/TIMALAN BALSAHAN)",
+        "MALATODA": "MALA TODA (MABULO/LABAC)",
+        "MMTODA": "MM TODA (MALAINEN LUMA/MOLINO)",
+        "MMGTODA": "MMG TODA (MUNTING MAPINO)",
+        "NCTODA": "NC TODA (POBLACION)",
+        "NPTODA": "NP TODA (NAIC PROPER)", 
+        "PAL1TODA": "PAL1 TODA (PALANGUE CENTRAL)",
+        "PAL2TODA": "PAL2&3 TODA (PALANGUE 2&3)",
+        "SABANGTODA": "SABANG TODA (SABANG)",
+        "SMSTODA": "SMS TODA (SAN ROQUE/M. BAGO/SANTULAN)",
+        "TCTODA": "TC TODA (TIMALAN CONCEPCION)",
+        "VASTODA": "VAS TODA (VILLA APOLONIA)",
+        "VISTODA": "VIS TODA (FREEDOMVILLE)"
+    }
+            
+    rows = [
+        {
+            "route": ROUTE_DISPLAY_MAP.get(route, route),
+            "total": route_totals[route], 
+            "renewed": route_counts.get(route, 0)
+        } 
+        for route in sorted(route_totals.keys())
+    ]
+    
+    total_toda = len(rows)
+    grand_total = sum(r["total"] for r in rows)
+    grand_renewed = sum(r["renewed"] for r in rows)
+    
+    res = {
+        "as_of_date": as_of_date,
+        "rows": rows,
+        "total_toda": total_toda,
+        "grand_total": grand_total,
+        "grand_renewed": grand_renewed,
+        "year": current_year
+    }
+    
+    _TODA_SUMMARY_CACHE["data"] = res
+    _TODA_SUMMARY_CACHE["time"] = time.time()
+    return res
+
+@app.get("/api/toda-summary")
+def api_get_toda_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return get_toda_summary_data(db)
+
+@app.post("/toda-summary/download/word")
+async def download_toda_summary_word(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settings = init_settings(db)
+    summary_data = get_toda_summary_data(db)
+    
+    doc_path, media_type = await asyncio.to_thread(
+        generate_toda_summary, summary_data, {"committee_chair": settings.committee_chair}, return_format="docx"
+    )
+    
+    if os.path.exists(doc_path):
+        year = summary_data["year"]
+        filename_str = f"TOTAL RENEWAL {year}.docx"
+        log_action(db, get_full_name(current_user), "EXPORT_TODA_SUMMARY", "0", "ALL", f"Downloaded TODA Summary Word Document for {year}")
+        headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+        return FileResponse(path=doc_path, headers=headers, media_type=media_type)
+        
+    raise HTTPException(status_code=500, detail="Document generation failed.")
+
+@app.post("/toda-summary/generate")
+async def generate_toda_summary_pdf(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settings = init_settings(db)
+    summary_data = get_toda_summary_data(db)
+    
+    doc_path, media_type = await asyncio.to_thread(
+        generate_toda_summary, summary_data, {"committee_chair": settings.committee_chair}, return_format="pdf"
+    )
+    
+    if os.path.exists(doc_path):
+        year = summary_data["year"]
+        filename_str = f"TOTAL RENEWAL {year}.pdf"
+        log_action(db, get_full_name(current_user), "PRINT_TODA_SUMMARY", "0", "ALL", f"Generated TODA Summary PDF for {year}")
+        headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+        return FileResponse(path=doc_path, headers=headers, media_type=media_type)
+        
+    raise HTTPException(status_code=500, detail="Document generation failed.")
+
+@app.get("/logs/record/{record_id}")
+def get_record_history(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logs = db.query(AuditLog).filter(AuditLog.target_id == record_id).order_by(AuditLog.timestamp.desc()).all()
+    result = []
+    
+    for log in logs:
+        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
+        
+        cname = str(log_dict.get("clerk_name", "")).strip()
+        if not cname or cname.lower() in ["none", "null"]:
+            cname = "SYSTEM ADMIN"
+            
+        log_dict["clerk_name"] = cname
+        log_dict["user"] = cname
+        
+        result.append(log_dict)
+        
+    return result
+
+@app.get("/logs")
+def get_audit_logs(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200).all()
+    result = []
+    
+    for log in logs:
+        log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
+        
+        tid = str(log_dict.get("target_id", ""))
+        if len(tid) > 10:  
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == tid).first()
+            if rec:
+                val = f"{rec.sbn_no} ({rec.operator_name or 'VACANT'})"
+            else:
+                val = "Unknown / Deleted Record"
+        else:
+            val = tid if tid and tid != "0" else "SYSTEM"
+            
+        log_dict["target_id"] = val
+        log_dict["target_record"] = val 
+        
+        cname = str(log_dict.get("clerk_name", "")).strip()
+        if not cname or cname.lower() in ["none", "null"]:
+            cname = "SYSTEM ADMIN"
+            
+        log_dict["clerk_name"] = cname
+        log_dict["user"] = cname 
+        
+        result.append(log_dict)
+        
+    return result
 
 def kill_zombie_port(port):
     try:
         if platform.system() == "Windows":
-            # FIXED FOR WINDOWS - Avoid OSError by passing DEVNULL to handles
             output = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL).decode()
             for line in output.strip().split('\n'):
                 if "LISTENING" in line:
