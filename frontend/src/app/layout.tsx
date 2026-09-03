@@ -29,8 +29,8 @@ const RouteItem = ({ route, isPinned, pathname, togglePin, deleteRoute }: { rout
   <div className="relative group flex items-center">
       <Link 
         href={`/toda/${route}`} 
-        prefetch={false} // FIX: Disables aggressive background fetching on scroll
-        className={`flex-1 flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === `/toda/${route}` ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}
+        prefetch={false} 
+        className={`flex-1 flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${pathname === `/toda/${route}` ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}
       >
           <Map className="mr-2 h-4 w-4 opacity-50" /> {route}
       </Link>
@@ -58,6 +58,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [isNetworkOnline, setIsNetworkOnline] = useState(true)
   const navRef = useRef<HTMLElement>(null)
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null)
+  const isScrollingRef = useRef(false) // Guard against restoring while actively scrolling
 
   const fetchRoutes = useCallback(async () => {
     try {
@@ -65,7 +66,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       if (res.ok) {
         const data = await res.json()
         const routes = data.route_breakdown.map((r: any) => r.route)
-        setActiveRoutes(routes)
+        // Strictly compare to avoid re-rendering and changing the array reference if identical
+        setActiveRoutes(prev => (prev.length === routes.length && prev.every((r, i) => r === routes[i]) ? prev : routes))
       }
     } catch (e) {
       console.error("Sidebar route fetch failed")
@@ -104,17 +106,23 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   // PERSIST SIDEBAR SCROLL POSITION
   useEffect(() => {
-    if (navRef.current) {
+    // Only restore if the user isn't actively scrolling to prevent fighting the manual scroll
+    if (navRef.current && !isScrollingRef.current) {
       const savedScroll = sessionStorage.getItem('sidebarScroll');
       if (savedScroll) navRef.current.scrollTop = parseInt(savedScroll, 10);
     }
-  }, [pathname, activeRoutes]);
+  }, [pathname]);
 
   const handleScroll = () => {
+    isScrollingRef.current = true; // Set guard to true during active scrolling
+    
     // Debounce the storage set to prevent synchronous disk I/O lag while scrolling
     if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
     scrollTimeout.current = setTimeout(() => {
-      if (navRef.current) sessionStorage.setItem('sidebarScroll', navRef.current.scrollTop.toString());
+      if (navRef.current) {
+        sessionStorage.setItem('sidebarScroll', navRef.current.scrollTop.toString());
+      }
+      isScrollingRef.current = false; // Reset guard after debounce finishes
     }, 150);
   };
 
@@ -209,21 +217,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 </div>
                 
                 <nav ref={navRef} onScroll={handleScroll} className="flex-1 space-y-1 p-4 overflow-y-auto custom-scrollbar">
-                  <Link prefetch={false} href="/dashboard" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/dashboard' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <Link prefetch={false} href="/dashboard" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${pathname === '/dashboard' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <LayoutDashboard className="mr-2 h-4 w-4" /> Dashboard
                   </Link>
-                  <Link prefetch={false} href="/logs" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/logs' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <Link prefetch={false} href="/logs" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${pathname === '/logs' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <ClipboardList className="mr-2 h-4 w-4" /> Activity History
                   </Link>
-                  <Link prefetch={false} href="/import" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all ${pathname === '/import' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <Link prefetch={false} href="/import" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${pathname === '/import' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <UploadCloud className="mr-2 h-4 w-4" /> Import Records
                   </Link>
                   
-                  <Link prefetch={false} href="/inactive" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all mt-2 ${pathname === '/inactive' ? 'bg-muted/70 text-slate-800 dark:text-slate-200 border-l-4 border-slate-500 shadow-sm' : 'text-slate-500 hover:bg-accent hover:text-slate-900'}`}>
+                  <Link prefetch={false} href="/inactive" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors mt-2 ${pathname === '/inactive' ? 'bg-muted/70 text-slate-800 dark:text-slate-200 border-l-4 border-slate-500 shadow-sm' : 'text-slate-500 hover:bg-accent hover:text-slate-900'}`}>
                     <ArchiveX className="mr-2 h-4 w-4" /> Inactive Operators
                   </Link>
                   
-                  <Link prefetch={false} href="/settings" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-all mt-2 mb-4 ${pathname === '/settings' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                  <Link prefetch={false} href="/settings" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors mt-2 mb-4 ${pathname === '/settings' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <Settings className="mr-2 h-4 w-4" /> Settings
                   </Link>
 
@@ -276,7 +284,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </p>
                   <button 
                     onClick={handleLogout} 
-                    className="w-full flex items-center justify-center gap-2 py-3 bg-card border border-border hover:bg-red-500/10 hover:text-red-600 hover:border-red-500/30 text-muted-foreground rounded-lg text-sm font-black shadow-sm transition-all"
+                    className="w-full flex items-center justify-center gap-2 py-3 bg-card border border-border hover:bg-red-500/10 hover:text-red-600 hover:border-red-500/30 text-muted-foreground rounded-lg text-sm font-black shadow-sm transition-colors"
                   >
                     <LogOut size={16} /> Log out
                   </button>

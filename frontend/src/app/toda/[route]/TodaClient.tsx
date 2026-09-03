@@ -175,10 +175,38 @@ export default function TodaClient() {
         fetchWithAuth(`${API_URL}/api/route-info/${safeRouteName}`)
       ]);
       
-      if (membersRes.ok) setMembers(await membersRes.json());
-      else showToast("Failed to fetch route records.", "error");
+      if (membersRes.ok) {
+        const newMembers = await membersRes.json();
+        setMembers(prev => {
+          if (prev.length !== newMembers.length) return newMembers;
+          // Robust field-level identity check to avert pointless re-renders
+          const isSame = prev.every((m, i) => {
+            const n = newMembers[i];
+            return m.id === n.id &&
+                   m.sbn_no === n.sbn_no &&
+                   m.operator_name === n.operator_name &&
+                   m.address === n.address &&
+                   m.plate_no === n.plate_no &&
+                   m.motor_no === n.motor_no &&
+                   m.chassis_no === n.chassis_no &&
+                   m.make === n.make &&
+                   m.route === n.route &&
+                   m.driving_route === n.driving_route &&
+                   m.issue_date === n.issue_date &&
+                   m.valid_until === n.valid_until &&
+                   m.is_active === n.is_active;
+          });
+          return isSame ? prev : newMembers;
+        });
+      } else {
+        showToast("Failed to fetch route records.", "error");
+      }
 
-      if (infoRes.ok) setRouteInfo(await infoRes.json());
+      if (infoRes.ok) {
+        const newInfo = await infoRes.json();
+        // Simple stable check for route details Object
+        setRouteInfo(prev => JSON.stringify(prev) === JSON.stringify(newInfo) ? prev : newInfo);
+      }
       
     } catch (error) {
       console.error("Failed to fetch data", error)
