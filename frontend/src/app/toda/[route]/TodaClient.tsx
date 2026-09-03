@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { useParams, usePathname } from "next/navigation"
+import { useParams, usePathname, useRouter } from "next/navigation"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, AlertTriangle,  ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe, Edit3, Save } from "lucide-react"
 import { API_URL, fetchWithAuth } from "@/lib/api"
 
 interface Member {
@@ -36,6 +36,12 @@ interface LogEntry {
   details: string;
 }
 
+interface RouteInfo {
+  route: string;
+  display_name: string;
+  dominant_route: string;
+}
+
 interface Toast {
   id: number;
   message: string;
@@ -52,14 +58,13 @@ const KNOWN_ROUTES = [
 export default function TodaClient() {
   const params = useParams()
   const pathname = usePathname()
+  const router = useRouter()
   const fallbackRoute = pathname?.split('/').pop()?.toUpperCase() || ""
   const safeRouteName = (params?.route as string)?.toUpperCase() || fallbackRoute
 
   const [members, setMembers] = useState<Member[]>([])
-  const [globalMembers, setGlobalMembers] = useState<Member[]>([])
+  const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  const [isGlobalSearch, setIsGlobalSearch] = useState(false)
-  const [isFetchingGlobal, setIsFetchingGlobal] = useState(false)
   
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("ALL")
@@ -70,6 +75,11 @@ export default function TodaClient() {
   const [isViewOpen, setIsViewOpen] = useState(false)
   const [viewMember, setViewMember] = useState<Member | null>(null)
   
+  // RENAME ROUTE MODAL STATE
+  const [isRenameOpen, setIsRenameOpen] = useState(false)
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [renameData, setRenameData] = useState({ new_route_name: "", new_prefix: "", new_driving_route: "" })
+
   const [isGeneratingId, setIsGeneratingId] = useState<string | null>(null)
   const [isDownloadingId, setIsDownloadingId] = useState<string | null>(null)
   const [wordSuccessId, setWordSuccessId] = useState<string | null>(null)
@@ -100,6 +110,14 @@ export default function TodaClient() {
   const [downloadedFiles, setDownloadedFiles] = useState<Set<string>>(new Set())
   const [dupModalOpen, setDupModalOpen] = useState(false)
   const [pendingDownload, setPendingDownload] = useState<{name: string, action: () => void} | null>(null)
+
+  // PREVIEW MODAL STATE
+  const [isSummaryOpen, setIsSummaryOpen] = useState(false);
+  const [summaryData, setSummaryData] = useState<any>(null);
+  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
+  const [isDownloadingSummary, setIsDownloadingSummary] = useState(false);
+  const [isPrintingSummary, setIsPrintingSummary] = useState(false);
+  const [summaryWordSuccess, setSummaryWordSuccess] = useState(false);
 
   const [formData, setFormData] = useState({
     id: "",
@@ -149,18 +167,21 @@ export default function TodaClient() {
     return `${year}-${month}-${day}`;
   };
 
-  const fetchMembers = useCallback(async () => {
+  const fetchMembersAndInfo = useCallback(async () => {
     if (!safeRouteName) return;
     try {
-      const response = await fetchWithAuth(`${API_URL}/franchise/route/${safeRouteName}`);
-      if (response.ok) {
-        const data = await response.json()
-        setMembers(data)
-      } else {
-        showToast("Failed to fetch route records. Server responded with an error.", "error")
-      }
+      const [membersRes, infoRes] = await Promise.all([
+        fetchWithAuth(`${API_URL}/franchise/route/${safeRouteName}`),
+        fetchWithAuth(`${API_URL}/api/route-info/${safeRouteName}`)
+      ]);
+      
+      if (membersRes.ok) setMembers(await membersRes.json());
+      else showToast("Failed to fetch route records.", "error");
+
+      if (infoRes.ok) setRouteInfo(await infoRes.json());
+      
     } catch (error) {
-      console.error("Failed to fetch operators", error)
+      console.error("Failed to fetch data", error)
       showToast("Network error. Ensure backend is running and connected.", "error")
     } finally {
       setIsLoading(false);
@@ -169,35 +190,15 @@ export default function TodaClient() {
 
   useEffect(() => {
     const initialLoadId = window.setTimeout(() => {
-      void fetchMembers();
+      void fetchMembersAndInfo();
     }, 0);
-    const intervalId = setInterval(fetchMembers, 15000); 
+    const intervalId = setInterval(fetchMembersAndInfo, 15000); 
 
     return () => {
       window.clearTimeout(initialLoadId);
       clearInterval(intervalId);
     };
-  }, [fetchMembers])
-
-  const toggleGlobalSearch = async () => {
-    if (!isGlobalSearch && globalMembers.length === 0) {
-      setIsFetchingGlobal(true);
-      try {
-        const res = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
-        if (res.ok) {
-          setGlobalMembers(await res.json());
-          showToast("Global directory loaded. Search will now span all routes.", "success");
-        } else {
-          showToast("Failed to load global directory.", "error");
-        }
-      } catch (error) {
-        showToast("Network error loading global directory.", "error");
-      } finally {
-        setIsFetchingGlobal(false);
-      }
-    }
-    setIsGlobalSearch(!isGlobalSearch);
-  };
+  }, [fetchMembersAndInfo])
 
   const getNextSbnPreview = (route: string, list: Member[]): string => {
     let prefix = "";
@@ -249,6 +250,16 @@ export default function TodaClient() {
     });
     setIsAddOpen(true);
   }, [members, safeRouteName]);
+
+  const handleOpenRename = useCallback(() => {
+    const currentPrefix = members.length > 0 && members[0].sbn_no ? members[0].sbn_no.split('-')[0] : "";
+    setRenameData({
+      new_route_name: safeRouteName,
+      new_prefix: currentPrefix,
+      new_driving_route: routeInfo?.dominant_route || ""
+    });
+    setIsRenameOpen(true);
+  }, [members, safeRouteName, routeInfo]);
 
   useEffect(() => {
     const resetId = window.setTimeout(() => {
@@ -306,7 +317,7 @@ export default function TodaClient() {
     try {
       const res = await fetchWithAuth(`${API_URL}/admin/refresh-db`, { method: "POST" });
       if (res.ok) {
-        await fetchMembers();
+        await fetchMembersAndInfo();
         showToast("Database refreshed successfully!", "success");
       } else {
         const err = await res.json();
@@ -319,14 +330,153 @@ export default function TodaClient() {
     }
   };
 
+  const handleOpenSummaryPreview = async () => {
+    setIsSummaryOpen(true);
+    setIsSummaryLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/toda-summary`);
+      if (res.ok) {
+        setSummaryData(await res.json());
+      } else {
+        showToast("Failed to load summary data.", "error");
+      }
+    } catch (e) {
+      showToast("Network error while loading summary.", "error");
+    } finally {
+      setIsSummaryLoading(false);
+    }
+  };
+
+  const handleDownloadSummaryWord = async () => {
+    if (isDownloadingSummary || !summaryData) return;
+    setIsDownloadingSummary(true);
+    const filename = `TOTAL RENEWAL ${summaryData.year}.docx`;
+    
+    try {
+      const response = await fetchWithAuth(`${API_URL}/toda-summary/download/word`, { method: 'POST' });
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 1000);
+        
+        setSummaryWordSuccess(true);
+        showToast(`${filename} downloaded successfully.`, "success");
+        setTimeout(() => setSummaryWordSuccess(false), 2000);
+      } else {
+        showToast("Failed to download Word document.", "error");
+      }
+    } catch (error) {
+      showToast("Network error during download.", "error");
+    } finally {
+      setIsDownloadingSummary(false);
+    }
+  };
+
+  const handlePrintSummaryPDF = async () => {
+    if (isPrintingSummary || !summaryData) return;
+    setIsPrintingSummary(true);
+    
+    try {
+      const response = await fetchWithAuth(`${API_URL}/toda-summary/generate`, { method: 'POST' });
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        
+        if (blob.type === "application/pdf") {
+          const existingIframe = document.getElementById('pasada-print-frame');
+          if (existingIframe) document.body.removeChild(existingIframe);
+          
+          const iframe = document.createElement('iframe');
+          iframe.id = 'pasada-print-frame';
+          iframe.style.position = 'fixed';
+          iframe.style.right = '-2000px';
+          iframe.style.bottom = '-2000px';
+          iframe.style.width = '500px';
+          iframe.style.height = '500px';
+          iframe.src = url;
+          
+          document.body.appendChild(iframe);
+          
+          setTimeout(() => {
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (e) {
+              console.error(e);
+            }
+            setIsPrintingSummary(false);
+            showToast(`Print dialog opened for TODA Summary.`, "success");
+            setTimeout(() => window.URL.revokeObjectURL(url), 300000);
+          }, 1500); 
+        } else {
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          a.download = `TOTAL RENEWAL ${summaryData.year}.docx`;
+          document.body.appendChild(a);
+          a.click();
+          setIsPrintingSummary(false);
+          showToast(`Downloaded fallback Word doc successfully.`, "success");
+          setTimeout(() => document.body.removeChild(a), 100);
+        }
+      } else {
+        setIsPrintingSummary(false);
+        showToast("Print generation failed.", "error");
+      }
+    } catch (error) {
+      setIsPrintingSummary(false);
+      showToast("Network error during print generation.", "error");
+    }
+  };
+
+  const handleRenameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const conf = window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renameData.new_route_name.toUpperCase()}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`);
+    if (!conf) return;
+
+    setIsRenaming(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(renameData)
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message, "success");
+        setIsRenameOpen(false);
+        // Dispatch event to update sidebar
+        window.dispatchEvent(new Event('toda_imported'));
+        // Redirect to new route
+        router.push(`/toda/${data.new_route}`);
+      } else {
+        const err = await res.json();
+        showToast(err.detail || "Failed to rename route.", "error");
+      }
+    } catch (err) {
+      showToast("Network error while renaming route.", "error");
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
   const handleDeleteOne = async (member: Member) => {
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
       if (res.ok) {
         setSelectedSbns(prev => prev.filter(id => id !== member.sbn_no));
-        await fetchMembers();
-        if (isGlobalSearch) setGlobalMembers(prev => prev.filter(m => m.sbn_no !== member.sbn_no));
+        await fetchMembersAndInfo();
         showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
       } else {
         const err = await res.json();
@@ -350,10 +500,7 @@ export default function TodaClient() {
       });
       if (res.ok) {
         setSelectedSbns([]);
-        await fetchMembers();
-        if (isGlobalSearch) {
-          setGlobalMembers(prev => prev.filter(m => !selectedSbns.includes(m.sbn_no)));
-        }
+        await fetchMembersAndInfo();
         showToast(`${selectedSbns.length} operator(s) deleted successfully.`, "success");
       } else {
         const err = await res.json();
@@ -687,12 +834,7 @@ export default function TodaClient() {
           setIsEditOpen(false)
         }
         
-        // Re-fetch appropriately depending on Global Search State
-        if (isGlobalSearch && globalMembers.length > 0) {
-          const resGlobal = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
-          if (resGlobal.ok) setGlobalMembers(await resGlobal.json());
-        }
-        await fetchMembers();
+        await fetchMembersAndInfo();
         
         const returnedIssue = data.issue_date ? data.issue_date.split('T')[0] : "None";
         const returnedValid = data.valid_until ? data.valid_until.split('T')[0] : "None";
@@ -710,12 +852,7 @@ export default function TodaClient() {
 
   const currentYear = new Date().getFullYear()
 
-  // Select the correct data source based on Global Search Toggle
-  const sourceMembers = (isGlobalSearch && globalMembers.length > 0 && search.trim() !== "") 
-    ? globalMembers 
-    : members;
-
-  const filteredMembers = sourceMembers.filter(m => {
+  const filteredMembers = members.filter(m => {
     const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
     const isVacant = !m.operator_name || m.operator_name.trim() === "";
     
@@ -776,13 +913,10 @@ export default function TodaClient() {
   const paginatedMembers = sortedMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
   const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedSbns.includes(m.sbn_no));
 
-  if (!safeRouteName) {
-    return (
-      <div className="p-8 text-muted-foreground flex items-center gap-3 h-full text-lg font-medium">
-        <Loader2 className="w-6 h-6 animate-spin text-blue-600" /> Loading Route Records...
-      </div>
-    );
-  }
+  // DYNAMIC SUBTITLE LOGIC
+  const subtitleText = routeInfo?.dominant_route 
+    ? routeInfo.dominant_route 
+    : routeInfo?.display_name || "\u00A0";
 
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500">
@@ -791,9 +925,14 @@ export default function TodaClient() {
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-6">
         
         <div className="shrink-0">
-          <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
-          <p className="text-muted-foreground mt-1 text-sm md:text-base">
-            Tricycle Operators and Drivers Association Route Registry
+          <div className="flex items-center gap-4">
+            <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
+            <Button variant="outline" size="sm" onClick={handleOpenRename} className="h-8 shadow-sm">
+              <Edit3 className="h-3.5 w-3.5 mr-2" /> Rename
+            </Button>
+          </div>
+          <p className="text-muted-foreground mt-1 text-sm md:text-base font-bold min-h-[24px]">
+            {isLoading && !routeInfo ? "..." : subtitleText}
           </p>
         </div>
         
@@ -873,6 +1012,141 @@ export default function TodaClient() {
           </Button>
         </div>
       )}
+
+      {/* RENAME ROUTE MODAL */}
+      <Dialog open={isRenameOpen} onOpenChange={setIsRenameOpen}>
+        <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold flex items-center gap-2">
+              <Edit3 className="h-6 w-6 text-blue-600" /> Rename Route
+            </DialogTitle>
+            <DialogDescription>
+              Update the route name and optionally unify all SBN prefixes across records.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleRenameSubmit} className="space-y-4 mt-2">
+            <div className="space-y-2">
+              <Label className="font-semibold text-foreground">New TODA Code Name</Label>
+              <Input 
+                value={renameData.new_route_name} 
+                onChange={(e) => setRenameData({...renameData, new_route_name: e.target.value.toUpperCase()})} 
+                className="h-11 font-bold bg-muted/40 uppercase focus:bg-background"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="font-semibold text-foreground">Standardized SBN Prefix <span className="text-xs text-muted-foreground font-normal ml-2">(Optional)</span></Label>
+              <Input 
+                value={renameData.new_prefix} 
+                onChange={(e) => setRenameData({...renameData, new_prefix: e.target.value.toUpperCase()})} 
+                placeholder="e.g. NP"
+                className="h-11 font-bold font-mono bg-muted/40 uppercase focus:bg-background"
+              />
+              <p className="text-xs text-muted-foreground italic">This will unify all records in this line (e.g. NP-001).</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="font-semibold text-foreground">Dominant Driving Route <span className="text-xs text-muted-foreground font-normal ml-2">(Optional)</span></Label>
+              <Input 
+                value={renameData.new_driving_route} 
+                onChange={(e) => setRenameData({...renameData, new_driving_route: e.target.value.toUpperCase()})} 
+                placeholder="e.g. POBLACION"
+                className="h-11 font-bold bg-muted/40 uppercase focus:bg-background"
+              />
+            </div>
+            <DialogFooter className="pt-4">
+              <Button type="submit" disabled={isRenaming} className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                {isRenaming ? <Loader2 className="h-5 w-5 animate-spin mr-2" /> : <Save className="h-5 w-5 mr-2" />} Save Changes
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* TODA SUMMARY PREVIEW MODAL */}
+      <Dialog open={isSummaryOpen} onOpenChange={setIsSummaryOpen}>
+        <DialogContent className="sm:max-w-[700px] shadow-2xl rounded-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle className="text-2xl font-bold flex items-center gap-2">
+              <FileText className="h-6 w-6 text-blue-600" /> TODA Renewal Summary Preview
+            </DialogTitle>
+            <DialogDescription>
+              Verify route counts before printing or downloading the official summary document.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="flex-1 overflow-y-auto py-4 custom-scrollbar">
+            {isSummaryLoading ? (
+              <div className="flex flex-col items-center justify-center h-48 space-y-4">
+                <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+                <p className="text-sm font-bold text-muted-foreground animate-pulse">Calculating route totals...</p>
+              </div>
+            ) : summaryData ? (
+              <div className="space-y-4">
+                <div className="border rounded-xl overflow-hidden shadow-sm">
+                  <Table>
+                    <TableHeader className="bg-muted/30">
+                      <TableRow>
+                        <TableHead className="font-bold w-16">#</TableHead>
+                        <TableHead className="font-bold uppercase">TODA</TableHead>
+                        <TableHead className="font-bold text-center uppercase">MEMBER PER TODA</TableHead>
+                        <TableHead className="font-bold text-center text-emerald-600 uppercase">
+                          RENEWAL AS OF <br /> {summaryData.as_of_date}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {summaryData.rows.map((row: any, i: number) => (
+                        <TableRow key={row.route}>
+                          <TableCell className="font-medium text-muted-foreground">{i + 1}</TableCell>
+                          <TableCell className="font-bold">{row.route}</TableCell>
+                          <TableCell className="font-mono text-center text-[15px]">{row.total}</TableCell>
+                          <TableCell className="font-mono text-center font-bold text-emerald-600 text-[15px]">{row.renewed}</TableCell>
+                        </TableRow>
+                      ))}
+                      <TableRow className="bg-muted/30 hover:bg-muted/30">
+                        <TableCell colSpan={2} className="font-black text-right pr-6 uppercase">TOTAL</TableCell>
+                        <TableCell className="font-black font-mono text-center text-lg">{summaryData.grand_total}</TableCell>
+                        <TableCell className="font-black font-mono text-center text-lg text-emerald-600">{summaryData.grand_renewed}</TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-48 text-muted-foreground">
+                <AlertTriangle className="w-8 h-8 mb-2 opacity-50" />
+                <p className="font-medium">Failed to load preview data.</p>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="shrink-0 pt-4 border-t">
+            {summaryData && (
+              <>
+                <Button 
+                  variant="outline" 
+                  onClick={handleDownloadSummaryWord} 
+                  disabled={isDownloadingSummary}
+                  className="font-bold"
+                >
+                  {isDownloadingSummary ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
+                  ) : summaryWordSuccess ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4 text-blue-600" />
+                  )}
+                  Download Word File
+                </Button>
+                <Button onClick={handlePrintSummaryPDF} disabled={isPrintingSummary} className="font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md">
+                  {isPrintingSummary ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                  Print PDF
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* VIEW DOCUMENT PREVIEW MODAL */}
       <Dialog open={isViewOpen} onOpenChange={setIsViewOpen}>
@@ -963,238 +1237,6 @@ export default function TodaClient() {
         </DialogContent>
       </Dialog>
 
-      {/* DUPLICATE DOWNLOAD GUARD MODAL */}
-      <Dialog open={dupModalOpen} onOpenChange={setDupModalOpen}>
-        <DialogContent className="sm:max-w-[400px] shadow-2xl rounded-2xl">
-          <DialogHeader>
-            <DialogTitle className="text-xl font-bold flex items-center gap-2">
-              <Download className="h-5 w-5 text-orange-500" /> Re-download File?
-            </DialogTitle>
-            <DialogDescription className="text-sm mt-2 font-medium">
-              You have already downloaded <span className="font-bold text-foreground">"{pendingDownload?.name}"</span> during this session. Do you want to download it again?
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="mt-4 flex gap-2">
-            <Button variant="outline" onClick={() => { setDupModalOpen(false); setPendingDownload(null); }} className="font-bold">
-              Cancel
-            </Button>
-            <Button 
-              onClick={() => {
-                if (pendingDownload) pendingDownload.action();
-                setDupModalOpen(false);
-                setPendingDownload(null);
-              }} 
-              className="font-bold bg-blue-600 hover:bg-blue-700 text-white"
-            >
-              Download Again
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* BATCH PRINT DIALOG */}
-      <Dialog open={batchModalOpen} onOpenChange={setBatchModalOpen}>
-        <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-bold flex items-center gap-2">
-              <Printer className="h-6 w-6 text-blue-600" /> Print Documents
-            </DialogTitle>
-            <DialogDescription>
-              Select scope and date filter for document batch printing.
-            </DialogDescription>
-          </DialogHeader>
-          
-          {batchPrinting ? (
-            <div className="flex flex-col items-center justify-center py-8 space-y-6 text-center">
-              <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
-              <div className="space-y-2 w-full">
-                <p className="font-bold text-lg">Preparing Documents</p>
-                <p className="text-sm text-muted-foreground font-medium">
-                  Opening print dialog {batchProgress.current} of {batchProgress.total}...
-                </p>
-                <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
-                  <div 
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out"
-                    style={{ width: `${Math.max((batchProgress.current / batchProgress.total) * 100, 5)}%` }}
-                  ></div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-6 mt-4">
-              {/* SCOPE SELECTOR */}
-              <div className="space-y-3">
-                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                  <Shield size={14} /> Batch Scope
-                </Label>
-                <select
-                  value={batchScope}
-                  onChange={(e) => setBatchScope(e.target.value)}
-                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
-                >
-                  <option value="THIS">This TODA Only ({safeRouteName})</option>
-                  <option value="ALL">All TODAs (Whole System)</option>
-                  <option value="CUSTOM">Custom Selection</option>
-                </select>
-              </div>
-
-              {/* CUSTOM ROUTE CHECKLIST */}
-              {batchScope === "CUSTOM" && (
-                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select TODAs</Label>
-                  <div className="grid grid-cols-2 gap-2 p-3 border border-border rounded-lg bg-muted/10 max-h-48 overflow-y-auto">
-                    {KNOWN_ROUTES.map(route => (
-                      <label key={route} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
-                        <input 
-                          type="checkbox" 
-                          checked={customRoutes.includes(route)}
-                          onChange={(e) => {
-                            if (e.target.checked) setCustomRoutes(prev => [...prev, route]);
-                            else setCustomRoutes(prev => prev.filter(r => r !== route));
-                          }}
-                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        {route}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* DATE FILTER */}
-              <div className="space-y-3">
-                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                  <Filter size={14} /> Date Filter
-                </Label>
-                <select
-                  value={batchFilterType}
-                  onChange={(e) => setBatchFilterType(e.target.value)}
-                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
-                >
-                  <option value="TODAY_ALL">Today - All Applications</option>
-                  <option value="TODAY_MORNING">Today - Morning (12AM - 11:59AM)</option>
-                  <option value="TODAY_AFTERNOON">Today - Afternoon (12PM - 11:59PM)</option>
-                  <option value="SPECIFIC_DATE">Single Date Selection</option>
-                  <option value="DATE_RANGE">Custom Date Range</option>
-                </select>
-              </div>
-
-              {batchFilterType === "SPECIFIC_DATE" && (
-                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                    <Calendar size={14} /> Select Date
-                  </Label>
-                  <Input 
-                    type="date" 
-                    value={batchSpecificDate} 
-                    onChange={(e) => setBatchSpecificDate(e.target.value)} 
-                    className="h-12 font-semibold"
-                  />
-                </div>
-              )}
-
-              {batchFilterType === "DATE_RANGE" && (
-                <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
-                  <div className="space-y-3">
-                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                      <Calendar size={14} /> Start Date
-                    </Label>
-                    <Input type="date" value={batchStartDate} onChange={(e) => setBatchStartDate(e.target.value)} className="h-12 font-semibold" />
-                  </div>
-                  <div className="space-y-3">
-                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                      <Calendar size={14} /> End Date
-                    </Label>
-                    <Input type="date" value={batchEndDate} onChange={(e) => setBatchEndDate(e.target.value)} className="h-12 font-semibold" />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {!batchPrinting && (
-            <DialogFooter className="pt-4">
-              <Button 
-                onClick={executeBatchPrint}
-                disabled={
-                  (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
-                  (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate)) ||
-                  (batchScope === "CUSTOM" && customRoutes.length === 0)
-                }
-                className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
-              >
-                <CheckCircle className="mr-2 h-5 w-5" /> Start Batch Print
-              </Button>
-            </DialogFooter>
-          )}
-        </DialogContent>
-      </Dialog>
-
-      {/* ADD OPERATOR DIALOG */}
-      <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
-        <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-bold">Add Operator / Slot</DialogTitle>
-            <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
-          </DialogHeader>
-          <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
-            <div className="grid grid-cols-2 gap-5">
-              <div className="space-y-2">
-                <Label className="font-semibold flex justify-between">
-                  SBN No. <span className="text-xs text-blue-600 font-normal">(Auto-Generated)</span>
-                </Label>
-                <Input 
-                  name="sbn_no" 
-                  value={formData.sbn_no} 
-                  onChange={handleInputChange} 
-                  placeholder="Auto-assigned if blank"
-                  className="font-mono bg-background border-border/50 shadow-inner h-11 font-bold" 
-                />
-              </div>
-              <div className="space-y-2">
-                <Label className="font-semibold">Plate No.</Label>
-                <Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" />
-              </div>
-            </div>
-            
-            <div className="space-y-2">
-              <Label className="font-semibold">Operator Name</Label>
-              <Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" />
-            </div>
-            
-            <div className="space-y-2">
-              <Label className="font-semibold">Address</Label>
-              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 mt-2">
-                <div className="space-y-2">
-                    <Label className="font-semibold flex justify-between">Issue Date <span className="text-blue-500 font-normal italic text-xs">Optional Override</span></Label>
-                    <Input type="date" name="issue_date" value={formData.issue_date} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
-                </div>
-                <div className="space-y-2">
-                    <Label className="font-semibold flex justify-between">Valid Until <span className="text-blue-500 font-normal italic text-xs">Optional Override</span></Label>
-                    <Input type="date" name="valid_until" value={formData.valid_until} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
-                </div>
-            </div>
-            <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
-            <DialogFooter className="pt-4">
-              <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white">Save Operator</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-
       {/* EDIT OPERATOR DIALOG */}
       <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
         <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
@@ -1275,6 +1317,35 @@ export default function TodaClient() {
         </DialogContent>
       </Dialog>
 
+      {/* DUPLICATE DOWNLOAD GUARD MODAL */}
+      <Dialog open={dupModalOpen} onOpenChange={setDupModalOpen}>
+        <DialogContent className="sm:max-w-[400px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold flex items-center gap-2">
+              <Download className="h-5 w-5 text-orange-500" /> Re-download File?
+            </DialogTitle>
+            <DialogDescription className="text-sm mt-2 font-medium">
+              You have already downloaded <span className="font-bold text-foreground">"{pendingDownload?.name}"</span> during this session. Do you want to download it again?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4 flex gap-2">
+            <Button variant="outline" onClick={() => { setDupModalOpen(false); setPendingDownload(null); }} className="font-bold">
+              Cancel
+            </Button>
+            <Button 
+              onClick={() => {
+                if (pendingDownload) pendingDownload.action();
+                setDupModalOpen(false);
+                setPendingDownload(null);
+              }} 
+              className="font-bold bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              Download Again
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* OPERATOR LIST TABLE */}
       <Card className="shadow-sm border-border/60 rounded-2xl overflow-hidden bg-card">
         <CardHeader className="bg-muted/10 pb-5 border-b border-border/50">
@@ -1284,26 +1355,15 @@ export default function TodaClient() {
               <CardDescription className="mt-1 font-medium">Total of {filteredMembers.length} operator records found.</CardDescription>
             </div>
             
-            <div className="relative w-full md:w-[32rem] flex items-center gap-2 group">
-              <div className="relative flex-1">
-                <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
-                <Input
-                  ref={searchInputRef}
-                  placeholder={isGlobalSearch ? "Search entire municipality..." : "Search Operator, SBN, Make... (Press '/' to focus)"}
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
-                />
-              </div>
-              <Button 
-                variant={isGlobalSearch ? "default" : "outline"} 
-                onClick={toggleGlobalSearch} 
-                className={`h-10 px-4 font-bold shadow-sm transition-all ${isGlobalSearch ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-background hover:bg-muted text-muted-foreground border-border/60'}`}
-                title="Toggle Global Search across all TODAs"
-              >
-                {isFetchingGlobal ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4 mr-2" />}
-                {isGlobalSearch ? "Global ON" : "Global"}
-              </Button>
+            <div className="relative w-full md:w-[24rem]">
+              <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground" />
+              <Input
+                ref={searchInputRef}
+                placeholder="Search Operator, SBN, Make... (Press '/' to focus)"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
+              />
             </div>
           </div>
         </CardHeader>
@@ -1329,7 +1389,7 @@ export default function TodaClient() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {isLoading || isFetchingGlobal ? (
+                {isLoading ? (
                   // PULSING SKELETON LOADER
                   Array.from({ length: Math.min(rowsPerPage, 10) }).map((_, i) => (
                     <TableRow key={`skeleton-${i}`} className="animate-pulse hover:bg-transparent">
@@ -1358,7 +1418,6 @@ export default function TodaClient() {
                       <div className="flex flex-col items-center justify-center">
                         <ArchiveX className="h-10 w-10 mb-3 opacity-20" />
                         No records matched your search parameters.
-                        {isGlobalSearch && <span className="text-xs mt-1">Try adjusting the filter or search query.</span>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1394,12 +1453,6 @@ export default function TodaClient() {
                         <TableCell className="font-mono font-bold text-[13px] text-foreground/90 whitespace-nowrap">
                           <div className="flex flex-col items-start gap-1">
                             <span>{member.sbn_no}</span>
-                            {/* FIX: Show route badge if global search pulled a record from outside the current view */}
-                            {isGlobalSearch && member.route !== safeRouteName && (
-                              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300 text-[9px] px-1.5 py-0 shadow-sm leading-none h-4">
-                                {member.route}
-                              </Badge>
-                            )}
                           </div>
                         </TableCell>
                         <TableCell className="py-3">
