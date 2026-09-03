@@ -219,6 +219,11 @@ class FranchiseCreate(BaseModel):
     issue_date: Optional[str] = ""
     valid_until: Optional[str] = ""
 
+class RouteRenameRequest(BaseModel):
+    new_route_name: str
+    new_prefix: str
+    new_driving_route: str
+
 class UserCreate(BaseModel):
     first_name: str
     last_name: str
@@ -263,6 +268,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
+
+def alias_route(route: str) -> str:
+    """Silently redirects NCTODA to NPTODA to prevent duplicate route creation."""
+    if not route: return ""
+    r = route.strip().upper()
+    if r == "NCTODA":
+        return "NPTODA"
+    return r
 
 def get_full_name(user: User) -> str:
     first = getattr(user, 'first_name', "") or ""
@@ -344,17 +357,21 @@ def parse_safe_date(raw_date, fallback_year):
 # --- NATIVE PYTHON OPTIMIZATION: Memoization Cache for regex operations ---
 _SBN_MEMO = {}
 
-# --- LIGHTNING CACHE: Fixes 4-Second Dashboard Lags ---
+# --- LIGHTNING CACHE: Fixes Dashboard Lags & Loading Times ---
 _GLOBAL_STATS_CACHE = {"time": 0, "data": None}
 _TODA_SUMMARY_CACHE = {"time": 0, "data": None}
 _ROUTE_DIST_CACHE = {"time": 0, "data": None}
+_ALL_DEDUPED_CACHE = {"time": 0, "data": None}
+_ROUTE_RECORDS_CACHE = {} 
 
 def clear_api_caches():
     """Flushes the lightning RAM cache when a record is added, edited, or deleted."""
-    global _GLOBAL_STATS_CACHE, _TODA_SUMMARY_CACHE, _ROUTE_DIST_CACHE
+    global _GLOBAL_STATS_CACHE, _TODA_SUMMARY_CACHE, _ROUTE_DIST_CACHE, _ALL_DEDUPED_CACHE, _ROUTE_RECORDS_CACHE
     _GLOBAL_STATS_CACHE["time"] = 0
     _TODA_SUMMARY_CACHE["time"] = 0
     _ROUTE_DIST_CACHE["time"] = 0
+    _ALL_DEDUPED_CACHE["time"] = 0
+    _ROUTE_RECORDS_CACHE.clear()
 
 def get_base_sbn(sbn):
     sbn = str(sbn).strip().upper()
@@ -433,7 +450,7 @@ def get_sbn_sort_key(record):
     return val if val is not None else 999999
 
 def generate_next_sbn(db: Session, route: str) -> str:
-    route_upper = route.strip().upper()
+    route_upper = alias_route(route.strip().upper())
     records = db.query(FranchiseRecord.sbn_no).filter(
         FranchiseRecord.route == route_upper,
         FranchiseRecord.is_deleted == False
@@ -471,7 +488,7 @@ def generate_next_sbn(db: Session, route: str) -> str:
 
 def get_dominant_driving_route(db: Session, route_name: str) -> str:
     records = db.query(FranchiseRecord.driving_route).filter(
-        FranchiseRecord.route == route_name.upper(),
+        FranchiseRecord.route == alias_route(route_name),
         FranchiseRecord.driving_route != None,
         FranchiseRecord.driving_route != "",
         FranchiseRecord.is_deleted == False
@@ -506,8 +523,15 @@ def deduplicate_records_by_base_sbn(records):
     return list(unique_map.values())
 
 def get_all_deduplicated_records(db: Session):
+    global _ALL_DEDUPED_CACHE
+    if time.time() - _ALL_DEDUPED_CACHE["time"] < 60 and _ALL_DEDUPED_CACHE["data"] is not None:
+        return _ALL_DEDUPED_CACHE["data"]
+        
     all_records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
-    return deduplicate_records_by_base_sbn(all_records)
+    result = deduplicate_records_by_base_sbn(all_records)
+    _ALL_DEDUPED_CACHE["data"] = result
+    _ALL_DEDUPED_CACHE["time"] = time.time()
+    return result
 
 def escape_excel(val):
     if not val:
@@ -516,6 +540,31 @@ def escape_excel(val):
     if s.startswith(('=', '+', '-', '@', '\t', '\r')):
         return f"'{s}"
     return s
+
+# --- GLOBAL ROUTE DISPLAY MAP ---
+ROUTE_DISPLAY_MAP = {
+    "BATODA": "BATODA (BANCAAN/SAPA)",
+    "BBSTODA": "BBSTODA (BUCANA/BAGONG KALSADA/SAPA)",
+    "CNTODA": "CNTODA (CIUDAD NUEVO)",
+    "CO1TODA": "CO1TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "CO2TODA": "CO2TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "DOMMSATODA": "DOMMSATODA (MUZON)",
+    "HCTODA": "HCTODA (HALANG/CALUBCOB)",
+    "HMTODA": "HMTODA (HUMBAC/MAKINA)",
+    "HVRTODA": "HVRTODA (HILLSVIEW/TIMALAN BALSAHAN)",
+    "MALATODA": "MALATODA (MABULO/LABAC)",
+    "MMTODA": "MMTODA (MALAINEN LUMA/MOLINO)",
+    "MMGTODA": "MMGTODA (MUNTING MAPINO)",
+    "NCTODA": "NPTODA (POBLACION)", # Alias target
+    "NPTODA": "NPTODA (POBLACION)", 
+    "PAL1TODA": "PAL1TODA (PALANGUE CENTRAL)",
+    "PAL2TODA": "PAL2&3TODA (PALANGUE 2&3)",
+    "SABANGTODA": "SABANGTODA (SABANG)",
+    "SMSTODA": "SMSTODA (SAN ROQUE/M. BAGO/SANTULAN)",
+    "TCTODA": "TCTODA (TIMALAN CONCEPCION)",
+    "VASTODA": "VASTODA (VILLA APOLONIA)",
+    "VISTODA": "VISTODA (FREEDOMVILLE)"
+}
 
 def get_toda_summary_data(db: Session):
     global _TODA_SUMMARY_CACHE
@@ -534,30 +583,6 @@ def get_toda_summary_data(db: Session):
         route_totals[r.route] = route_totals.get(r.route, 0) + 1
         if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
             route_counts[r.route] = route_counts.get(r.route, 0) + 1
-
-    ROUTE_DISPLAY_MAP = {
-        "BATODA": "BATODA (BANCAAN/SAPA)",
-        "BBSTODA": "BBSTODA (BUCANA/BAGONG KALSADA/SAPA)",
-        "CNTODA": "CNTODA (CIUDAD NUEVO)",
-        "CO1TODA": "CO1TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-        "CO2TODA": "CO2TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-        "DOMMSATODA": "DOMMSATODA (MUZON)",
-        "HCTODA": "HCTODA (HALANG/CALUBCOB)",
-        "HMTODA": "HMTODA (HUMBAC/MAKINA)",
-        "HVRTODA": "HVRTODA (HILLSVIEW/TIMALAN BALSAHAN)",
-        "MALATODA": "MALATODA (MABULO/LABAC)",
-        "MMTODA": "MMTODA (MALAINEN LUMA/MOLINO)",
-        "MMGTODA": "MMGTODA (MUNTING MAPINO)",
-        "NCTODA": "NCTODA (POBLACION)",
-        "NPTODA": "NPTODA (POBLACION)", 
-        "PAL1TODA": "PAL1TODA (PALANGUE CENTRAL)",
-        "PAL2TODA": "PAL2&3TODA (PALANGUE 2&3)",
-        "SABANGTODA": "SABANGTODA (SABANG)",
-        "SMSTODA": "SMS ODA (SAN ROQUE/M. BAGO/SANTULAN)",
-        "TCTODA": "TCTODA (TIMALAN CONCEPCION)",
-        "VASTODA": "VASTODA (VILLA APOLONIA)",
-        "VISTODA": "VISTODA (FREEDOMVILLE)"
-    }
             
     rows = [
         {
@@ -636,7 +661,7 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
 
 @app.delete("/api/routes/{route_name}")
 def delete_entire_route(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    route_to_delete = route_name.strip().upper()
+    route_to_delete = alias_route(route_name)
     records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
     
     if not records:
@@ -654,6 +679,49 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
     log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
     return {"message": f"Route '{route_to_delete}' deleted successfully."}
 
+@app.put("/api/routes/{route_name}/rename")
+def rename_route(route_name: str, payload: RouteRenameRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    old_route = alias_route(route_name)
+    new_route = alias_route(payload.new_route_name)
+    new_prefix = payload.new_prefix.strip().upper()
+    
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.route == old_route, FranchiseRecord.is_deleted == False).all()
+    if not records:
+        raise HTTPException(status_code=404, detail="No records found for this route.")
+        
+    count = 0
+    for r in records:
+        r.route = new_route
+        if payload.new_driving_route:
+            r.driving_route = payload.new_driving_route.strip().upper()
+        
+        # Update prefix safely
+        if new_prefix:
+            sbn_int = extract_sbn_integer(r.sbn_no)
+            if sbn_int is not None:
+                padding = 4 if sbn_int >= 1000 else 3
+                base_sbn = f"{new_prefix}-{sbn_int:0{padding}d}"
+                is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+                r.sbn_no = format_sbn_with_year(base_sbn, r.issue_date, is_vacant)
+            
+        r.updated_at = get_pht_now()
+        count += 1
+        
+    # Migrate demographics if they exist
+    old_route_info = db.query(RouteData).filter(RouteData.route_name == old_route).first()
+    if old_route_info and old_route != new_route:
+        new_route_info = db.query(RouteData).filter(RouteData.route_name == new_route).first()
+        if not new_route_info:
+            db.add(RouteData(route_name=new_route, population=old_route_info.population, road_length_km=old_route_info.road_length_km))
+        db.delete(old_route_info)
+        
+    db.commit()
+    invalidate_ml_cache(old_route)
+    invalidate_ml_cache(new_route)
+    clear_api_caches()
+    log_action(db, get_full_name(current_user), "RENAME_ROUTE", "0", new_route, f"Renamed route {old_route} to {new_route} with prefix {new_prefix}. Updated {count} records.")
+    return {"status": "success", "message": f"Successfully renamed {count} records to {new_route}.", "new_route": new_route}
+
 @app.post("/admin/refresh-db")
 def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     all_records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
@@ -663,6 +731,8 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
     current_year = get_pht_now().year
     
     for r in all_records:
+        r.route = alias_route(r.route) # Ensure silent fix
+        
         sbn_str = str(r.sbn_no).strip().upper()
         sbn_int = extract_sbn_integer(sbn_str)
         if not sbn_str or sbn_int == 0:
@@ -804,9 +874,10 @@ def update_settings(settings: SettingsUpdate, current_user: User = Depends(get_c
 
 @app.post("/route_data/{route_name}")
 def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    route_info = db.query(RouteData).filter(RouteData.route_name == route_name.upper()).first()
+    route_name = alias_route(route_name)
+    route_info = db.query(RouteData).filter(RouteData.route_name == route_name).first()
     if not route_info:
-        route_info = RouteData(route_name=route_name.upper(), population=payload.population, road_length_km=payload.road_length_km)
+        route_info = RouteData(route_name=route_name, population=payload.population, road_length_km=payload.road_length_km)
         db.add(route_info)
     else:
         route_info.population = payload.population
@@ -814,8 +885,8 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
     db.commit()
     invalidate_ml_cache(route_name) 
     clear_api_caches()
-    log_action(db, get_full_name(current_user), "UPDATE_ROUTE_DATA", "0", route_name.upper(), f"Updated X2 and X3 factors.")
-    return {"status": "success", "message": f"Updated demographic data for {route_name.upper()}"}
+    log_action(db, get_full_name(current_user), "UPDATE_ROUTE_DATA", "0", route_name, f"Updated X2 and X3 factors.")
+    return {"status": "success", "message": f"Updated demographic data for {route_name}"}
 
 @app.get("/system/network")
 def get_network_status():
@@ -843,7 +914,8 @@ def create_operator_api(record: FranchiseCreate, current_user: User = Depends(ge
 
 @app.post("/franchise/")
 def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    run_kmeans_clustering(db, record.route.upper())
+    record.route = alias_route(record.route)
+    run_kmeans_clustering(db, record.route)
 
     full_name = get_full_name(current_user)
     current_time = get_pht_now()
@@ -894,6 +966,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
     if not db_record: raise HTTPException(status_code=404)
     
+    record.route = alias_route(record.route)
     raw_old_sbn = str(db_record.sbn_no).strip().upper()
     raw_new_sbn = str(record.sbn_no).strip().upper()
     
@@ -1002,7 +1075,7 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
             new_record = FranchiseRecord(
                 id=r.id, sbn_no=format_sbn_with_year(r.sbn_no, r.issue_date, is_vac), operator_name=r.operator_name,
                 address=r.address, motor_no=r.motor_no, chassis_no=r.chassis_no,
-                make=r.make, plate_no=r.plate_no, route=r.route,
+                make=r.make, plate_no=r.plate_no, route=alias_route(r.route),
                 driving_route=r.driving_route, issue_date=r.issue_date,
                 valid_until=r.valid_until, is_active=r.is_active,
                 processed_by=get_full_name(current_user), 
@@ -1025,12 +1098,13 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
 
 @app.post("/upload/bulk/{route_name}")
 async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    route_name = alias_route(route_name)
     full_name = get_full_name(current_user)
     imported_count = 0
     current_time = get_pht_now()
     error_log = [] 
     
-    existing_route_records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper(), FranchiseRecord.is_deleted == False).all()
+    existing_route_records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name, FranchiseRecord.is_deleted == False).all()
 
     sbn_map = {normalize_base_sbn(pr.sbn_no): pr for pr in existing_route_records}
     plate_map = {pr.plate_no: pr for pr in existing_route_records if pr.plate_no}
@@ -1124,7 +1198,7 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                             operator_name=name.upper() if name else "",
                             address=address.upper() if address else "", motor_no=motor.upper() if motor else "",
                             plate_no=clean_plate.upper() if clean_plate else "", chassis_no=chassis.upper() if chassis else "",
-                            make=make.upper() if make else "", route=route_name.upper(), driving_route="", 
+                            make=make.upper() if make else "", route=route_name, driving_route="", 
                             issue_date=parsed_date, valid_until=datetime(parsed_date.year, 12, 31) if parsed_date else None,
                             processed_by=full_name, is_active=False if is_vacant else determine_status(parsed_date)
                         )
@@ -1133,7 +1207,7 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                         imported_count += 1
 
             elif file.filename.endswith(".docx"):
-                extracted = extract_docx_data(contents, route_name.upper(), current_time.year)
+                extracted = extract_docx_data(contents, route_name, current_time.year)
                 is_vacant = not extracted['operator_name'] or str(extracted['operator_name']).strip() == ""
                 issue_date = parse_safe_date(extracted['issue_date'], current_time.year)
                 
@@ -1186,7 +1260,7 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                             plate_no=clean_plate.upper() if clean_plate else "",
                             chassis_no=extracted['chassis_no'].upper() if extracted['chassis_no'] else "",
                             make=extracted['make'].upper() if extracted['make'] else "",
-                            route=route_name.upper(),
+                            route=route_name,
                             driving_route=extracted['driving_route'].upper() if extracted.get('driving_route') else "",
                             issue_date=issue_date,
                             valid_until=datetime(issue_date.year, 12, 31) if issue_date else None,
@@ -1207,14 +1281,14 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
 
     dominant_route = get_dominant_driving_route(db, route_name)
     if dominant_route:
-        for pr in db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper(), FranchiseRecord.is_deleted == False).all():
+        for pr in db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name, FranchiseRecord.is_deleted == False).all():
             curr_dr = str(pr.driving_route).strip().upper() if pr.driving_route else ""
             if curr_dr == "" or (curr_dr == "POBLACION" and dominant_route != "POBLACION"):
                 pr.driving_route = dominant_route
         db.commit()
 
     clear_api_caches()
-    log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name.upper(), f"Imported/Updated {imported_count} records. Errors: {len(error_log)}")
+    log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name, f"Imported/Updated {imported_count} records. Errors: {len(error_log)}")
     
     return {
         "imported": imported_count,
@@ -1279,30 +1353,48 @@ async def generate_doc(record_id: str, current_user: User = Depends(get_current_
 
 @app.get("/franchise/route/{route_name}")
 def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    route_upper = route_name.upper()
+    route_upper = alias_route(route_name)
     
+    global _ROUTE_RECORDS_CACHE
+    if route_upper in _ROUTE_RECORDS_CACHE and time.time() - _ROUTE_RECORDS_CACHE[route_upper]["time"] < 60:
+        return _ROUTE_RECORDS_CACHE[route_upper]["data"]
+
     if route_upper == "ALL":
-        records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
+        deduped_records = get_all_deduplicated_records(db)
     elif "," in route_upper:
-        route_list = [r.strip() for r in route_upper.split(",")]
+        route_list = [alias_route(r.strip()) for r in route_upper.split(",")]
         records = db.query(FranchiseRecord).filter(
             FranchiseRecord.route.in_(route_list), 
             FranchiseRecord.is_deleted == False
         ).all()
+        deduped_records = deduplicate_records_by_base_sbn(records)
     else:
         records = db.query(FranchiseRecord).filter(
             FranchiseRecord.route == route_upper, 
             FranchiseRecord.is_deleted == False
         ).all()
-
-    deduped_records = deduplicate_records_by_base_sbn(records)
+        deduped_records = deduplicate_records_by_base_sbn(records)
 
     for record in deduped_records:
         is_vac = not record.operator_name or str(record.operator_name).strip() == ""
         record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant=is_vac)
 
     sorted_records = sorted(deduped_records, key=get_sbn_sort_key)
-    return [attach_status(r) for r in sorted_records]
+    result = [attach_status(r) for r in sorted_records]
+    
+    _ROUTE_RECORDS_CACHE[route_upper] = {"time": time.time(), "data": result}
+    return result
+
+@app.get("/api/route-info/{route_name}")
+def get_route_info(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    route_upper = alias_route(route_name)
+    display_name = ROUTE_DISPLAY_MAP.get(route_upper, f"{route_upper} REGISTRY")
+    dominant_route = get_dominant_driving_route(db, route_upper)
+    return {
+        "route": route_upper,
+        "display_name": display_name,
+        "dominant_route": dominant_route
+    }
 
 @app.get("/franchise/status/inactive")
 def get_inactive_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1321,14 +1413,15 @@ def get_inactive_records(current_user: User = Depends(get_current_user), db: Ses
 
 @app.get("/predict/{route}")
 def get_prediction(route: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return run_kmeans_clustering(db, route)
+    return run_kmeans_clustering(db, alias_route(route))
 
 @app.get("/export/masterlist/{route_name}")
 def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if route_name.upper() == "ALL":
+    route_upper = alias_route(route_name)
+    if route_upper == "ALL":
         records_query = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
     else:
-        records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_name.upper(), FranchiseRecord.is_deleted == False).all()
+        records_query = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_upper, FranchiseRecord.is_deleted == False).all()
         
     records_query = deduplicate_records_by_base_sbn(records_query)
     records_query = sorted(records_query, key=get_sbn_sort_key)
@@ -1459,11 +1552,11 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
     output.seek(0)
     
     if status_filter == "ALL":
-        filename_str = f"{route_name.upper()} {current_year}.xlsx"
+        filename_str = f"{route_upper} {current_year}.xlsx"
     else:
-        filename_str = f"{route_name.upper()} {current_year} - {status_filter.upper()}.xlsx"
+        filename_str = f"{route_upper} {current_year} - {status_filter.upper()}.xlsx"
 
-    log_action(db, get_full_name(current_user), "EXPORT_MASTERLIST", "0", route_name.upper(), f"Exported {status_filter} Masterlist for {route_name.upper()}")
+    log_action(db, get_full_name(current_user), "EXPORT_MASTERLIST", "0", route_upper, f"Exported {status_filter} Masterlist for {route_upper}")
     
     headers = {
         'Content-Disposition': f'attachment; filename="{filename_str}"'
@@ -1581,74 +1674,6 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
     
     _GLOBAL_STATS_CACHE["data"] = res
     _GLOBAL_STATS_CACHE["time"] = time.time()
-    return res
-
-def get_toda_summary_data(db: Session):
-    global _TODA_SUMMARY_CACHE
-    if time.time() - _TODA_SUMMARY_CACHE["time"] < 60 and _TODA_SUMMARY_CACHE["data"]:
-        return _TODA_SUMMARY_CACHE["data"]
-
-    current_time = get_pht_now()
-    current_year = current_time.year
-    as_of_date = current_time.strftime("%B %d, %Y").upper()
-    
-    deduped_all = get_all_deduplicated_records(db)
-    route_counts = {}
-    route_totals = {}
-    
-    for r in deduped_all:
-        route_totals[r.route] = route_totals.get(r.route, 0) + 1
-        if r.issue_date and r.issue_date.year == current_year and r.operator_name and str(r.operator_name).strip() != "":
-            route_counts[r.route] = route_counts.get(r.route, 0) + 1
-
-    ROUTE_DISPLAY_MAP = {
-        "BATODA": "BA TODA (BANCAAN/SAPA)",
-        "BBSTODA": "BBS TODA (BUCANA/BAGONG KALSADA/SAPA)",
-        "CNTODA": "CN TODA (CIUDAD NUEVO)",
-        "CO1TODA": "CO1 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-        "CO2TODA": "CO2 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-        "DOMMSATODA": "DOMMSA TODA (MUZON)",
-        "HCTODA": "HC TODA (HALANG/CALUBCOB)",
-        "HMTODA": "HM TODA (HUMBAC/MAKINA)",
-        "HVRTODA": "HVR TODA (HILLSVIEW/TIMALAN BALSAHAN)",
-        "MALATODA": "MALA TODA (MABULO/LABAC)",
-        "MMTODA": "MM TODA (MALAINEN LUMA/MOLINO)",
-        "MMGTODA": "MMG TODA (MUNTING MAPINO)",
-        "NCTODA": "NC TODA (POBLACION)",
-        "NPTODA": "NP TODA (NAIC PROPER)", 
-        "PAL1TODA": "PAL1 TODA (PALANGUE CENTRAL)",
-        "PAL2TODA": "PAL2&3 TODA (PALANGUE 2&3)",
-        "SABANGTODA": "SABANG TODA (SABANG)",
-        "SMSTODA": "SMS TODA (SAN ROQUE/M. BAGO/SANTULAN)",
-        "TCTODA": "TC TODA (TIMALAN CONCEPCION)",
-        "VASTODA": "VAS TODA (VILLA APOLONIA)",
-        "VISTODA": "VIS TODA (FREEDOMVILLE)"
-    }
-            
-    rows = [
-        {
-            "route": ROUTE_DISPLAY_MAP.get(route, route),
-            "total": route_totals[route], 
-            "renewed": route_counts.get(route, 0)
-        } 
-        for route in sorted(route_totals.keys())
-    ]
-    
-    total_toda = len(rows)
-    grand_total = sum(r["total"] for r in rows)
-    grand_renewed = sum(r["renewed"] for r in rows)
-    
-    res = {
-        "as_of_date": as_of_date,
-        "rows": rows,
-        "total_toda": total_toda,
-        "grand_total": grand_total,
-        "grand_renewed": grand_renewed,
-        "year": current_year
-    }
-    
-    _TODA_SUMMARY_CACHE["data"] = res
-    _TODA_SUMMARY_CACHE["time"] = time.time()
     return res
 
 @app.get("/api/toda-summary")

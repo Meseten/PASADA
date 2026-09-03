@@ -334,21 +334,15 @@ export default function Dashboard() {
               </div>
             ) : summaryData ? (
               <div className="space-y-4">
-                {/* <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-xl flex justify-between items-center">
-                  <span className="text-sm font-bold text-blue-800 dark:text-blue-300">AS OF DATE</span>
-                  <Badge variant="outline" className="bg-white dark:bg-slate-900 border-blue-300 dark:border-blue-700 font-bold text-sm">
-                    {summaryData.as_of_date}
-                  </Badge>
-                </div> */}
                 
                 <div className="border rounded-xl overflow-hidden shadow-sm">
                   <Table>
                     <TableHeader className="bg-muted/30">
                       <TableRow>
                         <TableHead className="font-bold w-16">#</TableHead>
-                        <TableHead className="font-bold">TODA</TableHead>
-                        <TableHead className="font-bold text-center">MEMBER PER TODA</TableHead>
-                        <TableHead className="font-bold text-center text-emerald-600">
+                        <TableHead className="font-bold uppercase">TODA</TableHead>
+                        <TableHead className="font-bold text-center uppercase">MEMBER PER TODA</TableHead>
+                        <TableHead className="font-bold text-center text-emerald-600 uppercase">
                           RENEWAL AS OF <br /> {summaryData.as_of_date}
                         </TableHead>
                       </TableRow>
@@ -609,12 +603,23 @@ export default function Dashboard() {
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />                                  
                 <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={10} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />                                  
                 <YAxis fontSize={11} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />                                  
-                <Tooltip                                      
-                  cursor={{ fill: 'transparent' }}                                      
-                  contentStyle={{ fontSize: '11px', borderRadius: '6px', padding: '4px 8px', fontWeight: 'bold', border: 'none', backgroundColor: '#1e293b', color: '#f8fafc' }}                                      
-                  itemStyle={{ color: '#60a5fa' }}                                      
-                  formatter={(value: any, name: any) => [value, name === 'active' ? 'Active Renewals' : 'Unrenewed/Vacant']}                                  
-                />                                  
+                <Tooltip
+                  cursor={{ fill: 'transparent' }}
+                  content={({ active, payload, label }) => {
+                    if (active && payload && payload.length) {
+                      const data = payload[0].payload;
+                      return (
+                        <div className="bg-slate-900 text-slate-100 p-3 rounded-lg shadow-xl border border-slate-800 text-xs font-bold z-50">
+                          <p className="text-[14px] text-blue-400 mb-2 border-b border-slate-700 pb-1">{label}</p>
+                          <p className="mb-1 text-slate-300">Total: <span className="font-mono text-[13px] text-white ml-1">{data.total}</span></p>
+                          <p className="text-emerald-400 mb-1">Active: <span className="font-mono text-[13px] ml-1">{data.active}</span></p>
+                          <p className="text-red-400">Unrenewed/Vacant: <span className="font-mono text-[13px] ml-1">{data.remaining}</span></p>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />                               
                 <Bar dataKey="active" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} />                                
                 <Bar dataKey="remaining" stackId="a" fill="#64748b" radius={[3, 3, 0, 0]} />                              
               </BarChart>                          
