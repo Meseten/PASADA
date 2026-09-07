@@ -39,6 +39,7 @@ import uvicorn
 
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import func, extract, create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -208,14 +209,14 @@ def init_settings(db: Session):
 # --- PYDANTIC MODELS ---
 class FranchiseCreate(BaseModel):
     sbn_no: Optional[str] = ""
-    operator_name: str
-    address: str
-    motor_no: str
-    chassis_no: str
-    make: str
-    plate_no: str
+    operator_name: Optional[str] = ""
+    address: Optional[str] = ""
+    motor_no: Optional[str] = ""
+    chassis_no: Optional[str] = ""
+    make: Optional[str] = ""
+    plate_no: Optional[str] = ""
     route: str
-    driving_route: str = ""
+    driving_route: Optional[str] = ""
     issue_date: Optional[str] = ""
     valid_until: Optional[str] = ""
 
@@ -303,8 +304,24 @@ def attach_status(record: FranchiseRecord):
     record.status = compute_record_status(record)
     return record
 
-def log_action(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str):
-    new_log = AuditLog(clerk_name=clerk_name, action=action, target_id=str(target_id), target_route=target_route, details=details)
+def log_action(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str,
+               operator_name: Optional[str] = None, sbn_no: Optional[str] = None, field_changed: Optional[str] = None,
+               old_value: Optional[str] = None, new_value: Optional[str] = None, secondary_value: Optional[str] = None, 
+               ip_or_source: Optional[str] = None):
+    new_log = AuditLog(
+        clerk_name=clerk_name, 
+        action=action, 
+        target_id=str(target_id), 
+        target_route=target_route, 
+        details=details,
+        operator_name=operator_name,
+        sbn_no=sbn_no,
+        field_changed=field_changed,
+        old_value=old_value,
+        new_value=new_value,
+        secondary_value=secondary_value,
+        ip_or_source=ip_or_source
+    )
     db.add(new_log)
     db.commit()
 
@@ -543,27 +560,27 @@ def escape_excel(val):
 
 # --- GLOBAL ROUTE DISPLAY MAP ---
 ROUTE_DISPLAY_MAP = {
-    "BATODA": "BATODA (BANCAAN/SAPA)",
-    "BBSTODA": "BBSTODA (BUCANA/BAGONG KALSADA/SAPA)",
-    "CNTODA": "CNTODA (CIUDAD NUEVO)",
-    "CO1TODA": "CO1TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-    "CO2TODA": "CO2TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-    "DOMMSATODA": "DOMMSATODA (MUZON)",
-    "HCTODA": "HCTODA (HALANG/CALUBCOB)",
-    "HMTODA": "HMTODA (HUMBAC/MAKINA)",
-    "HVRTODA": "HVRTODA (HILLSVIEW/TIMALAN BALSAHAN)",
-    "MALATODA": "MALATODA (MABULO/LABAC)",
-    "MMTODA": "MMTODA (MALAINEN LUMA/MOLINO)",
-    "MMGTODA": "MMGTODA (MUNTING MAPINO)",
-    "NCTODA": "NPTODA (POBLACION)", # Alias target
-    "NPTODA": "NPTODA (POBLACION)", 
-    "PAL1TODA": "PAL1TODA (PALANGUE CENTRAL)",
-    "PAL2TODA": "PAL2&3TODA (PALANGUE 2&3)",
-    "SABANGTODA": "SABANGTODA (SABANG)",
-    "SMSTODA": "SMSTODA (SAN ROQUE/M. BAGO/SANTULAN)",
-    "TCTODA": "TCTODA (TIMALAN CONCEPCION)",
-    "VASTODA": "VASTODA (VILLA APOLONIA)",
-    "VISTODA": "VISTODA (FREEDOMVILLE)"
+    "BATODA": "BA TODA (BANCAAN/SAPA)",
+    "BBSTODA": "BBS TODA (BUCANA/BAGONG KALSADA/SAPA)",
+    "CNTODA": "CN TODA (CIUDAD NUEVO)",
+    "CO1TODA": "CO1 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "CO2TODA": "CO2 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "DOMMSATODA": "DOMMSA TODA (MUZON)",
+    "HCTODA": "HC TODA (HALANG/CALUBCOB)",
+    "HMTODA": "HM TODA (HUMBAC/MAKINA)",
+    "HVRTODA": "HVR TODA (HILLSVIEW/TIMALAN BALSAHAN)",
+    "MALATODA": "MALA TODA (MABULO/LABAC)",
+    "MMTODA": "MM TODA (MALAINEN LUMA/MOLINO)",
+    "MMGTODA": "MMG TODA (MUNTING MAPINO)",
+    "NCTODA": "NP TODA (POBLACION)", # Alias target
+    "NPTODA": "NP TODA (POBLACION)", 
+    "PAL1TODA": "PAL1 TODA (PALANGUE CENTRAL)",
+    "PAL2TODA": "PAL2&3 TODA (PALANGUE 2&3)",
+    "SABANGTODA": "SABANG TODA (SABANG)",
+    "SMSTODA": "SMS TODA (SAN ROQUE/M. BAGO/SANTULAN)",
+    "TCTODA": "TC TODA (TIMALAN CONCEPCION)",
+    "VASTODA": "VAS TODA (VILLA APOLONIA)",
+    "VISTODA": "VIS TODA (FREEDOMVILLE)"
 }
 
 def get_toda_summary_data(db: Session):
@@ -945,9 +962,15 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
         **update_data, processed_by=full_name, issue_date=actual_issue_date,
         valid_until=actual_valid_until, is_active=actual_active
     )
-    db.add(new_record)
-    db.commit()
-    db.refresh(new_record)
+    
+    try:
+        db.add(new_record)
+        db.commit()
+        db.refresh(new_record)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to add. SBN {record.sbn_no} already exists or violates constraints.")
+        
     invalidate_ml_cache(new_record.route)
     clear_api_caches()
     
@@ -979,6 +1002,14 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     
     current_time = get_pht_now()
     
+    # Store old motor details for logging
+    old_motor = str(db_record.motor_no or "").strip()
+    new_motor = str(record.motor_no or "").strip()
+    old_chassis = str(db_record.chassis_no or "").strip()
+    new_chassis = str(record.chassis_no or "").strip()
+    old_make = str(db_record.make or "").strip()
+    new_make = str(record.make or "").strip()
+    
     # --- NEW DATE SMART-OVERRIDE LOGIC ---
     def safe_date_str(dt):
         return dt.strftime('%Y-%m-%d') if dt else ""
@@ -1000,9 +1031,9 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
         db_record.valid_until = None
     else:
         if (
-            str(db_record.motor_no).strip().upper() != str(record.motor_no).strip().upper() or
-            str(db_record.chassis_no).strip().upper() != str(record.chassis_no).strip().upper() or
-            str(db_record.make).strip().upper() != str(record.make).strip().upper()
+            old_motor.upper() != new_motor.upper() or
+            old_chassis.upper() != new_chassis.upper() or
+            old_make.upper() != new_make.upper()
         ):
             is_change_motor = True
             db_record.issue_date = manual_issue if user_changed_issue else current_time
@@ -1034,13 +1065,45 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     for key, value in update_data.items():
         setattr(db_record, key, value)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to update. SBN {record.sbn_no} might conflict with an existing record.")
+
     invalidate_ml_cache(db_record.route)
     clear_api_caches()
     full_name = get_full_name(current_user)
     
     if is_change_motor:
-        log_action(db, full_name, "CHANGE_MOTOR", db_record.id, db_record.route, f"Processed Change Motor for {db_record.operator_name or 'VACANT'}. Updated Date Issued to {db_record.issue_date.strftime('%Y-%m-%d')}.")
+        old_motor_disp = old_motor if old_motor else "NONE"
+        new_motor_disp = new_motor if new_motor else "NONE"
+        old_chas_disp = old_chassis if old_chassis else "NONE"
+        new_chas_disp = new_chassis if new_chassis else "NONE"
+        old_make_disp = old_make if old_make else "NONE"
+        new_make_disp = new_make if new_make else "NONE"
+        
+        details_str = f"Motor: {old_motor_disp} -> {new_motor_disp}; Chassis: {old_chas_disp} -> {new_chas_disp}; Make: {old_make_disp} -> {new_make_disp}. Date Issued: {db_record.issue_date.strftime('%Y-%m-%d')}."
+        
+        changed_fields = []
+        if old_motor.upper() != new_motor.upper(): changed_fields.append("MOTOR_NO")
+        if old_chassis.upper() != new_chassis.upper(): changed_fields.append("CHASSIS_NO")
+        if old_make.upper() != new_make.upper(): changed_fields.append("MAKE")
+        
+        log_action(
+            db, 
+            full_name, 
+            "CHANGE_MOTOR", 
+            db_record.id, 
+            db_record.route, 
+            details_str,
+            operator_name=db_record.operator_name,
+            sbn_no=new_base_sbn,
+            field_changed=", ".join(changed_fields),
+            old_value=old_motor_disp,
+            new_value=new_motor_disp,
+            secondary_value=db_record.issue_date.strftime('%Y-%m-%d')
+        )
     elif is_renewal:
         log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
     else:
@@ -1514,6 +1577,7 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
 
         ws['J5'] = "Count:"
         ws['J5'].font = calibri_11_bold
+        ws['J5'].alignment = Alignment(horizontal='right', vertical='center')
         ws['K5'] = f"{current_year}-01-01"
         ws['K5'].font = calibri_11
         ws['K6'] = f"{current_year}-12-31"
@@ -1748,11 +1812,87 @@ def get_record_history(record_id: str, current_user: User = Depends(get_current_
         
     return result
 
-@app.get("/logs")
-def get_audit_logs(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logs = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).limit(200).all()
-    result = []
+@app.get("/logs/actions")
+def get_log_actions(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    actions = db.query(AuditLog.action).filter(AuditLog.action != None).distinct().all()
+    return {"actions": sorted([a[0] for a in actions if a[0]])}
+
+@app.get("/logs/change-motor")
+def get_change_motor_logs(
+    route: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(AuditLog).filter(AuditLog.action == "CHANGE_MOTOR")
+    if route and route.upper() != "ALL":
+        query = query.filter(AuditLog.target_route == alias_route(route))
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (AuditLog.details.ilike(search_term)) |
+            (AuditLog.clerk_name.ilike(search_term)) |
+            (AuditLog.target_id.ilike(search_term)) |
+            (AuditLog.operator_name.ilike(search_term)) |
+            (AuditLog.sbn_no.ilike(search_term))
+        )
+    total_count = query.count()
+    offset = (page - 1) * page_size
+    logs = query.order_by(AuditLog.timestamp.desc()).offset(offset).limit(page_size).all()
     
+    result = []
+    for log in logs:
+        cname = str(log.clerk_name or "SYSTEM ADMIN").strip()
+        if cname.lower() in ["none", "null", ""]: cname = "SYSTEM ADMIN"
+        
+        result.append({
+            "id": log.id,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else "",
+            "user": cname,
+            "route": str(log.target_route or ""),
+            "sbn_no": str(log.sbn_no or ""),
+            "operator_name": str(log.operator_name or ""),
+            "old_value": str(log.old_value or ""),
+            "new_value": str(log.new_value or ""),
+            "field_changed": str(log.field_changed or ""),
+            "secondary_value": str(log.secondary_value or ""),
+            "details": str(log.details or "")
+        })
+    return {"items": result, "total": total_count, "page": page, "page_size": page_size}
+
+@app.get("/logs")
+def get_audit_logs(
+    route: Optional[str] = None, 
+    action: Optional[str] = None,
+    search: Optional[str] = None, 
+    page: int = 1, 
+    page_size: int = 50, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    query = db.query(AuditLog)
+    
+    if route and route.upper() != "ALL":
+        query = query.filter(AuditLog.target_route == alias_route(route))
+    if action and action.upper() != "ALL":
+        query = query.filter(AuditLog.action == action.upper())
+        
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (AuditLog.action.ilike(search_term)) |
+            (AuditLog.details.ilike(search_term)) |
+            (AuditLog.clerk_name.ilike(search_term)) |
+            (AuditLog.target_id.ilike(search_term))
+        )
+        
+    total_count = query.count()
+    offset = (page - 1) * page_size
+    logs = query.order_by(AuditLog.timestamp.desc()).offset(offset).limit(page_size).all()
+    
+    result = []
     for log in logs:
         log_dict = {c.name: getattr(log, c.name) for c in log.__table__.columns}
         
@@ -1778,7 +1918,124 @@ def get_audit_logs(current_user: User = Depends(get_current_user), db: Session =
         
         result.append(log_dict)
         
-    return result
+    return {"items": result, "total": total_count, "page": page, "page_size": page_size}
+
+@app.get("/export/logs/change-motor")
+def export_change_motor_logs(
+    route: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(AuditLog).filter(AuditLog.action == "CHANGE_MOTOR")
+    if route and route.upper() != "ALL":
+        query = query.filter(AuditLog.target_route == alias_route(route))
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (AuditLog.details.ilike(search_term)) |
+            (AuditLog.clerk_name.ilike(search_term)) |
+            (AuditLog.target_id.ilike(search_term)) |
+            (AuditLog.operator_name.ilike(search_term)) |
+            (AuditLog.sbn_no.ilike(search_term))
+        )
+    logs = query.order_by(AuditLog.timestamp.desc()).all()
+    
+    data = []
+    for log in logs:
+        data.append({
+            "Route": str(log.target_route or ""),
+            "SBN": str(log.sbn_no or ""),
+            "Operator": str(log.operator_name or ""),
+            "Field(s) Changed": str(log.field_changed or ""),
+            "Detailed Changes": str(log.details or ""),
+            "New Date Issued": str(log.secondary_value or "")
+        })
+    
+    df = pd.DataFrame(data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        if not df.empty:
+            df.to_excel(writer, index=False, sheet_name="Change Motor")
+        else:
+            pd.DataFrame([{"Message": "No logs found"}]).to_excel(writer, index=False, sheet_name="Change Motor")
+    
+    output.seek(0)
+    current_year = get_pht_now().year
+    filename_str = f"CHANGE MOTOR HISTORY {current_year}.xlsx"
+    
+    log_action(db, get_full_name(current_user), "EXPORT_LOGS", "0", "ALL", "Exported Change Motor Logs")
+    
+    headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+
+@app.get("/export/logs")
+def export_audit_logs(
+    route: Optional[str] = None, 
+    action: Optional[str] = None,
+    search: Optional[str] = None, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    query = db.query(AuditLog)
+    
+    if route and route.upper() != "ALL":
+        query = query.filter(AuditLog.target_route == alias_route(route))
+    if action and action.upper() != "ALL":
+        query = query.filter(AuditLog.action == action.upper())
+        
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (AuditLog.action.ilike(search_term)) |
+            (AuditLog.details.ilike(search_term)) |
+            (AuditLog.clerk_name.ilike(search_term)) |
+            (AuditLog.target_id.ilike(search_term))
+        )
+        
+    logs = query.order_by(AuditLog.timestamp.desc()).all()
+    
+    unified_data = []
+    
+    for log in logs:
+        cname = str(log.clerk_name or "SYSTEM ADMIN").strip()
+        if cname.lower() in ["none", "null", ""]: cname = "SYSTEM ADMIN"
+        
+        tid = str(log.target_id or "")
+        rec_val = "Unknown / Deleted Record"
+        if len(tid) > 10:
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == tid).first()
+            if rec: rec_val = f"{rec.sbn_no} ({rec.operator_name or 'VACANT'})"
+        else:
+            rec_val = tid if tid and tid != "0" else "SYSTEM"
+            
+        row = {
+            "Timestamp": log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else "",
+            "User": cname,
+            "Action": str(log.action or ""),
+            "Route": str(log.target_route or ""),
+            "Target Record": rec_val,
+            "Details": str(log.details or "")
+        }
+        unified_data.append(row)
+            
+    df_unified = pd.DataFrame(unified_data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        if not df_unified.empty:
+            df_unified.to_excel(writer, index=False, sheet_name="All Activity Logs")
+        else:
+            pd.DataFrame([{"Message": "No logs found"}]).to_excel(writer, index=False, sheet_name="All Activity Logs")
+            
+    output.seek(0)
+    
+    current_year = get_pht_now().year
+    filename_str = f"ACTIVITY LOGS {current_year}.xlsx"
+    
+    log_action(db, get_full_name(current_user), "EXPORT_LOGS", "0", "ALL", f"Exported Activity Logs for {current_year}")
+    
+    headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+    return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
 def kill_zombie_port(port):
     try:

@@ -259,10 +259,9 @@ export default function TodaClient() {
   };
 
   const handleOpenAdd = useCallback(() => {
-    const nextSbn = getNextSbnPreview(safeRouteName, members);
     setFormData({
       id: "",
-      sbn_no: nextSbn,
+      sbn_no: "", // FIX: Left blank to allow backend auto-generation without conflict
       operator_name: "",
       address: "",
       motor_no: "",
@@ -275,7 +274,7 @@ export default function TodaClient() {
       valid_until: ""
     });
     setIsAddOpen(true);
-  }, [members, safeRouteName]);
+  }, [safeRouteName]);
 
   const handleOpenRename = useCallback(() => {
     const currentPrefix = members.length > 0 && members[0].sbn_no ? members[0].sbn_no.split('-')[0] : "";
@@ -297,9 +296,16 @@ export default function TodaClient() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const isTyping = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA' || document.activeElement?.tagName === 'SELECT';
+      const isTyping = document.activeElement?.tagName === 'INPUT' || 
+                       document.activeElement?.tagName === 'TEXTAREA' || 
+                       document.activeElement?.tagName === 'SELECT' ||
+                       (document.activeElement as HTMLElement)?.isContentEditable ||
+                       document.activeElement?.getAttribute('role') === 'combobox' ||
+                       document.activeElement?.getAttribute('role') === 'textbox';
+                       
+      const hasOpenModal = document.querySelector('[role="dialog"]') !== null;
       
-      if (e.key === '/' && !isTyping) {
+      if (e.key === '/' && !isTyping && !hasOpenModal) {
         e.preventDefault();
         searchInputRef.current?.focus();
       }
@@ -450,7 +456,7 @@ export default function TodaClient() {
               console.error(e);
             }
             setIsPrintingSummary(false);
-            showToast(`Print dialog opened for TODA Summary.`, "success");
+            showToast(`Print dialog opened for TODA Summary. REMINDER: Please ensure Scale is set to "Actual Size"!`, "success");
             setTimeout(() => window.URL.revokeObjectURL(url), 300000);
           }, 1500); 
         } else {
@@ -677,7 +683,7 @@ export default function TodaClient() {
               console.error(e);
             }
             setIsGeneratingId(null);
-            showToast(`Print dialog opened for ${member.sbn_no}.`, "success");
+            showToast(`Print dialog opened. REMINDER: Please ensure Scale is set to "Actual Size"!`, "success");
             setTimeout(() => window.URL.revokeObjectURL(url), 300000);
           }, 1500); 
         } else {
@@ -704,50 +710,23 @@ export default function TodaClient() {
 
   const downloadBatchDocument = async (member: Member) => {
     try {
-      const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
+      const res = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
       if (res.ok) {
         const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
-        if (blob.type === "application/pdf") {
-          const iframe = document.createElement('iframe');
-          iframe.style.position = 'fixed';
-          iframe.style.right = '-2000px';
-          iframe.style.bottom = '-2000px';
-          iframe.style.width = '500px';
-          iframe.style.height = '500px';
-          iframe.src = url;
-          document.body.appendChild(iframe);
-          
-          return new Promise<void>((resolve) => {
-            setTimeout(() => {
-              try {
-                iframe.contentWindow?.focus();
-                iframe.contentWindow?.print();
-              } catch (e) {
-                console.error(e);
-              }
-              setTimeout(() => {
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(iframe);
-                resolve();
-              }, 1000);
-            }, 1500);
-          });
-        } else {
-          const a = document.createElement("a");
-          a.style.display = 'none';
-          a.href = url;
-          a.download = `${member.sbn_no}.docx`;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-          }, 1000);
-        }
+        const a = document.createElement("a");
+        a.style.display = 'none';
+        a.href = url;
+        a.download = `${member.sbn_no}.docx`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          window.URL.revokeObjectURL(url);
+          document.body.removeChild(a);
+        }, 1000);
       }
     } catch (error) {
-      console.error("Batch print failed", error);
+      console.error("Batch download failed", error);
     }
   };
 
@@ -808,7 +787,7 @@ export default function TodaClient() {
     })
     
     if (filteredTargetRecords.length === 0) {
-      showToast("No records found for the selected date filter.", "error")
+      showToast(`No records found for scope ${batchScope} with filter ${batchFilterType.replace('_', ' ')}.`, "error")
       setBatchPrinting(false)
       return
     }
@@ -818,13 +797,13 @@ export default function TodaClient() {
     for (let i = 0; i < filteredTargetRecords.length; i++) {
       setBatchProgress({ current: i + 1, total: filteredTargetRecords.length })
       await downloadBatchDocument(filteredTargetRecords[i])
-      await new Promise(resolve => setTimeout(resolve, 800))
+      await new Promise(resolve => setTimeout(resolve, 600))
     }
 
     setBatchPrinting(false)
     setBatchModalOpen(false)
     setBatchProgress({ current: 0, total: 0 })
-    showToast(`Batch print complete. Processed ${filteredTargetRecords.length} document(s).`, "success");
+    showToast(`Batch download complete. Saved ${filteredTargetRecords.length} Word document(s).`, "success");
   };
 
   const handleOpenHistory = async (member: Member) => {
@@ -1219,92 +1198,199 @@ export default function TodaClient() {
         </DialogContent>
       </Dialog>
 
-      {/* VIEW DOCUMENT PREVIEW MODAL */}
-      <Dialog open={isViewOpen} onOpenChange={setIsViewOpen}>
-        <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
+      {/* BATCH PRINT DIALOG */}
+      <Dialog open={batchModalOpen} onOpenChange={setBatchModalOpen}>
+        <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold flex items-center gap-2">
-              <Shield className="h-6 w-6 text-blue-600" /> MTOP Certificate Preview
+              <Printer className="h-6 w-6 text-blue-600" /> Print Documents
             </DialogTitle>
             <DialogDescription>
-              Verify operator details before printing or downloading the MTOP form.
+              Select scope and date filter for document batch printing.
             </DialogDescription>
           </DialogHeader>
           
-          {viewMember && (
-            <div className="space-y-4 py-2">
-              <div className="p-4 bg-muted/30 border border-border rounded-xl space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-muted-foreground uppercase">SBN Number</span>
-                  <Badge variant="secondary" className="font-mono text-base font-bold">{viewMember.sbn_no}</Badge>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-muted-foreground uppercase">Operator Name</span>
-                  <span className="font-bold text-foreground text-sm">{viewMember.operator_name || "VACANT SLOT"}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-muted-foreground uppercase">Address</span>
-                  <span className="text-sm font-medium text-foreground text-right">{viewMember.address || "None"}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-muted-foreground uppercase">Route Assignment</span>
-                  <Badge className="font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                    {viewMember.driving_route || viewMember.route}
-                  </Badge>
+          {batchPrinting ? (
+            <div className="flex flex-col items-center justify-center py-8 space-y-6 text-center">
+              <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
+              <div className="space-y-2 w-full">
+                <p className="font-bold text-lg">Preparing Documents</p>
+                <p className="text-sm text-muted-foreground font-medium">
+                  Downloading {batchProgress.current} of {batchProgress.total}...
+                </p>
+                <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
+                  <div 
+                    className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out"
+                    style={{ width: `${Math.max((batchProgress.current / batchProgress.total) * 100, 5)}%` }}
+                  ></div>
                 </div>
               </div>
-              
-              <div className="grid grid-cols-2 gap-3 p-4 bg-muted/30 border border-border rounded-xl text-sm">
-                <div>
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Make / Brand</p>
-                  <p className="font-bold mt-0.5">{viewMember.make || "None"}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Plate Number</p>
-                  <p className="font-mono font-bold mt-0.5">{viewMember.plate_no || "NO PLATE"}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Motor Number</p>
-                  <p className="font-mono font-bold mt-0.5">{viewMember.motor_no || "None"}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Chassis Number</p>
-                  <p className="font-mono font-bold mt-0.5">{viewMember.chassis_no || "None"}</p>
-                </div>
+            </div>
+          ) : (
+            <div className="space-y-6 mt-4">
+              {/* SCOPE SELECTOR */}
+              <div className="space-y-3">
+                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                  <Shield size={14} /> Batch Scope
+                </Label>
+                <select
+                  value={batchScope}
+                  onChange={(e) => setBatchScope(e.target.value)}
+                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                >
+                  <option value="THIS">This TODA Only ({safeRouteName})</option>
+                  <option value="ALL">All TODAs</option>
+                  <option value="CUSTOM">Custom Selection</option>
+                </select>
               </div>
 
-              <div className="flex justify-between items-center px-4 py-3 bg-muted/30 border border-border rounded-xl text-xs font-bold text-muted-foreground">
-                <span>Last Renewal Date: <span className="text-foreground">{formatSafeDate(viewMember.issue_date)}</span></span>
-                <span>Valid Until: <span className="text-foreground">{formatSafeDate(viewMember.valid_until)}</span></span>
+              {/* CUSTOM ROUTE CHECKLIST */}
+              {batchScope === "CUSTOM" && (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select TODAs</Label>
+                  <div className="grid grid-cols-2 gap-2 p-3 border border-border rounded-lg bg-muted/10 max-h-48 overflow-y-auto">
+                    {KNOWN_ROUTES.map(route => (
+                      <label key={route} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={customRoutes.includes(route)}
+                          onChange={(e) => {
+                            if (e.target.checked) setCustomRoutes(prev => [...prev, route]);
+                            else setCustomRoutes(prev => prev.filter(r => r !== route));
+                          }}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        {route}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* DATE FILTER */}
+              <div className="space-y-3">
+                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                  <Filter size={14} /> Date Filter
+                </Label>
+                <select
+                  value={batchFilterType}
+                  onChange={(e) => setBatchFilterType(e.target.value)}
+                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                >
+                  <option value="TODAY_ALL">Today - All Applications</option>
+                  <option value="TODAY_MORNING">Today - Morning (12AM - 11:59AM)</option>
+                  <option value="TODAY_AFTERNOON">Today - Afternoon (12PM - 11:59PM)</option>
+                  <option value="SPECIFIC_DATE">Single Date Selection</option>
+                  <option value="DATE_RANGE">Custom Date Range</option>
+                </select>
               </div>
+
+              {batchFilterType === "SPECIFIC_DATE" && (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                    <Calendar size={14} /> Select Date
+                  </Label>
+                  <Input 
+                    type="date" 
+                    value={batchSpecificDate} 
+                    onChange={(e) => setBatchSpecificDate(e.target.value)} 
+                    className="h-12 font-semibold"
+                  />
+                </div>
+              )}
+
+              {batchFilterType === "DATE_RANGE" && (
+                <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
+                  <div className="space-y-3">
+                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                      <Calendar size={14} /> Start Date
+                    </Label>
+                    <Input type="date" value={batchStartDate} onChange={(e) => setBatchStartDate(e.target.value)} className="h-12 font-semibold" />
+                  </div>
+                  <div className="space-y-3">
+                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                      <Calendar size={14} /> End Date
+                    </Label>
+                    <Input type="date" value={batchEndDate} onChange={(e) => setBatchEndDate(e.target.value)} className="h-12 font-semibold" />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          <DialogFooter className="flex gap-2 sm:justify-end">
-            {viewMember && (
-              <>
-                <Button 
-                  variant="outline" 
-                  onClick={() => handleDownloadWord(viewMember)} 
-                  disabled={isDownloadingId === viewMember.id}
-                  className="font-bold"
-                >
-                  {isDownloadingId === viewMember.id ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
-                  ) : wordSuccessId === viewMember.id ? (
-                    <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
-                  ) : (
-                    <FileText className="mr-2 h-4 w-4 text-blue-600" />
-                  )}
-                  Download Word File
-                </Button>
-                <Button onClick={() => handleNativePrint(viewMember)} disabled={isGeneratingId === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
-                  {isGeneratingId === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
-                  Print MTOP
-                </Button>
-              </>
-            )}
-          </DialogFooter>
+          {!batchPrinting && (
+            <DialogFooter className="pt-4">
+              <Button 
+                onClick={executeBatchPrint}
+                disabled={
+                  (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
+                  (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate)) ||
+                  (batchScope === "CUSTOM" && customRoutes.length === 0)
+                }
+                className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
+              >
+                <CheckCircle className="mr-2 h-5 w-5" /> Start Batch Print
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ADD OPERATOR DIALOG */}
+      <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+        <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold">Add New Operator</DialogTitle>
+            <DialogDescription>Leave fields blank to register a vacant slot.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={(e) => handleSubmitForm(e, true)} className="space-y-5 mt-2">
+            <div className="grid grid-cols-2 gap-5">
+              <div className="space-y-2">
+                <Label className="font-semibold flex justify-between">SBN No. <span className="text-blue-500 font-normal italic text-xs">Auto-Generated</span></Label>
+                <Input name="sbn_no" value={formData.sbn_no} onChange={handleInputChange} placeholder="Auto-assigned if blank" className="border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 font-mono text-lg font-bold shadow-inner h-11 w-full" />
+              </div>
+              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
+            </div>
+            
+            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
+            <div className="space-y-2">
+              <Label className="font-semibold flex justify-between items-center">
+                <span>Barangay <span className="text-[10px] text-muted-foreground font-normal ml-1">(* , NAIC, CAVITE is auto-added)</span></span>
+              </Label>
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11" />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 mt-2">
+                <div className="space-y-2">
+                    <Label className="font-semibold flex justify-between items-center">
+                      <span>Issue Date <span className="text-blue-500 font-normal italic text-[10px] ml-1">Optional Override</span></span>
+                      <button type="button" onClick={() => { const d = new Date(); setFormData({...formData, issue_date: d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')}) }} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200 hover:bg-blue-200 transition-colors font-bold shadow-sm cursor-pointer whitespace-nowrap">Set Today</button>
+                    </Label>
+                    <Input type="date" name="issue_date" value={formData.issue_date} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
+                </div>
+                <div className="space-y-2">
+                    <Label className="font-semibold flex justify-between items-center">
+                      <span>Valid Until <span className="text-blue-500 font-normal italic text-[10px] ml-1">Optional Override</span></span>
+                      <button type="button" onClick={() => setFormData({...formData, valid_until: `${currentYear}-12-31`})} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200 hover:bg-blue-200 transition-colors font-bold shadow-sm cursor-pointer whitespace-nowrap">Set Dec 31, {currentYear}</button>
+                    </Label>
+                    <Input type="date" name="valid_until" value={formData.valid_until} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
+                </div>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
+            <DialogFooter className="pt-4">
+              <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Operator</Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 
@@ -1396,6 +1482,95 @@ export default function TodaClient() {
               ))}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* VIEW DOCUMENT PREVIEW MODAL */}
+      <Dialog open={isViewOpen} onOpenChange={setIsViewOpen}>
+        <DialogContent className="sm:max-w-[550px] shadow-2xl rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold flex items-center gap-2">
+              <Shield className="h-6 w-6 text-blue-600" /> MTOP Certificate Preview
+            </DialogTitle>
+            <DialogDescription>
+              Verify operator details before printing or downloading the MTOP form.
+            </DialogDescription>
+          </DialogHeader>
+          
+          {viewMember && (
+            <div className="space-y-4 py-2">
+              <div className="p-4 bg-muted/30 border border-border rounded-xl space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-muted-foreground uppercase">SBN Number</span>
+                  <Badge variant="secondary" className="font-mono text-base font-bold">{viewMember.sbn_no}</Badge>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-muted-foreground uppercase">Operator Name</span>
+                  <span className="font-bold text-foreground text-sm">{viewMember.operator_name || "VACANT SLOT"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-muted-foreground uppercase">Address</span>
+                  <span className="text-sm font-medium text-foreground text-right">{viewMember.address || "None"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-muted-foreground uppercase">Route Assignment</span>
+                  <Badge className="font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                    {viewMember.driving_route || viewMember.route}
+                  </Badge>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-3 p-4 bg-muted/30 border border-border rounded-xl text-sm">
+                <div>
+                  <p className="text-xs font-bold text-muted-foreground uppercase">Make / Brand</p>
+                  <p className="font-bold mt-0.5">{viewMember.make || "None"}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-muted-foreground uppercase">Plate Number</p>
+                  <p className="font-mono font-bold mt-0.5">{viewMember.plate_no || "NO PLATE"}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-muted-foreground uppercase">Motor Number</p>
+                  <p className="font-mono font-bold mt-0.5">{viewMember.motor_no || "None"}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-muted-foreground uppercase">Chassis Number</p>
+                  <p className="font-mono font-bold mt-0.5">{viewMember.chassis_no || "None"}</p>
+                </div>
+              </div>
+
+              <div className="flex justify-between items-center px-4 py-3 bg-muted/30 border border-border rounded-xl text-xs font-bold text-muted-foreground">
+                <span>Last Renewal Date: <span className="text-foreground">{formatSafeDate(viewMember.issue_date)}</span></span>
+                <span>Valid Until: <span className="text-foreground">{formatSafeDate(viewMember.valid_until)}</span></span>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="flex gap-2 sm:justify-end">
+            {viewMember && (
+              <>
+                <Button 
+                  variant="outline" 
+                  onClick={() => handleDownloadWord(viewMember)} 
+                  disabled={isDownloadingId === viewMember.id}
+                  className="font-bold"
+                >
+                  {isDownloadingId === viewMember.id ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-blue-600" />
+                  ) : wordSuccessId === viewMember.id ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4 text-blue-600" />
+                  )}
+                  Download Word File
+                </Button>
+                <Button onClick={() => handleNativePrint(viewMember)} disabled={isGeneratingId === viewMember.id} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                  {isGeneratingId === viewMember.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Printer className="mr-2 h-4 w-4" />}
+                  Print MTOP
+                </Button>
+              </>
+            )}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -95,6 +95,14 @@ class AuditLog(Base):
     target_id = Column(String)
     target_route = Column(String)
     details = Column(String)
+    # --- NEW STRUCTURED AUDIT FIELDS ---
+    operator_name = Column(String, nullable=True)
+    sbn_no = Column(String, nullable=True)
+    field_changed = Column(String, nullable=True)
+    old_value = Column(String, nullable=True)
+    new_value = Column(String, nullable=True)
+    secondary_value = Column(String, nullable=True)
+    ip_or_source = Column(String, nullable=True)
 
 class SystemSettings(Base):
     __tablename__ = "system_settings"
