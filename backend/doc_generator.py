@@ -84,6 +84,9 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     issue_date_obj = data.get("issue_date") or datetime.now()
     valid_until_obj = data.get("valid_until") or datetime(issue_date_obj.year, 12, 31)
 
+    issue_date_str = f"{issue_date_obj.strftime('%B')} {issue_date_obj.day}, {issue_date_obj.year}"
+    valid_until_str = f"{valid_until_obj.strftime('%B')} {valid_until_obj.day}, {valid_until_obj.year}"
+
     replacements = {
         "[SBN_NO]": data.get("sbn_no", ""),
         "{{SBN_NO}}": data.get("sbn_no", ""),
@@ -101,10 +104,10 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
         "{{PLATE_NO}}": clean_val(data.get("plate_no")),
         "[ROUTE]": data.get("driving_route", "").upper(),
         "{{ROUTE}}": data.get("driving_route", "").upper(),
-        "[ISSUE_DATE]": issue_date_obj.strftime("%B %d, %Y"),
-        "{{ISSUE_DATE}}": issue_date_obj.strftime("%B %d, %Y"),
-        "[VALID_UNTIL]": valid_until_obj.strftime("%B %d, %Y"),
-        "{{VALID_UNTIL}}": valid_until_obj.strftime("%B %d, %Y"),
+        "[ISSUE_DATE]": issue_date_str,
+        "{{ISSUE_DATE}}": issue_date_str,
+        "[VALID_UNTIL]": valid_until_str,
+        "{{VALID_UNTIL}}": valid_until_str,
         "[CHAIRMAN_NAME]": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper(),
         "{{CHAIRMAN_NAME}}": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper()
     }

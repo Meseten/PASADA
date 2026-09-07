@@ -978,6 +978,19 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
     
     current_time = get_pht_now()
+    
+    # --- NEW DATE SMART-OVERRIDE LOGIC ---
+    def safe_date_str(dt):
+        return dt.strftime('%Y-%m-%d') if dt else ""
+        
+    old_issue_str = safe_date_str(db_record.issue_date)
+    new_issue_str = record.issue_date.split('T')[0] if record.issue_date else ""
+    user_changed_issue = (old_issue_str != new_issue_str) and new_issue_str != ""
+    
+    old_valid_str = safe_date_str(db_record.valid_until)
+    new_valid_str = record.valid_until.split('T')[0] if record.valid_until else ""
+    user_changed_valid = (old_valid_str != new_valid_str) and new_valid_str != ""
+
     manual_issue = parse_safe_date(record.issue_date, current_time.year) if record.issue_date else None
     manual_valid = parse_safe_date(record.valid_until, current_time.year) if record.valid_until else None
 
@@ -992,24 +1005,24 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
             str(db_record.make).strip().upper() != str(record.make).strip().upper()
         ):
             is_change_motor = True
-            db_record.issue_date = manual_issue if manual_issue else current_time
-            db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
+            db_record.issue_date = manual_issue if user_changed_issue else current_time
+            db_record.valid_until = manual_valid if user_changed_valid else datetime(db_record.issue_date.year, 12, 31)
             db_record.is_active = True
             
         elif raw_old_sbn != raw_new_sbn: 
             is_renewal = True
-            db_record.issue_date = manual_issue if manual_issue else current_time
-            db_record.valid_until = manual_valid if manual_valid else datetime(db_record.issue_date.year, 12, 31)
+            db_record.issue_date = manual_issue if user_changed_issue else current_time
+            db_record.valid_until = manual_valid if user_changed_valid else datetime(db_record.issue_date.year, 12, 31)
             db_record.is_active = True
 
         else:
-            if manual_issue: 
+            if user_changed_issue: 
                 db_record.issue_date = manual_issue
                 db_record.is_active = determine_status(db_record.issue_date)
             
-            if manual_valid:
+            if user_changed_valid:
                 db_record.valid_until = manual_valid
-            elif manual_issue:
+            elif user_changed_issue:
                 db_record.valid_until = datetime(manual_issue.year, 12, 31)
 
     record.sbn_no = format_sbn_with_year(new_base_sbn, db_record.issue_date, is_vacant)
