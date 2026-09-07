@@ -166,8 +166,18 @@ function GlobalSearchClient() {
 
   const handleOpenEdit = (member: Member) => {
     setActiveMember(member); 
+    
+    let safeAddress = member.address || "";
+    if (safeAddress.toUpperCase().endsWith(", NAIC, CAVITE")) {
+       safeAddress = safeAddress.substring(0, safeAddress.length - 14).trim();
+    } else if (safeAddress.toUpperCase().endsWith("NAIC, CAVITE")) {
+       safeAddress = safeAddress.substring(0, safeAddress.length - 12).trim();
+    }
+    if (safeAddress.endsWith(",")) safeAddress = safeAddress.slice(0, -1).trim();
+    
     setFormData({
         ...member,
+        address: safeAddress,
       issue_date: member.issue_date ? member.issue_date.split('T')[0] : "",
       valid_until: member.valid_until ? member.valid_until.split('T')[0] : ""
     })
@@ -215,8 +225,16 @@ function GlobalSearchClient() {
     try {
       const finalDrivingRoute = formData.driving_route.trim() !== "" ? formData.driving_route : formData.route;
       
+      let finalAddress = formData.address.trim().toUpperCase();
+      if (finalAddress) {
+          if (!finalAddress.endsWith("NAIC, CAVITE")) {
+              finalAddress = finalAddress.endsWith(",") ? `${finalAddress} NAIC, CAVITE` : `${finalAddress}, NAIC, CAVITE`;
+          }
+      }
+      
       const payload = { 
         ...formData, 
+        address: finalAddress,
         driving_route: finalDrivingRoute
       }
       
@@ -343,6 +361,33 @@ function GlobalSearchClient() {
     }
   };
 
+  const renderPagination = (position: 'top' | 'bottom') => (
+    <div className={`flex flex-col sm:flex-row items-center justify-between px-6 py-4 bg-muted/10 border-border/60 ${position === 'top' ? 'border-b' : 'border-t'}`}>
+      <div className="text-sm text-muted-foreground font-bold mb-4 sm:mb-0">
+        Showing {filteredMembers.length === 0 ? 0 : ((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredMembers.length)} of {filteredMembers.length} records
+      </div>
+      <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
+          <select
+              value={rowsPerPage}
+              onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+            className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:16px_16px] h-8 w-20 rounded-md border border-input bg-background text-foreground px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer pr-8"
+          >
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+            <option value={250}>250</option>
+            <option value={500}>500</option>
+          </select>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1 || isLoading}>Previous</Button>
+          <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0 || isLoading}>Next</Button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500 min-h-screen bg-muted/5">
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-6">
@@ -375,6 +420,7 @@ function GlobalSearchClient() {
           </CardDescription>
         </CardHeader>
         <CardContent className="p-0">
+          {renderPagination('top')}
           <div className="overflow-x-auto min-h-[500px]">
             <Table>
               <TableHeader className="bg-muted/20 border-b border-border/60">
@@ -485,32 +531,7 @@ function GlobalSearchClient() {
               </TableBody>
             </Table>
           </div>
-
-          {/* PAGINATION FOOTER */}
-          <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-t border-border/60 bg-muted/10">
-            <div className="text-sm text-muted-foreground font-bold mb-4 sm:mb-0">
-              Showing {filteredMembers.length === 0 ? 0 : ((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredMembers.length)} of {filteredMembers.length} records
-            </div>
-            <div className="flex items-center gap-6">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-muted-foreground">Rows per page:</span>
-                <select
-                    value={rowsPerPage}
-                    onChange={(e) => { setRowsPerPage(Number(e.target.value)); setCurrentPage(1); }}
-                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_0.5rem_center] bg-[length:16px_16px] h-8 w-20 rounded-md border border-input bg-background text-foreground px-3 py-1 text-sm shadow-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer pr-8"
-                >
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                  <option value={250}>250</option>
-                  <option value={500}>500</option>
-                </select>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1 || isLoading}>Previous</Button>
-                <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0 || isLoading}>Next</Button>
-              </div>
-            </div>
-          </div>
+          {renderPagination('bottom')}
         </CardContent>
       </Card>
 
@@ -620,7 +641,12 @@ function GlobalSearchClient() {
             </div>
             
             <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
-            <div className="space-y-2"><Label className="font-semibold">Address</Label><Input name="address" value={formData.address} onChange={handleInputChange} placeholder="Leave blank if Unknown" className="h-11" /></div>
+            <div className="space-y-2">
+              <Label className="font-semibold flex justify-between items-center">
+                <span>Barangay <span className="text-[10px] text-muted-foreground font-normal ml-1">(* , NAIC, CAVITE is auto-added)</span></span>
+              </Label>
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11" />
+            </div>
             
             <div className="grid grid-cols-2 gap-4">
                <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
@@ -634,11 +660,17 @@ function GlobalSearchClient() {
 
             <div className="grid grid-cols-2 gap-4 mt-2">
                 <div className="space-y-2">
-                    <Label className="font-semibold flex justify-between">Issue Date <span className="text-blue-500 font-normal italic text-xs">Optional Override</span></Label>
+                    <Label className="font-semibold flex justify-between items-center">
+                      <span>Issue Date <span className="text-blue-500 font-normal italic text-[10px] ml-1">Optional Override</span></span>
+                      <button type="button" onClick={() => { const d = new Date(); setFormData({...formData, issue_date: d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')}) }} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200 hover:bg-blue-200 transition-colors font-bold shadow-sm cursor-pointer whitespace-nowrap">Set Today</button>
+                    </Label>
                     <Input type="date" name="issue_date" value={formData.issue_date} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
                 </div>
                 <div className="space-y-2">
-                    <Label className="font-semibold flex justify-between">Valid Until <span className="text-blue-500 font-normal italic text-xs">Optional Override</span></Label>
+                    <Label className="font-semibold flex justify-between items-center">
+                      <span>Valid Until <span className="text-blue-500 font-normal italic text-[10px] ml-1">Optional Override</span></span>
+                      <button type="button" onClick={() => setFormData({...formData, valid_until: `${currentYear}-12-31`})} className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200 hover:bg-blue-200 transition-colors font-bold shadow-sm cursor-pointer whitespace-nowrap">Set Dec 31, {currentYear}</button>
+                    </Label>
                     <Input type="date" name="valid_until" value={formData.valid_until} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
                 </div>
             </div>
