@@ -1,6 +1,6 @@
 "use client"; 
 
-import { useState, useRef, useCallback } from "react"; 
+import { useState, useRef, useCallback, useEffect } from "react"; 
 import { UploadCloud, Loader2, FileText, AlertTriangle, Database, CheckCircle2, XCircle, X } from "lucide-react"; 
 import { API_URL, fetchWithAuth } from "@/lib/api"; 
 
@@ -19,7 +19,23 @@ export default function MassImport() {
   const progressInterval = useRef<NodeJS.Timeout | null>(null);   
   const [toasts, setToasts] = useState<Toast[]>([]);   
   
+  // Settings State
+  const [forceOverwrite, setForceOverwrite] = useState(false);
+  const [dbImportMode, setDbImportMode] = useState<'merge' | 'restore'>('merge');
+  
   const isDatabaseFile = files.length === 1 && files[0].name.endsWith(".db");   
+
+  useEffect(() => {
+    // Load Client-side UI preferences
+    const pref = localStorage.getItem("pasada_force_overwrite");
+    if (pref !== null) setForceOverwrite(pref === "true");
+  }, []);
+
+  const handleToggleForceOverwrite = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.checked;
+    setForceOverwrite(val);
+    localStorage.setItem("pasada_force_overwrite", String(val));
+  };
   
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'warning' = 'success') => {     
     const id = Date.now();     
@@ -63,11 +79,21 @@ export default function MassImport() {
     setServerErrors([]);     
     try {       
       if (isDatabaseFile) {         
+        if (dbImportMode === 'restore') {
+            const confirmed = window.confirm("WARNING: Full Restore will OVERWRITE all existing records that match the backup by ID. Are you sure you want to proceed?");
+            if (!confirmed) {
+                setUploading(false);
+                return;
+            }
+        }
+
         startFluidProgress(1.5);         
         const formData = new FormData();         
         formData.append("file", files[0]);         
         
-        const res = await fetchWithAuth(`${API_URL}/upload/database`, {           
+        const endpoint = dbImportMode === 'restore' ? `${API_URL}/restore/database` : `${API_URL}/upload/database`;
+
+        const res = await fetchWithAuth(endpoint, {           
           method: "POST",           
           body: formData         
         });         
@@ -87,10 +113,14 @@ export default function MassImport() {
         const data = await res.json();         
         stopFluidProgress();         
         
-        if (typeof data.imported === 'number') {
-          showToast(`Database imported! Added ${data.imported} new records.`, "success");       
+        if (dbImportMode === 'restore') {
+            showToast(`Database restored! Inserted: ${data.restored_inserted}, Updated: ${data.restored_updated}.`, "success");
         } else {
-          showToast("Database import failed: Invalid server response.", "error");
+            if (typeof data.imported === 'number') {
+              showToast(`Database imported! Added ${data.imported} new records.`, "success");       
+            } else {
+              showToast("Database import failed: Invalid server response.", "error");
+            }
         }
       } else {         
         if (!selectedRoute.trim()) {           
@@ -115,7 +145,7 @@ export default function MassImport() {
           chunk.forEach(f => formData.append("files", f));           
           
           try {             
-            const res = await fetchWithAuth(`${API_URL}/upload/bulk/${formattedRoute}`, {               
+            const res = await fetchWithAuth(`${API_URL}/upload/bulk/${formattedRoute}?force_overwrite=${forceOverwrite}`, {               
               method: "POST",               
               body: formData             
             });             
@@ -194,27 +224,68 @@ export default function MassImport() {
         )}                  
         
         <div className="space-y-6">           
-          {!isDatabaseFile && (             
-            <div className="space-y-2 animate-in fade-in">               
-              <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route (e.g., BATODA)</label>               
-              <input                 
-                type="text"                 
-                value={selectedRoute}                 
-                onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}                 
-                disabled={uploading}                 
-                placeholder="E.g. BATODA (Required for Excel/Word files)"                 
-                className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all disabled:opacity-60"               
-              />             
-            </div>           
+          {!isDatabaseFile && (
+            <>
+              <div className="space-y-2 animate-in fade-in">               
+                <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Target Route (e.g., BATODA)</label>               
+                <input                 
+                  type="text"                 
+                  value={selectedRoute}                 
+                  onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}                 
+                  disabled={uploading}                 
+                  placeholder="E.g. BATODA (Required for Excel/Word files)"                 
+                  className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all disabled:opacity-60"               
+                />             
+              </div>
+              <div className="space-y-3 pt-2 pb-2 border-b border-border animate-in fade-in">
+                  <label className="flex items-center gap-3 cursor-pointer w-max">
+                      <input
+                          type="checkbox"
+                          checked={forceOverwrite}
+                          onChange={handleToggleForceOverwrite}
+                          className="w-5 h-5 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                      />
+                      <span className="text-sm font-bold text-red-600 dark:text-red-400">Force overwrite existing records</span>
+                  </label>
+                  <p className="text-xs text-muted-foreground font-medium pl-8">
+                      Fully replaces matched records on re-upload, ignoring dates. Use only when intentionally correcting data.
+                  </p>
+              </div>
+            </>
           )}                      
           
           {isDatabaseFile && (             
-            <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3 animate-in fade-in">               
-              <Database className="text-blue-600" size={24} />               
-              <div>                 
-                <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>                 
-                <p className="text-xs text-blue-600/80 font-semibold">The system will import all records from this backup file.</p>               
-              </div>             
+            <div className="bg-blue-500/10 border border-blue-500/30 p-5 rounded-xl space-y-4 animate-in fade-in">               
+              <div className="flex items-center gap-3">
+                <Database className="text-blue-600 shrink-0" size={24} />               
+                <div>                 
+                  <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>                 
+                  <p className="text-xs text-blue-600/80 font-semibold">Choose how to import records from this backup file.</p>               
+                </div>             
+              </div>
+
+              <div className="space-y-3 pt-2">
+                 <label className="flex items-start gap-3 cursor-pointer">
+                   <input type="radio" name="db_mode" checked={dbImportMode === 'merge'} onChange={() => setDbImportMode('merge')} className="mt-0.5" />
+                   <div>
+                     <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Merge new records only</p>
+                     <p className="text-xs text-muted-foreground font-medium">Adds new records. Existing records are skipped.</p>
+                   </div>
+                 </label>
+                 <label className="flex items-start gap-3 cursor-pointer">
+                   <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} className="mt-0.5" />
+                   <div>
+                     <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (overwrite existing by ID)</p>
+                     <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup.</p>
+                   </div>
+                 </label>
+              </div>
+
+              <div className="bg-background/50 border border-blue-500/20 p-3 rounded-lg mt-2">
+                 <p className="text-xs text-muted-foreground font-medium italic">
+                   Note: Normal re-upload does not reset the system. To reset for testing, download a .db backup first, then use Full Restore to return to that snapshot.
+                 </p>
+              </div>
             </div>           
           )}                      
           
@@ -239,7 +310,7 @@ export default function MassImport() {
             <div className="bg-muted/30 border border-border rounded-xl p-6 text-center space-y-4 animate-in fade-in zoom-in-95">               
               <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />               
               <div>                 
-                <p className="text-sm font-bold">{isDatabaseFile ? "Importing Database..." : "Processing & Merging Files..."}</p>                 
+                <p className="text-sm font-bold">{isDatabaseFile ? (dbImportMode === 'restore' ? "Restoring Database..." : "Importing Database...") : "Processing & Merging Files..."}</p>                 
                 <p className="text-xs text-muted-foreground font-medium mt-1">Please do not close this window.</p>               
               </div>               
               <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner relative">                 
