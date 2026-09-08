@@ -48,7 +48,7 @@ export default function Login() {
     let interval: NodeJS.Timeout;  
     const checkServer = async () => {  
       try {  
-        const res = await fetch(`http://127.0.0.1:43888/health?_t=${Date.now()}`, {  
+        const res = await fetch(`${API_URL}/health?_t=${Date.now()}`, {  
           method: "GET",  
           cache: "no-store"  
         });  
@@ -79,7 +79,7 @@ export default function Login() {
     setError("");  
   
     try {  
-      const res = await fetch(`http://127.0.0.1:43888/token`, {  
+      const res = await fetch(`${API_URL}/token`, {  
         method: "POST",  
         headers: {  
             "Content-Type": "application/json",  
@@ -150,7 +150,7 @@ export default function Login() {
               <input  
                 type="text"  
                 value={username}  
-                onChange={(e) => setUsername(e.target.value)}  
+                onChange={(e) => setUsername(e.target.value.toUpperCase())}  
                 placeholder="E.g. JUAN DELA CRUZ"  
                 className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"  
                 required  
