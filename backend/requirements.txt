@@ -16,3 +16,4 @@ numpy<2
 psutil
 python-jose
 pywin32; sys_platform == 'win32'
+pypdf
