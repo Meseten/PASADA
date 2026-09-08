@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import FranchiseRecord, RouteData
@@ -70,6 +70,8 @@ def run_kmeans_clustering(db: Session, target_route: str):
         # DYNAMIC CLUSTERING TO PREVENT SKLEARN CRASHES
         unique_densities = df['density'].nunique()
         silhouette_val = 0.0
+        davies_bouldin_val = 0.0
+        calinski_harabasz_val = 0.0
         
         if len(df) < 3 or unique_densities < 2:
             df['cluster'] = 0
@@ -90,14 +92,19 @@ def run_kmeans_clustering(db: Session, target_route: str):
             if len(df) >= 3 and n_clusters >= 2:
                 try:
                     silhouette_val = silhouette_score(X_scaled, labels)
+                    davies_bouldin_val = davies_bouldin_score(X_scaled, labels)
+                    calinski_harabasz_val = calinski_harabasz_score(X_scaled, labels)
                 except Exception:
                     silhouette_val = 0.0
+                    davies_bouldin_val = 0.0
+                    calinski_harabasz_val = 0.0
             
             cluster_densities = df.groupby('cluster')['density'].mean().sort_values()
             ranking_map = {cluster_id: rank for rank, (cluster_id, _) in enumerate(cluster_densities.items())}
             df['severity'] = df['cluster'].map(ranking_map)
         
         target_data = df[df['route'] == target_route]
+        has_data = not target_data.empty
         
         if target_data.empty:
             severity, fleet_val, pop_val, road_val, density_val = 0, 0, 5000, 5.0, 0
@@ -131,6 +138,9 @@ def run_kmeans_clustering(db: Session, target_route: str):
             "expected_renewals": fleet_val,  
             "model_confidence": f"Density Score: {round(density_val, 2)}",
             "silhouette": round(silhouette_val, 2),
+            "davies_bouldin": round(davies_bouldin_val, 2),
+            "calinski_harabasz": round(calinski_harabasz_val, 1),
+            "has_demographic_data": has_data,
             "feature_importances": importance_data,
             "historical_trend": [] 
         }]

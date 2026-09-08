@@ -72,7 +72,7 @@ def sync_with_peers():
         db = SessionLocal()
         try:
             latest_record = db.query(FranchiseRecord).order_by(FranchiseRecord.updated_at.desc()).first()
-            last_sync_time = latest_record.updated_at.isoformat() if latest_record else "2000-01-01T00:00:00"
+            last_sync_time = latest_record.updated_at.replace(tzinfo=None).isoformat() if (latest_record and latest_record.updated_at) else "2000-01-01T00:00:00"
             
             for peer in list(PEERS):
                 try:
@@ -97,20 +97,25 @@ def sync_with_peers():
                                 db.add(new_user)
                         
                         # SYNC RECORDS WITH TOMBSTONES
+                        valid_keys = {c.name for c in FranchiseRecord.__table__.columns}
                         for item in incoming_data.get('records', []):
-                            existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == item['id']).first()
+                            clean_item = {k: v for k, v in item.items() if k in valid_keys}
+                            existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == clean_item['id']).first()
+                            
                             if not existing:
-                                new_rec = FranchiseRecord(**item)
-                                new_rec.issue_date = datetime.fromisoformat(item['issue_date']) if item.get('issue_date') else None
-                                new_rec.valid_until = datetime.fromisoformat(item['valid_until']) if item.get('valid_until') else None
-                                new_rec.updated_at = datetime.fromisoformat(item['updated_at']) if item.get('updated_at') else get_pht_now()
+                                new_rec = FranchiseRecord(**clean_item)
+                                new_rec.issue_date = datetime.fromisoformat(clean_item['issue_date']).replace(tzinfo=None) if clean_item.get('issue_date') else None
+                                new_rec.valid_until = datetime.fromisoformat(clean_item['valid_until']).replace(tzinfo=None) if clean_item.get('valid_until') else None
+                                new_rec.updated_at = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None) if clean_item.get('updated_at') else get_pht_now().replace(tzinfo=None)
                                 db.add(new_rec)
                             else:
-                                incoming_time = datetime.fromisoformat(item['updated_at'])
-                                if incoming_time > existing.updated_at:
-                                    for key, value in item.items():
+                                incoming_time = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None)
+                                existing_time = existing.updated_at.replace(tzinfo=None) if existing.updated_at else datetime.min
+                                
+                                if incoming_time > existing_time:
+                                    for key, value in clean_item.items():
                                         if key in ['issue_date', 'valid_until', 'updated_at']:
-                                            if value: setattr(existing, key, datetime.fromisoformat(value))
+                                            if value: setattr(existing, key, datetime.fromisoformat(value).replace(tzinfo=None))
                                         else:
                                             setattr(existing, key, value)
                         db.commit()

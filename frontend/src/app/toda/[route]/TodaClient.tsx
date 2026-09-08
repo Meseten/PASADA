@@ -89,7 +89,7 @@ export default function TodaClient() {
   
   const [isDeleting, setIsDeleting] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [selectedSbns, setSelectedSbns] = useState<string[]>([])
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
@@ -167,20 +167,22 @@ export default function TodaClient() {
     return `${year}-${month}-${day}`;
   };
 
-  const fetchMembersAndInfo = useCallback(async () => {
-    if (!safeRouteName) return;
+  const fetchMembersAndInfo = useCallback(async (): Promise<Member[]> => {
+    if (!safeRouteName) return [];
     try {
       const [membersRes, infoRes] = await Promise.all([
         fetchWithAuth(`${API_URL}/franchise/route/${safeRouteName}`),
         fetchWithAuth(`${API_URL}/api/route-info/${safeRouteName}`)
       ]);
       
+      let fetchedMembers: Member[] = [];
+      
       if (membersRes.ok) {
-        const newMembers = await membersRes.json();
+        fetchedMembers = await membersRes.json();
         setMembers(prev => {
-          if (prev.length !== newMembers.length) return newMembers;
+          if (prev.length !== fetchedMembers.length) return fetchedMembers;
           const isSame = prev.every((m, i) => {
-            const n = newMembers[i];
+            const n = fetchedMembers[i];
             return m.id === n.id &&
                    m.sbn_no === n.sbn_no &&
                    m.operator_name === n.operator_name &&
@@ -195,7 +197,7 @@ export default function TodaClient() {
                    m.valid_until === n.valid_until &&
                    m.is_active === n.is_active;
           });
-          return isSame ? prev : newMembers;
+          return isSame ? prev : fetchedMembers;
         });
       } else {
         showToast("Failed to fetch route records.", "error");
@@ -206,9 +208,11 @@ export default function TodaClient() {
         setRouteInfo(prev => JSON.stringify(prev) === JSON.stringify(newInfo) ? prev : newInfo);
       }
       
+      return fetchedMembers;
     } catch (error) {
       console.error("Failed to fetch data", error)
       showToast("Network error. Ensure backend is running and connected.", "error")
+      return [];
     } finally {
       setIsLoading(false);
     }
@@ -226,42 +230,10 @@ export default function TodaClient() {
     };
   }, [fetchMembersAndInfo])
 
-  const getNextSbnPreview = (route: string, list: Member[]): string => {
-    let prefix = "";
-    let maxNum = 0;
-    let padding = 3;
-    
-    list.forEach(m => {
-      const sbnStr = String(m.sbn_no || "").toUpperCase();
-      const match = sbnStr.match(/^([A-Z0-9]+)[\-\_](\d+)/);
-      if (match) {
-        if (!prefix) prefix = match[1]; 
-        const numStr = match[2];
-        const val = parseInt(numStr, 10);
-        if (!isNaN(val) && val > maxNum) {
-          maxNum = val; 
-        }
-        if (numStr.length > padding) padding = numStr.length;
-      }
-    });
-
-    if (!prefix) {
-      const cleanRoute = route.replace(/TODA/g, '').trim();
-      prefix = cleanRoute.length <= 4 ? cleanRoute : cleanRoute.substring(0, 3);
-    }
-
-    let nextNum = maxNum + 1;
-    while (nextNum === 0 || String(nextNum).endsWith("000") || String(nextNum).endsWith("0000")) {
-      nextNum += 1;
-    }
-    
-    return `${prefix}-${String(nextNum).padStart(padding, '0')}`;
-  };
-
   const handleOpenAdd = useCallback(() => {
     setFormData({
       id: "",
-      sbn_no: "", // FIX: Left blank to allow backend auto-generation without conflict
+      sbn_no: "", // Left blank to allow backend auto-generation without conflict
       operator_name: "",
       address: "",
       motor_no: "",
@@ -289,7 +261,7 @@ export default function TodaClient() {
   useEffect(() => {
     const resetId = window.setTimeout(() => {
       setCurrentPage(1);
-      setSelectedSbns([]);
+      setSelectedIds([]);
     }, 0);
     return () => window.clearTimeout(resetId);
   }, [search, statusFilter, sortBy])
@@ -392,7 +364,7 @@ export default function TodaClient() {
   const handleDownloadSummaryWord = async () => {
     if (isDownloadingSummary || !summaryData) return;
     setIsDownloadingSummary(true);
-    const filename = `TOTAL RENEWAL ${summaryData.year}.docx`;
+    const filename = `TOTAL RENEWAL ${summaryData?.year || new Date().getFullYear()}.docx`;
     
     try {
       const response = await fetchWithAuth(`${API_URL}/toda-summary/download/word`, { method: 'POST' });
@@ -463,7 +435,7 @@ export default function TodaClient() {
           const a = document.createElement('a');
           a.style.display = 'none';
           a.href = url;
-          a.download = `TOTAL RENEWAL ${summaryData.year}.docx`;
+          a.download = `TOTAL RENEWAL ${summaryData?.year || new Date().getFullYear()}.docx`;
           document.body.appendChild(a);
           a.click();
           setIsPrintingSummary(false);
@@ -482,8 +454,7 @@ export default function TodaClient() {
 
   const handleRenameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const conf = window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renameData.new_route_name.toUpperCase()}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`);
-    if (!conf) return;
+    if (!window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renameData.new_route_name.toUpperCase()}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`)) return;
 
     setIsRenaming(true);
     try {
@@ -497,9 +468,7 @@ export default function TodaClient() {
         const data = await res.json();
         showToast(data.message, "success");
         setIsRenameOpen(false);
-        // Dispatch event to update sidebar
         window.dispatchEvent(new Event('toda_imported'));
-        // Redirect to new route
         router.push(`/toda/${data.new_route}`);
       } else {
         const err = await res.json();
@@ -513,11 +482,12 @@ export default function TodaClient() {
   };
 
   const handleDeleteOne = async (member: Member) => {
+    if (!window.confirm(`Are you sure you want to delete operator ${member.sbn_no}? This action cannot be undone.`)) return;
     setIsDeleting(true);
     try {
-      const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
+      const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.id)}`, { method: "DELETE" });
       if (res.ok) {
-        setSelectedSbns(prev => prev.filter(id => id !== member.sbn_no));
+        setSelectedIds(prev => prev.filter(id => id !== member.id));
         await fetchMembersAndInfo();
         showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
       } else {
@@ -532,18 +502,19 @@ export default function TodaClient() {
   };
 
   const handleBulkDelete = async () => {
-    if (selectedSbns.length === 0) return;
+    if (selectedIds.length === 0) return;
+    if (!window.confirm(`Are you sure you want to delete ${selectedIds.length} selected operator(s)? This action cannot be undone.`)) return;
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/bulk-delete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sbn_list: selectedSbns })
+        body: JSON.stringify({ sbn_list: selectedIds })
       });
       if (res.ok) {
-        setSelectedSbns([]);
+        setSelectedIds([]);
         await fetchMembersAndInfo();
-        showToast(`${selectedSbns.length} operator(s) deleted successfully.`, "success");
+        showToast(`${selectedIds.length} operator(s) deleted successfully.`, "success");
       } else {
         const err = await res.json();
         showToast(err.detail || "Failed to delete selected operators.", "error");
@@ -557,19 +528,19 @@ export default function TodaClient() {
 
   const handleSelectAll = (checked: boolean, paginatedList: Member[]) => {
     if (checked) {
-      const pageSbns = paginatedList.map(m => m.sbn_no);
-      setSelectedSbns(prev => Array.from(new Set([...prev, ...pageSbns])));
+      const pageIds = paginatedList.map(m => m.id);
+      setSelectedIds(prev => Array.from(new Set([...prev, ...pageIds])));
     } else {
-      const pageSbns = paginatedList.map(m => m.sbn_no);
-      setSelectedSbns(prev => prev.filter(id => !pageSbns.includes(id)));
+      const pageIds = paginatedList.map(m => m.id);
+      setSelectedIds(prev => prev.filter(id => !pageIds.includes(id)));
     }
   };
 
-  const handleSelectOne = (sbn: string, checked: boolean) => {
+  const handleSelectOne = (id: string, checked: boolean) => {
     if (checked) {
-      setSelectedSbns(prev => Array.from(new Set([...prev, sbn])));
+      setSelectedIds(prev => Array.from(new Set([...prev, id])));
     } else {
-      setSelectedSbns(prev => prev.filter(id => id !== sbn));
+      setSelectedIds(prev => prev.filter(existingId => existingId !== id));
     }
   };
 
@@ -708,12 +679,47 @@ export default function TodaClient() {
     }
   };
 
-  const downloadBatchDocument = async (member: Member) => {
+  const printBatchDocument = async (member: Member): Promise<'printed' | 'downloaded' | 'failed'> => {
     try {
-      const res = await fetchWithAuth(`${API_URL}/franchise/download/word/${member.id}`, { method: 'POST' });
-      if (res.ok) {
-        const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
+      const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
+      if (!res.ok) {
+        showToast(`Failed to generate document for ${member.sbn_no}.`, "error");
+        return 'failed';
+      }
+      
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      
+      if (blob.type === "application/pdf") {
+        const existingIframe = document.getElementById('pasada-print-frame');
+        if (existingIframe) document.body.removeChild(existingIframe);
+        
+        const iframe = document.createElement('iframe');
+        iframe.id = 'pasada-print-frame';
+        iframe.style.position = 'fixed';
+        iframe.style.right = '-2000px';
+        iframe.style.bottom = '-2000px';
+        iframe.style.width = '500px';
+        iframe.style.height = '500px';
+        iframe.src = url;
+        document.body.appendChild(iframe);
+        
+        await new Promise<void>((resolve) => {
+          setTimeout(() => {
+            try {
+              iframe.contentWindow?.focus();
+              iframe.contentWindow?.print();
+            } catch (e) {
+              console.error("Batch print error:", e);
+            }
+            setTimeout(() => {
+              window.URL.revokeObjectURL(url);
+              resolve();
+            }, 1200);
+          }, 1500);
+        });
+        return 'printed';
+      } else {
         const a = document.createElement("a");
         a.style.display = 'none';
         a.href = url;
@@ -724,9 +730,12 @@ export default function TodaClient() {
           window.URL.revokeObjectURL(url);
           document.body.removeChild(a);
         }, 1000);
+        return 'downloaded';
       }
     } catch (error) {
-      console.error("Batch download failed", error);
+      console.error("Batch print failed", error);
+      showToast(`Network error generating ${member.sbn_no}.`, "error");
+      return 'failed';
     }
   };
 
@@ -793,17 +802,91 @@ export default function TodaClient() {
     }
     
     setBatchProgress({ current: 0, total: filteredTargetRecords.length })
+    
+    const recordIds = filteredTargetRecords.map(r => r.id);
+
+    try {
+        // Attempt unified merge endpoint first
+        const res = await fetchWithAuth(`${API_URL}/franchise/generate-batch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ record_ids: recordIds })
+        });
+
+        if (res.ok) {
+            const blob = await res.blob();
+            if (blob.type === "application/pdf") {
+                setBatchProgress({ current: filteredTargetRecords.length, total: filteredTargetRecords.length });
+                
+                const url = window.URL.createObjectURL(blob);
+                const existingIframe = document.getElementById('pasada-print-frame');
+                if (existingIframe) document.body.removeChild(existingIframe);
+                
+                const iframe = document.createElement('iframe');
+                iframe.id = 'pasada-print-frame';
+                iframe.style.position = 'fixed';
+                iframe.style.right = '-2000px';
+                iframe.style.bottom = '-2000px';
+                iframe.style.width = '500px';
+                iframe.style.height = '500px';
+                iframe.src = url;
+                document.body.appendChild(iframe);
+                
+                await new Promise<void>((resolve) => {
+                    setTimeout(() => {
+                        try {
+                            iframe.contentWindow?.focus();
+                            iframe.contentWindow?.print();
+                        } catch (e) {
+                            console.error("Batch print error:", e);
+                        }
+                        setTimeout(() => {
+                            window.URL.revokeObjectURL(url);
+                            resolve();
+                        }, 1200);
+                    }, 1500);
+                });
+
+                setBatchPrinting(false);
+                setBatchModalOpen(false);
+                setBatchProgress({ current: 0, total: 0 });
+                showToast(`Batch print complete. Sent ${filteredTargetRecords.length} documents to the printer.`, "success");
+                return;
+            }
+        }
+    } catch (e) {
+        console.error("Batch merge failed on server, falling back to sequential:", e);
+    }
+    
+    // Sequential fallback if backend lacks PDF merge support
+    let printedCount = 0;
+    let downloadedCount = 0;
+    let failedCount = 0;
 
     for (let i = 0; i < filteredTargetRecords.length; i++) {
       setBatchProgress({ current: i + 1, total: filteredTargetRecords.length })
-      await downloadBatchDocument(filteredTargetRecords[i])
-      await new Promise(resolve => setTimeout(resolve, 600))
+      const result = await printBatchDocument(filteredTargetRecords[i])
+      
+      if (result === 'printed') printedCount++; 
+      else if (result === 'downloaded') downloadedCount++;
+      else failedCount++;
+      
+      await new Promise(resolve => setTimeout(resolve, 800))
     }
 
     setBatchPrinting(false)
     setBatchModalOpen(false)
     setBatchProgress({ current: 0, total: 0 })
-    showToast(`Batch download complete. Saved ${filteredTargetRecords.length} Word document(s).`, "success");
+    
+    if (failedCount > 0) {
+      showToast(`Batch complete. Printed ${printedCount}, Downloaded ${downloadedCount}, Failed ${failedCount}.`, "error");
+    } else if (printedCount === filteredTargetRecords.length) {
+      showToast(`Batch print complete. Sent ${printedCount} document(s) to the printer.`, "success");
+    } else if (downloadedCount === filteredTargetRecords.length) {
+      showToast(`PDF conversion unavailable — downloaded ${downloadedCount} Word document(s) instead.`, "success");
+    } else {
+      showToast(`Batch print complete. Printed ${printedCount}, Downloaded ${downloadedCount} fallback(s).`, "success");
+    }
   };
 
   const handleOpenHistory = async (member: Member) => {
@@ -857,13 +940,29 @@ export default function TodaClient() {
           setIsEditOpen(false)
         }
         
-        await fetchMembersAndInfo();
+        const refreshedList = await fetchMembersAndInfo();
         
         const returnedIssue = data.issue_date ? data.issue_date.split('T')[0] : "None";
         const returnedValid = data.valid_until ? data.valid_until.split('T')[0] : "None";
         const returnedSBN = data.sbn_no || payload.sbn_no;
         
-        showToast(`Record ${isAdd ? "added" : "updated"}. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success");
+        const showPreviewPref = localStorage.getItem("pasada_show_save_preview");
+        const shouldShowPreview = showPreviewPref === null || showPreviewPref === "true";
+
+        if (shouldShowPreview) {
+            showToast(`Record ${isAdd ? "added" : "updated"}. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success");
+            
+            if (refreshedList && refreshedList.length > 0) {
+                const savedRecord = refreshedList.find(m => m.sbn_no === returnedSBN);
+                if (savedRecord) {
+                    setViewMember(savedRecord);
+                    setIsViewOpen(true);
+                }
+            }
+        } else {
+            showToast(`Saved SBN: ${returnedSBN}`, "success");
+        }
+        
       } else {
         const err = await response.json()
         showToast(err.detail || "Failed to save record.", "error")
@@ -905,13 +1004,17 @@ export default function TodaClient() {
 
   const sortedMembers = [...filteredMembers].sort((a, b) => {
     if (sortBy === "SBN_ASC") {
-      const numA = parseInt((a.sbn_no.match(/\d+/) || ["999999"])[0], 10);
-      const numB = parseInt((b.sbn_no.match(/\d+/) || ["999999"])[0], 10);
+      const matchA = a.sbn_no.match(/-(\d+)/);
+      const matchB = b.sbn_no.match(/-(\d+)/);
+      const numA = matchA ? parseInt(matchA[1], 10) : 999999;
+      const numB = matchB ? parseInt(matchB[1], 10) : 999999;
       return numA - numB;
     }
     if (sortBy === "SBN_DESC") {
-      const numA = parseInt((a.sbn_no.match(/\d+/) || ["0"])[0], 10);
-      const numB = parseInt((b.sbn_no.match(/\d+/) || ["0"])[0], 10);
+      const matchA = a.sbn_no.match(/-(\d+)/);
+      const matchB = b.sbn_no.match(/-(\d+)/);
+      const numA = matchA ? parseInt(matchA[1], 10) : 0;
+      const numB = matchB ? parseInt(matchB[1], 10) : 0;
       return numB - numA;
     }
     if (sortBy === "NAME_ASC") {
@@ -934,7 +1037,7 @@ export default function TodaClient() {
 
   const totalPages = Math.ceil(sortedMembers.length / rowsPerPage);
   const paginatedMembers = sortedMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
-  const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedSbns.includes(m.sbn_no));
+  const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedIds.includes(m.id));
 
   // DYNAMIC SUBTITLE LOGIC
   const subtitleText = routeInfo?.dominant_route 
@@ -1044,11 +1147,11 @@ export default function TodaClient() {
       </div>
 
       {/* BULK DELETE TOOLBAR */}
-      {selectedSbns.length > 0 && (
+      {selectedIds.length > 0 && (
         <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-xl flex items-center justify-between animate-in fade-in duration-300 shadow-sm">
           <div className="flex items-center gap-2 text-red-600 font-bold text-sm">
             <CheckSquare className="h-5 w-5" />
-            <span>{selectedSbns.length} operator(s) selected</span>
+            <span>{selectedIds.length} operator(s) selected</span>
           </div>
           <Button
             variant="destructive"
@@ -1216,7 +1319,7 @@ export default function TodaClient() {
               <div className="space-y-2 w-full">
                 <p className="font-bold text-lg">Preparing Documents</p>
                 <p className="text-sm text-muted-foreground font-medium">
-                  Downloading {batchProgress.current} of {batchProgress.total}...
+                  Printing {batchProgress.current} of {batchProgress.total}...
                 </p>
                 <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
                   <div 
@@ -1703,8 +1806,8 @@ export default function TodaClient() {
                         <TableCell className="pl-6">
                           <input
                             type="checkbox"
-                            checked={selectedSbns.includes(member.sbn_no)}
-                            onChange={(e) => handleSelectOne(member.sbn_no, e.target.checked)}
+                            checked={selectedIds.includes(member.id)}
+                            onChange={(e) => handleSelectOne(member.id, e.target.checked)}
                             className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                           />
                         </TableCell>
@@ -1723,8 +1826,8 @@ export default function TodaClient() {
                         </TableCell>
                         <TableCell>
                           {member.plate_no ? 
-                              <Badge variant="secondary" className="font-mono tracking-widest shadow-sm bg-background/60 font-bold">{member.plate_no}</Badge> : 
-                              <span className="text-muted-foreground/60 italic text-xs font-bold tracking-wide px-1">NO PLATE</span>
+                               <Badge variant="secondary" className="font-mono tracking-widest shadow-sm bg-background/60 font-bold">{member.plate_no}</Badge> : 
+                               <span className="text-muted-foreground/60 italic text-xs font-bold tracking-wide px-1">NO PLATE</span>
                           }
                         </TableCell>
                         <TableCell className="text-sm font-bold text-muted-foreground">
@@ -1743,12 +1846,12 @@ export default function TodaClient() {
                               <History className="h-3.5 w-3.5" />
                             </Button>
                             <Button 
-                                variant="outline" 
-                                size="icon" 
-                                disabled={isDeleting}
+                                 variant="outline" 
+                                 size="icon" 
+                                 disabled={isDeleting}
                               onClick={() => handleDeleteOne(member)}
                               className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm" 
-                                title="Delete Operator"
+                                 title="Delete Operator"
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>

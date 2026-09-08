@@ -90,10 +90,10 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     replacements = {
         "[SBN_NO]": data.get("sbn_no", ""),
         "{{SBN_NO}}": data.get("sbn_no", ""),
-        "[NAME]": data.get("operator_name", "").upper(),
-        "{{NAME}}": data.get("operator_name", "").upper(),
-        "[ADDRESS]": data.get("address", "").upper(),
-        "{{ADDRESS}}": data.get("address", "").upper(),
+        "[NAME]": (data.get("operator_name") or "").upper(),
+        "{{NAME}}": (data.get("operator_name") or "").upper(),
+        "[ADDRESS]": (data.get("address") or "").upper(),
+        "{{ADDRESS}}": (data.get("address") or "").upper(),
         "[MOTOR_NO]": clean_val(data.get("motor_no")),
         "{{MOTOR_NO}}": clean_val(data.get("motor_no")),
         "[CHASSIS_NO]": clean_val(data.get("chassis_no")),
@@ -102,14 +102,14 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
         "{{MAKE}}": clean_val(data.get("make")),
         "[PLATE_NO]": clean_val(data.get("plate_no")),
         "{{PLATE_NO}}": clean_val(data.get("plate_no")),
-        "[ROUTE]": data.get("driving_route", "").upper(),
-        "{{ROUTE}}": data.get("driving_route", "").upper(),
+        "[ROUTE]": (data.get("driving_route") or "").upper(),
+        "{{ROUTE}}": (data.get("driving_route") or "").upper(),
         "[ISSUE_DATE]": issue_date_str,
         "{{ISSUE_DATE}}": issue_date_str,
         "[VALID_UNTIL]": valid_until_str,
         "{{VALID_UNTIL}}": valid_until_str,
-        "[CHAIRMAN_NAME]": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper(),
-        "{{CHAIRMAN_NAME}}": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper()
+        "[CHAIRMAN_NAME]": (settings.get("committee_chair") or "RODRIGO A. CASTILLO").upper(),
+        "{{CHAIRMAN_NAME}}": (settings.get("committee_chair") or "RODRIGO A. CASTILLO").upper()
     }
 
     for paragraph in doc.paragraphs:
@@ -134,23 +134,27 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
     
     try:
         if platform.system() == "Windows":
+            word = None
             try:
                 import pythoncom
                 import win32com.client
                 pythoncom.CoInitialize() 
                 word = win32com.client.DispatchEx("Word.Application")
-                try:
-                    word.Visible = False
-                    word.DisplayAlerts = 0
-                    doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
-                    doc_obj.SaveAs(pdf_path, FileFormat=17)
-                    doc_obj.Close()
-                finally:
-                    word.Quit()
-                    pythoncom.CoUninitialize()
+                word.Visible = False
+                word.DisplayAlerts = 0
+                doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
+                doc_obj.SaveAs(pdf_path, FileFormat=17)
+                doc_obj.Close()
                 if os.path.exists(pdf_path): return pdf_path, "application/pdf"
             except Exception as e:
                 log_conversion_error(f"Windows COM PDF conversion failed: {e}. Trying LibreOffice...")
+            finally:
+                if word is not None:
+                    word.Quit()
+                try:
+                    pythoncom.CoUninitialize()
+                except:
+                    pass
 
         subprocess.run(
             ['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path],
@@ -193,8 +197,8 @@ def generate_toda_summary(summary: dict, settings: dict, template_path: str = "d
         "{{GRAND_TOTAL}}": str(summary.get("grand_total", 0)),
         "[GRAND_RENEWED]": str(summary.get("grand_renewed", 0)),
         "{{GRAND_RENEWED}}": str(summary.get("grand_renewed", 0)),
-        "[CHAIRMAN_NAME]": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper(),
-        "{{CHAIRMAN_NAME}}": settings.get("committee_chair", "RODRIGO A. CASTILLO").upper()
+        "[CHAIRMAN_NAME]": (settings.get("committee_chair") or "RODRIGO A. CASTILLO").upper(),
+        "{{CHAIRMAN_NAME}}": (settings.get("committee_chair") or "RODRIGO A. CASTILLO").upper()
     }
 
     # Replace headers in paragraphs
@@ -259,23 +263,27 @@ def generate_toda_summary(summary: dict, settings: dict, template_path: str = "d
     # PDF Conversion fallback matching MTOP
     try:
         if platform.system() == "Windows":
+            word = None
             try:
                 import pythoncom
                 import win32com.client
                 pythoncom.CoInitialize() 
                 word = win32com.client.DispatchEx("Word.Application")
-                try:
-                    word.Visible = False
-                    word.DisplayAlerts = 0
-                    doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
-                    doc_obj.SaveAs(pdf_path, FileFormat=17)
-                    doc_obj.Close()
-                finally:
-                    word.Quit()
-                    pythoncom.CoUninitialize()
+                word.Visible = False
+                word.DisplayAlerts = 0
+                doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
+                doc_obj.SaveAs(pdf_path, FileFormat=17)
+                doc_obj.Close()
                 if os.path.exists(pdf_path): return pdf_path, "application/pdf"
             except Exception as e:
                 log_conversion_error(f"Windows COM PDF conversion failed: {e}. Trying LibreOffice...")
+            finally:
+                if word is not None:
+                    word.Quit()
+                try:
+                    pythoncom.CoUninitialize()
+                except:
+                    pass
 
         subprocess.run(
             ['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', docx_path, '--outdir', out_path],

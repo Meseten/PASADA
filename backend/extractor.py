@@ -32,13 +32,13 @@ def extract_docx_data(contents, default_route, current_year):
         return match.group(1).strip() if match else ""
 
     # Strict lookaheads to isolate exact values
-    op_name = get_match(r"NAME\s*[\:\.]+\s*(.*?)(?=\|\||ADDRESS|Motor)")
-    address = get_match(r"ADDRESS\s*[\:\.]+\s*(.*?)(?=\|\||Motor|Chassis|Make)")
-    raw_motor = get_match(r"Motor\s*No\.?[\s\:]+(.*?)(?=\|\||Plate|Chassis|Make)")
-    raw_plate = get_match(r"Plate\s*No\.?[\s\:]+(.*?)(?=\|\||Chassis|Route|Make)")
-    raw_chassis = get_match(r"Chassis\s*No\.?[\s\:]+(.*?)(?=\|\||Route|Make)")
-    make = get_match(r"Make\s*[\:\.]+\s*(.*?)(?=\|\||TERMS)")
-    physical_route = get_match(r"Route\s*[\:\.]+\s*(.*?)(?=\|\||Make|Plate|TERMS)")
+    op_name = get_match(r"NAME\s*[\:\.]+\s*(.*?)(?=\|\||\bADDRESS\b|\bMotor\b)")
+    address = get_match(r"ADDRESS\s*[\:\.]+\s*(.*?)(?=\|\||\bMotor\b|\bChassis\b|\bMake\b)")
+    raw_motor = get_match(r"Motor\s*No\.?[\s\:]+(.*?)(?=\|\||\bPlate\b|\bChassis\b|\bMake\b)")
+    raw_plate = get_match(r"Plate\s*No\.?[\s\:]+(.*?)(?=\|\||\bChassis\b|\bRoute\b|\bMake\b)")
+    raw_chassis = get_match(r"Chassis\s*No\.?[\s\:]+(.*?)(?=\|\||\bRoute\b|\bMake\b)")
+    make = get_match(r"Make\s*[\:\.]+\s*(.*?)(?=\|\||\bTERMS\b)")
+    physical_route = get_match(r"Route\s*[\:\.]+\s*(.*?)(?=\|\||\bMake\b|\bPlate\b|\bTERMS\b)")
 
     # Run through the scrubber to prevent duplicate labels
     raw_motor = clean_field(raw_motor)
@@ -51,10 +51,15 @@ def extract_docx_data(contents, default_route, current_year):
     sbn_match = re.search(r"([A-Z]{2,5}\s*[\-\–]\s*\d{3,}(?:\s*[\-\–]\s*\d{2,4})?)", full_text, re.IGNORECASE)
     sbn_no = re.sub(r'\s+', '', sbn_match.group(1)).replace('–', '-').strip() if sbn_match else f"{default_route[:3]}-000-{str(current_year)[-2:]}"
 
-    date_match = re.search(r"(?:Date Issued|Given this)[:\s]*([a-zA-Z]+\s+\d{1,2},?\s+\d{4})", full_text, re.IGNORECASE)
+    # Robust Date matching targeting multiple configurations (alpha, numeric, spaced combinations)
+    date_match = re.search(r"(?:Date Issued|Given this)[:\s]*([a-zA-Z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}|\d{4}[/\-]\d{1,2}[/\-]\d{1,2}|\d{1,2}[\s\-]+[a-zA-Z]{3,}[\s\-]+\d{2,4})", full_text, re.IGNORECASE)
     try:
-        issue_date = pd.to_datetime(date_match.group(1)).to_pydatetime() if date_match else None
-    except:
+        if date_match:
+            dt = pd.to_datetime(date_match.group(1), errors='coerce')
+            issue_date = dt.to_pydatetime() if pd.notna(dt) else None
+        else:
+            issue_date = None
+    except Exception:
         issue_date = None
 
     return {
@@ -65,6 +70,6 @@ def extract_docx_data(contents, default_route, current_year):
         "plate_no": raw_plate.upper(),
         "chassis_no": raw_chassis.upper(),
         "make": make.upper(),
-        "driving_route": physical_route.upper() if physical_route else "POBLACION",
+        "driving_route": physical_route.upper() if physical_route else default_route.upper(),
         "issue_date": issue_date
     }

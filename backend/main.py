@@ -253,6 +253,9 @@ class RouteDataUpdate(BaseModel):
 class BulkDeleteRequest(BaseModel):
     sbn_list: List[str]
 
+class BatchGenerateRequest(BaseModel):
+    record_ids: List[str]
+
 # --- SECURITY DEPENDENCIES ---
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
@@ -560,27 +563,27 @@ def escape_excel(val):
 
 # --- GLOBAL ROUTE DISPLAY MAP ---
 ROUTE_DISPLAY_MAP = {
-    "BATODA": "BA TODA (BANCAAN/SAPA)",
-    "BBSTODA": "BBS TODA (BUCANA/BAGONG KALSADA/SAPA)",
-    "CNTODA": "CN TODA (CIUDAD NUEVO)",
-    "CO1TODA": "CO1 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-    "CO2TODA": "CO2 TODA (TIMALAN BALSAHAN/HILLSVIEW)",
-    "DOMMSATODA": "DOMMSA TODA (MUZON)",
-    "HCTODA": "HC TODA (HALANG/CALUBCOB)",
-    "HMTODA": "HM TODA (HUMBAC/MAKINA)",
-    "HVRTODA": "HVR TODA (HILLSVIEW/TIMALAN BALSAHAN)",
-    "MALATODA": "MALA TODA (MABULO/LABAC)",
-    "MMTODA": "MM TODA (MALAINEN LUMA/MOLINO)",
-    "MMGTODA": "MMG TODA (MUNTING MAPINO)",
-    "NCTODA": "NP TODA (POBLACION)", # Alias target
-    "NPTODA": "NP TODA (POBLACION)", 
-    "PAL1TODA": "PAL1 TODA (PALANGUE CENTRAL)",
-    "PAL2TODA": "PAL2&3 TODA (PALANGUE 2&3)",
-    "SABANGTODA": "SABANG TODA (SABANG)",
-    "SMSTODA": "SMS TODA (SAN ROQUE/M. BAGO/SANTULAN)",
-    "TCTODA": "TC TODA (TIMALAN CONCEPCION)",
-    "VASTODA": "VAS TODA (VILLA APOLONIA)",
-    "VISTODA": "VIS TODA (FREEDOMVILLE)"
+    "BATODA": "BATODA (BANCAAN/SAPA)",
+    "BBSTODA": "BBSTODA (BUCANA/BAGONG KALSADA/SAPA)",
+    "CNTODA": "CNTODA (CIUDAD NUEVO)",
+    "CO1TODA": "CO1TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "CO2TODA": "CO2TODA (TIMALAN BALSAHAN/HILLSVIEW)",
+    "DOMMSATODA": "DOMMSATODA (MUZON)",
+    "HCTODA": "HCTODA (HALANG/CALUBCOB)",
+    "HMTODA": "HMTODA (HUMBAC/MAKINA)",
+    "HVRTODA": "HVRTODA (HILLSVIEW/TIMALAN BALSAHAN)",
+    "MALATODA": "MALATODA (MABULO/LABAC)",
+    "MMTODA": "MMTODA (MALAINEN LUMA/MOLINO)",
+    "MMGTODA": "MMGTODA (MUNTING MAPINO)",
+    "NCTODA": "NPTODA (POBLACION)", # Alias target
+    "NPTODA": "NPTODA (POBLACION)", 
+    "PAL1TODA": "PAL1TODA (PALANGUE CENTRAL)",
+    "PAL2TODA": "PAL2&3TODA (PALANGUE 2&3)",
+    "SABANGTODA": "SABANGTODA (SABANG)",
+    "SMSTODA": "SMSTODA (SAN ROQUE/M. BAGO/SANTULAN)",
+    "TCTODA": "TCTODA (TIMALAN CONCEPCION)",
+    "VASTODA": "VASTODA (VILLA APOLONIA)",
+    "VISTODA": "VISTODA (FREEDOMVILLE)"
 }
 
 def get_toda_summary_data(db: Session):
@@ -633,14 +636,21 @@ def get_toda_summary_data(db: Session):
 def health_check():
     return {"status": "online"}
 
-@app.delete("/api/operators/{sbn_no}")
-def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    clean_sbn = normalize_base_sbn(sbn_no)
-    records = db.query(FranchiseRecord).filter(
-        ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == sbn_no.upper())) &
-        (FranchiseRecord.is_deleted == False)
-    ).all()
-    
+@app.delete("/api/operators/{identifier}")
+def delete_single_operator(identifier: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if len(identifier) > 15 and "-" in identifier: 
+        records = db.query(FranchiseRecord).filter(
+            FranchiseRecord.id == identifier,
+            FranchiseRecord.is_deleted == False
+        ).all()
+        clean_sbn = records[0].sbn_no if records else identifier
+    else:
+        clean_sbn = normalize_base_sbn(identifier)
+        records = db.query(FranchiseRecord).filter(
+            ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper())) &
+            (FranchiseRecord.is_deleted == False)
+        ).all()
+        
     if not records:
         raise HTTPException(status_code=404, detail="Operator record not found.")
         
@@ -654,18 +664,25 @@ def delete_single_operator(sbn_no: str, current_user: User = Depends(get_current
     db.commit()
     invalidate_ml_cache(target_route)
     clear_api_caches()
-    log_action(db, get_full_name(current_user), "DELETE_RECORD", clean_sbn, "ALL", f"Soft deleted operator record {clean_sbn}.")
+    log_action(db, get_full_name(current_user), "DELETE_RECORD", identifier, "ALL", f"Soft deleted operator record {clean_sbn}.")
     return {"message": f"{count} operator(s) deleted successfully."}
 
 @app.post("/api/operators/bulk-delete")
 def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     deleted_count = 0
-    for sbn_no in payload.sbn_list:
-        clean_sbn = normalize_base_sbn(sbn_no)
-        records = db.query(FranchiseRecord).filter(
-            ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == sbn_no.upper())) &
-            (FranchiseRecord.is_deleted == False)
-        ).all()
+    for identifier in payload.sbn_list:
+        if len(identifier) > 15 and "-" in identifier:
+            records = db.query(FranchiseRecord).filter(
+                FranchiseRecord.id == identifier,
+                FranchiseRecord.is_deleted == False
+            ).all()
+        else:
+            clean_sbn = normalize_base_sbn(identifier)
+            records = db.query(FranchiseRecord).filter(
+                ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper())) &
+                (FranchiseRecord.is_deleted == False)
+            ).all()
+            
         for r in records:
             r.is_deleted = True 
             r.updated_at = get_pht_now()
@@ -825,28 +842,30 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
 
 @app.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == user.username).first():
+    username_upper = user.username.upper()
+    if db.query(User).filter(User.username == username_upper).first():
         raise HTTPException(status_code=400, detail="Username taken")
     new_user = User(
         first_name=user.first_name, 
         last_name=user.last_name, 
-        username=user.username, 
+        username=username_upper, 
         password_hash=pwd_context.hash(user.password), 
         role=user.role
     )
     db.add(new_user)
     db.commit()
-    log_action(db, "SYSTEM ADMIN", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {user.username}")
+    log_action(db, "SYSTEM ADMIN", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {username_upper}")
     return {"message": "Account created"}
 
 @app.post("/token")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == payload.username).first()
+    username_upper = payload.username.upper()
+    user = db.query(User).filter(User.username == username_upper).first()
     if not user or not pwd_context.verify(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect credentials")
     
     full_name = get_full_name(user)
-    access_token = create_access_token(data={"sub": user.username})
+    access_token = create_access_token(data={"sub": username_upper})
     
     log_action(db, full_name, "LOGIN", "0", "SYSTEM", "Successful authentication")
     return {
@@ -907,14 +926,14 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
 
 @app.get("/system/network")
 def get_network_status():
-    return {"local_ip": get_local_ip(), "connected_peers": list(PEERS)}
+    return {"local_ip": get_local_ip(), "connected_peers": list(PEERS.keys())}
 
 @app.get("/api/sync/pull")
 def sync_pull(since: str, x_cluster_secret: str = Header(None), db: Session = Depends(get_db)):
     if x_cluster_secret != CLUSTER_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized cluster request")
         
-    target_time = datetime.fromisoformat(since)
+    target_time = datetime.fromisoformat(since).replace(tzinfo=None)
     records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
     users = db.query(User).all()
     
@@ -932,7 +951,6 @@ def create_operator_api(record: FranchiseCreate, current_user: User = Depends(ge
 @app.post("/franchise/")
 def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     record.route = alias_route(record.route)
-    run_kmeans_clustering(db, record.route)
 
     full_name = get_full_name(current_user)
     current_time = get_pht_now()
@@ -1122,6 +1140,8 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
     with open(temp_db_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
+    temp_db = None
+    db = None
     try:
         temp_engine = create_engine(f"sqlite:///{temp_db_path}")
         inspector = inspect(temp_engine)
@@ -1164,13 +1184,20 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
         db.commit()
         invalidate_ml_cache()
         clear_api_caches()
-        temp_db.close()
-        os.remove(temp_db_path)
         log_action(db, get_full_name(current_user), "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
         return {"imported": new_count, "skipped": skipped_count}
     except Exception as e:
-        if os.path.exists(temp_db_path): os.remove(temp_db_path)
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        if temp_db:
+            try: temp_db.close()
+            except: pass
+        if db:
+            try: db.close()
+            except: pass
+        if os.path.exists(temp_db_path):
+            try: os.remove(temp_db_path)
+            except: pass
 
 @app.post("/upload/bulk/{route_name}")
 async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1427,6 +1454,60 @@ async def generate_doc(record_id: str, current_user: User = Depends(get_current_
         
     raise HTTPException(status_code=500)
 
+@app.post("/franchise/generate-batch")
+async def generate_batch_docs(payload: BatchGenerateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        try:
+            from PyPDF2 import PdfMerger
+        except ImportError:
+            from pypdf import PdfWriter as PdfMerger
+    except ImportError:
+        raise HTTPException(status_code=501, detail="PDF merging library not installed on server.")
+
+    settings = init_settings(db)
+    committee_data = {"committee_chair": settings.committee_chair}
+    
+    generated_pdfs = []
+    for record_id in payload.record_ids:
+        record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
+        if not record: continue
+        
+        is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
+        full_sbn = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
+        
+        cert_data = {
+            "sbn_no": full_sbn, "operator_name": record.operator_name,
+            "address": record.address, "motor_no": record.motor_no,
+            "chassis_no": record.chassis_no, "make": record.make,
+            "plate_no": record.plate_no, "route": record.route,
+            "driving_route": record.driving_route,
+            "issue_date": record.issue_date, "valid_until": record.valid_until
+        }
+
+        doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="pdf")
+        
+        if os.path.exists(doc_path) and media_type == "application/pdf":
+            generated_pdfs.append(doc_path)
+
+    if not generated_pdfs:
+        raise HTTPException(status_code=500, detail="Failed to generate PDFs for the batch.")
+
+    out_path = os.path.join(BASE_DIR, "exports")
+    os.makedirs(out_path, exist_ok=True)
+    merged_filename = f"BATCH_PRINT_{int(time.time())}.pdf"
+    merged_path = os.path.abspath(os.path.join(out_path, merged_filename))
+
+    merger = PdfMerger()
+    for pdf_file in generated_pdfs:
+        merger.append(pdf_file)
+    merger.write(merged_path)
+    merger.close()
+
+    log_action(db, get_full_name(current_user), "BATCH_PRINT", "0", "MIXED", f"Generated and merged MTOP PDFs for {len(generated_pdfs)} records")
+    
+    headers = {'Content-Disposition': f'attachment; filename="{merged_filename}"'}
+    return FileResponse(path=merged_path, headers=headers, media_type="application/pdf")
+
 @app.get("/franchise/route/{route_name}")
 def get_route_records(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     route_upper = alias_route(route_name)
@@ -1518,7 +1599,7 @@ def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_
         formatted_sbn = normalize_base_sbn(r.sbn_no)
         
         csv_data.append({
-            "SBN NO.": escape_excel(formatted_sbn),
+            "SBN": escape_excel(formatted_sbn),
             "DATE OF RENEWAL": None if is_vacant else r.issue_date,
             "NAME": "" if is_vacant else escape_excel(r.operator_name),
             "MAKE": escape_excel(r.make), 
@@ -1947,8 +2028,9 @@ def export_change_motor_logs(
             "Route": str(log.target_route or ""),
             "SBN": str(log.sbn_no or ""),
             "Operator": str(log.operator_name or ""),
-            "Field(s) Changed": str(log.field_changed or ""),
-            "Detailed Changes": str(log.details or ""),
+            "Field Changed": str(log.field_changed or ""),
+            "Old Value": str(log.old_value or ""),
+            "New Value": str(log.new_value or ""),
             "New Date Issued": str(log.secondary_value or "")
         })
     
