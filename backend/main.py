@@ -713,6 +713,34 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
     log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
     return {"message": f"Route '{route_to_delete}' deleted successfully."}
 
+@app.post("/api/operators/{record_id}/restore")
+def restore_single_operator(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Operator record not found.")
+    
+    record.is_deleted = False
+    record.updated_at = get_pht_now()
+    db.commit()
+    invalidate_ml_cache(record.route)
+    clear_api_caches()
+    
+    log_action(db, get_full_name(current_user), "RESTORE_RECORD", record.id, record.route, f"Restored operator record {record.sbn_no}.")
+    return {"message": "Operator restored successfully."}
+
+@app.get("/api/operators/deleted")
+def get_deleted_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()
+    deduped_records = deduplicate_records_by_base_sbn(records)
+    
+    for record in deduped_records:
+        is_vac = not record.operator_name or str(record.operator_name).strip() == ""
+        record.sbn_no = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant=is_vac)
+
+    sorted_records = sorted(deduped_records, key=get_sbn_sort_key)
+    result = [attach_status(r) for r in sorted_records]
+    return result
+
 @app.put("/api/routes/{route_name}/rename")
 def rename_route(route_name: str, payload: RouteRenameRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     old_route = alias_route(route_name)
@@ -926,7 +954,7 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
 
 @app.get("/system/network")
 def get_network_status():
-    return {"local_ip": get_local_ip(), "connected_peers": list(PEERS.keys())}
+    return {"local_ip": get_local_ip(), "connected_peers": list(PEERS)}
 
 @app.get("/api/sync/pull")
 def sync_pull(since: str, x_cluster_secret: str = Header(None), db: Session = Depends(get_db)):
@@ -975,7 +1003,7 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, record.route) or record.route
 
-    update_data = record.dict(exclude={'issue_date', 'valid_until'})
+    update_data = record.model_dump(exclude={'issue_date', 'valid_until'})
     new_record = FranchiseRecord(
         **update_data, processed_by=full_name, issue_date=actual_issue_date,
         valid_until=actual_valid_until, is_active=actual_active
@@ -1020,7 +1048,6 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     
     current_time = get_pht_now()
     
-    # Store old motor details for logging
     old_motor = str(db_record.motor_no or "").strip()
     new_motor = str(record.motor_no or "").strip()
     old_chassis = str(db_record.chassis_no or "").strip()
@@ -1028,7 +1055,6 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     old_make = str(db_record.make or "").strip()
     new_make = str(record.make or "").strip()
     
-    # --- NEW DATE SMART-OVERRIDE LOGIC ---
     def safe_date_str(dt):
         return dt.strftime('%Y-%m-%d') if dt else ""
         
@@ -1079,7 +1105,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, db_record.route) or db_record.route
 
-    update_data = record.dict(exclude={'issue_date', 'valid_until'})
+    update_data = record.model_dump(exclude={'issue_date', 'valid_until'})
     for key, value in update_data.items():
         setattr(db_record, key, value)
 
@@ -1134,6 +1160,8 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
         "sbn_no": db_record.sbn_no
     }
 
+# NOTE: Normal re-upload does not reset the system (uses merge-only & year-gates).
+# To reset for testing, download a .db backup first, then use Full Restore.
 @app.post("/upload/database")
 async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     temp_db_path = os.path.join(BASE_DIR, f"temp_import_{uuid.uuid4().hex}.db")
@@ -1199,8 +1227,91 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
             try: os.remove(temp_db_path)
             except: pass
 
+@app.get("/backup/database")
+def backup_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db_path = os.path.join(BASE_DIR, 'pasada_production.db')
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Database file not found.")
+    
+    temp_backup_dir = os.path.join(BASE_DIR, "temp_backups")
+    os.makedirs(temp_backup_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"PASADA_BACKUP_{timestamp}.db"
+    temp_db_path = os.path.join(temp_backup_dir, filename)
+    
+    shutil.copyfile(db_path, temp_db_path)
+    
+    log_action(db, get_full_name(current_user), "DOWNLOAD_DB_BACKUP", "0", "SYSTEM", f"Downloaded raw database backup {filename}")
+    
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return FileResponse(path=temp_db_path, media_type="application/octet-stream", headers=headers)
+
+@app.post("/restore/database")
+async def restore_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    temp_db_path = os.path.join(BASE_DIR, f"temp_restore_{uuid.uuid4().hex}.db")
+    with open(temp_db_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    temp_db = None
+    db = None
+    try:
+        temp_engine = create_engine(f"sqlite:///{temp_db_path}")
+        inspector = inspect(temp_engine)
+        if "franchise_records" not in inspector.get_table_names():
+            raise Exception("Uploaded database is invalid or corrupted. Missing 'franchise_records' table.")
+            
+        TempSession = sessionmaker(bind=temp_engine)
+        temp_db = TempSession()
+        imported_records = temp_db.query(FranchiseRecord).all()
+        db = SessionLocal()
+        
+        restored_updated = 0
+        restored_inserted = 0
+        
+        valid_keys = {c.name for c in FranchiseRecord.__table__.columns}
+        
+        for r in imported_records:
+            existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == r.id).first()
+            if existing:
+                for key in valid_keys:
+                    setattr(existing, key, getattr(r, key))
+                restored_updated += 1
+            else:
+                clean_kwargs = {key: getattr(r, key) for key in valid_keys}
+                new_rec = FranchiseRecord(**clean_kwargs)
+                db.add(new_rec)
+                restored_inserted += 1
+            
+        db.commit()
+        invalidate_ml_cache()
+        clear_api_caches()
+        log_action(db, get_full_name(current_user), "DATABASE_RESTORE", "0", "ALL", f"Restored DB: {restored_updated} updated, {restored_inserted} inserted.")
+        return {"restored_updated": restored_updated, "restored_inserted": restored_inserted}
+    except Exception as e:
+        if db: db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        if temp_db:
+            try: temp_db.close()
+            except: pass
+        if db:
+            try: db.close()
+            except: pass
+        if os.path.exists(temp_db_path):
+            try: os.remove(temp_db_path)
+            except: pass
+
+# NOTE: Normal re-upload does not reset the system (uses merge-only & year-gates).
+# To reset for testing, download a .db backup first, then use Full Restore.
 @app.post("/upload/bulk/{route_name}")
-async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def upload_bulk_files(
+    route_name: str, 
+    files: List[UploadFile] = File(...), 
+    force_overwrite: bool = False,
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
     route_name = alias_route(route_name)
     full_name = get_full_name(current_user)
     imported_count = 0
@@ -1281,19 +1392,26 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
                     existing_record = sbn_map.get(incoming_base_sbn)
 
                     if existing_record:
-                        if get_record_year(parsed_date) >= get_record_year(existing_record.issue_date):
+                        if force_overwrite or get_record_year(parsed_date) >= get_record_year(existing_record.issue_date):
                             existing_record.issue_date = parsed_date
                             existing_record.valid_until = datetime(parsed_date.year, 12, 31) if parsed_date else None
                             existing_record.is_active = False if is_vacant else determine_status(parsed_date)
                             existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, parsed_date, is_vacant)
                             
-                            if name and str(name).strip():
-                                existing_record.operator_name = str(name).strip().upper()
-                            existing_record.address = set_if_blank(existing_record.address, address)
-                            existing_record.make = set_if_blank(existing_record.make, make)
-                            existing_record.plate_no = set_if_blank(existing_record.plate_no, clean_plate)
-                            existing_record.chassis_no = set_if_blank(existing_record.chassis_no, chassis)
-                            existing_record.motor_no = set_if_blank(existing_record.motor_no, motor)
+                            if force_overwrite:
+                                if name and str(name).strip(): existing_record.operator_name = str(name).strip().upper()
+                                if address and str(address).strip(): existing_record.address = str(address).strip().upper()
+                                if make and str(make).strip(): existing_record.make = str(make).strip().upper()
+                                if clean_plate and str(clean_plate).strip(): existing_record.plate_no = str(clean_plate).strip().upper()
+                                if chassis and str(chassis).strip(): existing_record.chassis_no = str(chassis).strip().upper()
+                                if motor and str(motor).strip(): existing_record.motor_no = str(motor).strip().upper()
+                            else:
+                                if name and str(name).strip(): existing_record.operator_name = str(name).strip().upper()
+                                existing_record.address = set_if_blank(existing_record.address, address)
+                                existing_record.make = set_if_blank(existing_record.make, make)
+                                existing_record.plate_no = set_if_blank(existing_record.plate_no, clean_plate)
+                                existing_record.chassis_no = set_if_blank(existing_record.chassis_no, chassis)
+                                existing_record.motor_no = set_if_blank(existing_record.motor_no, motor)
                             imported_count += 1
                     else:
                         record = FranchiseRecord(
@@ -1345,9 +1463,9 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
 
                     doc_year = get_record_year(issue_date)
                     existing_year = get_record_year(existing_record.issue_date)
-                    if issue_date and (not existing_record.issue_date or doc_year > existing_year):
+                    if force_overwrite or (issue_date and (not existing_record.issue_date or doc_year > existing_year)):
                         existing_record.issue_date = issue_date
-                        existing_record.valid_until = datetime(issue_date.year, 12, 31)
+                        existing_record.valid_until = datetime(issue_date.year, 12, 31) if issue_date else None
                         existing_record.is_active = False if is_vacant else determine_status(issue_date)
                     
                     existing_record.sbn_no = format_sbn_with_year(incoming_base_sbn, existing_record.issue_date, is_vacant)
@@ -1391,7 +1509,10 @@ async def upload_bulk_files(route_name: str, files: List[UploadFile] = File(...)
         db.commit()
 
     clear_api_caches()
-    log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name, f"Imported/Updated {imported_count} records. Errors: {len(error_log)}")
+    log_msg = f"Imported/Updated {imported_count} records. Errors: {len(error_log)}"
+    if force_overwrite:
+        log_msg += " (FORCE OVERWRITE)"
+    log_action(db, "SYSTEM_MIGRATION", "IMPORT", "0", route_name, log_msg)
     
     return {
         "imported": imported_count,
@@ -1467,11 +1588,13 @@ async def generate_batch_docs(payload: BatchGenerateRequest, current_user: User 
     settings = init_settings(db)
     committee_data = {"committee_chair": settings.committee_chair}
     
-    generated_pdfs = []
-    for record_id in payload.record_ids:
-        record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
-        if not record: continue
-        
+    # 1. Fetch all records in a single fast DB query
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.id.in_(payload.record_ids)).all()
+    if not records:
+        raise HTTPException(status_code=404, detail="No valid records found.")
+
+    # 2. Concurrently generate all .docx files in pure Python (Lightning fast)
+    async def create_single_docx(record):
         is_vacant = not record.operator_name or str(record.operator_name).strip() == ""
         full_sbn = format_sbn_with_year(record.sbn_no, record.issue_date, is_vacant)
         
@@ -1483,17 +1606,73 @@ async def generate_batch_docs(payload: BatchGenerateRequest, current_user: User 
             "driving_route": record.driving_route,
             "issue_date": record.issue_date, "valid_until": record.valid_until
         }
-
-        doc_path, media_type = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="pdf")
         
-        if os.path.exists(doc_path) and media_type == "application/pdf":
-            generated_pdfs.append(doc_path)
+        # Bypassing the slow per-file PDF conversion by requesting 'docx' format
+        doc_path, _ = await asyncio.to_thread(generate_certificate, cert_data, committee_data, return_format="docx")
+        return doc_path
+
+    tasks = [create_single_docx(r) for r in records]
+    docx_paths = await asyncio.gather(*tasks)
+    docx_paths = [p for p in docx_paths if p and os.path.exists(p)]
+
+    if not docx_paths:
+        raise HTTPException(status_code=500, detail="Failed to generate template documents.")
+
+    out_path = os.path.dirname(docx_paths[0])
+    generated_pdfs = []
+
+    # 3. Batch convert all DOCX to PDF using a SINGLE heavyweight application instance
+    if platform.system() == "Windows":
+        word = None
+        try:
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            
+            # Process all documents without closing Word
+            for docx_path in docx_paths:
+                pdf_path = docx_path.replace(".docx", ".pdf")
+                try:
+                    doc_obj = word.Documents.Open(docx_path, ReadOnly=True)
+                    doc_obj.SaveAs(pdf_path, FileFormat=17)
+                    doc_obj.Close()
+                    if os.path.exists(pdf_path):
+                        generated_pdfs.append(pdf_path)
+                except Exception as e:
+                    force_log(f"Error converting {docx_path}: {e}")
+        except Exception as e:
+            force_log(f"Windows batch PDF conversion failed: {e}")
+        finally:
+            if word is not None:
+                word.Quit()  # Quit only once at the very end
+            try:
+                pythoncom.CoUninitialize()
+            except:
+                pass
+    else:
+        # Linux LibreOffice batch conversion (chunked to prevent ARG_MAX shell limits)
+        try:
+            chunk_size = 150
+            for i in range(0, len(docx_paths), chunk_size):
+                chunk = docx_paths[i:i+chunk_size]
+                subprocess.run(
+                    ['libreoffice', '--headless', '--nologo', '--nofirststartwizard', '--convert-to', 'pdf', '--outdir', out_path] + chunk,
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            for docx_path in docx_paths:
+                pdf_path = docx_path.replace(".docx", ".pdf")
+                if os.path.exists(pdf_path):
+                    generated_pdfs.append(pdf_path)
+        except Exception as e:
+            force_log(f"Linux batch PDF conversion failed: {e}")
 
     if not generated_pdfs:
-        raise HTTPException(status_code=500, detail="Failed to generate PDFs for the batch.")
+        raise HTTPException(status_code=500, detail="PDF conversion failed for the batch.")
 
-    out_path = os.path.join(BASE_DIR, "exports")
-    os.makedirs(out_path, exist_ok=True)
+    # 4. Merge everything into one PDF
     merged_filename = f"BATCH_PRINT_{int(time.time())}.pdf"
     merged_path = os.path.abspath(os.path.join(out_path, merged_filename))
 
@@ -1502,6 +1681,14 @@ async def generate_batch_docs(payload: BatchGenerateRequest, current_user: User 
         merger.append(pdf_file)
     merger.write(merged_path)
     merger.close()
+
+    # 5. Clean up the intermediate .docx and .pdf files to prevent disk bloating
+    for p in docx_paths:
+        try: os.remove(p)
+        except: pass
+    for p in generated_pdfs:
+        try: os.remove(p)
+        except: pass
 
     log_action(db, get_full_name(current_user), "BATCH_PRINT", "0", "MIXED", f"Generated and merged MTOP PDFs for {len(generated_pdfs)} records")
     

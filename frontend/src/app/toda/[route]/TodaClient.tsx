@@ -90,6 +90,7 @@ export default function TodaClient() {
   const [isDeleting, setIsDeleting] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [lastDeletedIds, setLastDeletedIds] = useState<string[]>([])
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
@@ -482,12 +483,13 @@ export default function TodaClient() {
   };
 
   const handleDeleteOne = async (member: Member) => {
-    if (!window.confirm(`Are you sure you want to delete operator ${member.sbn_no}? This action cannot be undone.`)) return;
+    if (!window.confirm(`Are you sure you want to delete operator ${member.sbn_no}? This can be undone immediately via the Undo button.`)) return;
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.id)}`, { method: "DELETE" });
       if (res.ok) {
         setSelectedIds(prev => prev.filter(id => id !== member.id));
+        setLastDeletedIds([member.id]);
         await fetchMembersAndInfo();
         showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
       } else {
@@ -503,7 +505,7 @@ export default function TodaClient() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Are you sure you want to delete ${selectedIds.length} selected operator(s)? This action cannot be undone.`)) return;
+    if (!window.confirm(`Are you sure you want to delete ${selectedIds.length} selected operator(s)? This can be undone immediately via the Undo button.`)) return;
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/bulk-delete`, {
@@ -512,6 +514,7 @@ export default function TodaClient() {
         body: JSON.stringify({ sbn_list: selectedIds })
       });
       if (res.ok) {
+        setLastDeletedIds(selectedIds);
         setSelectedIds([]);
         await fetchMembersAndInfo();
         showToast(`${selectedIds.length} operator(s) deleted successfully.`, "success");
@@ -523,6 +526,22 @@ export default function TodaClient() {
       showToast("Network error while deleting selected operators.", "error");
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleUndoDelete = async () => {
+    setIsDeleting(true);
+    try {
+        for (const id of lastDeletedIds) {
+            await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(id)}/restore`, { method: "POST" });
+        }
+        await fetchMembersAndInfo();
+        showToast(`Restored ${lastDeletedIds.length} operator(s).`, "success");
+        setLastDeletedIds([]);
+    } catch (e) {
+        showToast("Network error while trying to restore.", "error");
+    } finally {
+        setIsDeleting(false);
     }
   };
 
@@ -1166,6 +1185,22 @@ export default function TodaClient() {
         </div>
       )}
 
+      {/* UNDO DELETED BANNER */}
+      {lastDeletedIds.length > 0 && (
+        <div className="bg-slate-900 text-slate-100 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 shadow-lg animate-in fade-in slide-in-from-top-4">
+            <div className="flex items-center gap-3">
+                <ArchiveX className="text-slate-400" />
+                <p className="text-sm font-medium">Deleted {lastDeletedIds.length} record(s).</p>
+            </div>
+            <div className="flex gap-2 w-full sm:w-auto">
+                <Button variant="outline" size="sm" onClick={() => setLastDeletedIds([])} className="flex-1 sm:flex-none text-slate-900 border-slate-700 hover:bg-slate-800 hover:text-white dark:bg-transparent dark:text-white">Dismiss</Button>
+                <Button size="sm" onClick={handleUndoDelete} disabled={isDeleting} className="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-500 text-white font-bold border-none shadow-sm">
+                    {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Undo Delete"}
+                </Button>
+            </div>
+        </div>
+      )}
+
       {/* RENAME ROUTE MODAL */}
       <Dialog open={isRenameOpen} onOpenChange={setIsRenameOpen}>
         <DialogContent className="sm:max-w-[500px] shadow-2xl rounded-2xl">
@@ -1528,7 +1563,7 @@ export default function TodaClient() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} placeholder="Optional" onChange={handleInputChange} /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4 mt-2">

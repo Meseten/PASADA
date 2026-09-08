@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle, RefreshCw, X, CheckCircle2, XCircle } from "lucide-react";
+import { Settings as SettingsIcon, Save, Server, Shield, Download, CheckCircle, Loader2, AlertTriangle, RefreshCw, X, CheckCircle2, XCircle, Database } from "lucide-react";
 import { API_URL, fetchWithAuth } from "@/lib/api";
 
 interface Toast {
@@ -113,6 +113,37 @@ export default function Settings() {
             }, 1000);
         } catch (err) {
             showToast("No records found for the selected filter.", "error");
+        } finally {
+            setExportLoading(false);
+        }
+    };
+
+    const handleDbBackup = async () => {
+        setExportLoading(true);
+        try {
+            const res = await fetchWithAuth(`${API_URL}/backup/database`);
+            if (!res.ok) throw new Error("DB Backup failed");
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.style.display = 'none';
+            a.href = url;
+            
+            // Format timestamp for filename
+            const now = new Date();
+            const pad = (n: number) => n.toString().padStart(2, '0');
+            const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+            
+            a.download = `PASADA_BACKUP_${dateStr}.db`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            }, 1000);
+            showToast("Raw database backup downloaded successfully.", "success");
+        } catch (err) {
+            showToast("Failed to download database backup.", "error");
         } finally {
             setExportLoading(false);
         }
@@ -307,6 +338,16 @@ export default function Settings() {
                                 <button onClick={handleMassExport} disabled={exportLoading} className="w-full mt-6 bg-blue-600 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2 hover:bg-blue-700 transition-all shadow-md">
                                     {exportLoading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
                                     {exportLoading ? "Creating Backup File..." : "Download Backup File"}
+                                </button>
+                            </div>
+
+                            {/* Raw DB Backup Download */}
+                            <div className="mt-8 pt-6 border-t border-border space-y-4">
+                                <h3 className="text-md font-bold flex items-center gap-2"><Database className="text-blue-600" size={18} /> Raw Database Backup</h3>
+                                <p className="text-xs text-muted-foreground font-medium">This .db is the file to keep before testing and the file to re-upload via Restore.</p>
+                                <button onClick={handleDbBackup} disabled={exportLoading} className="w-full sm:w-auto bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold py-3 px-6 rounded-lg flex items-center justify-center gap-2 hover:bg-slate-800 dark:hover:bg-slate-200 transition-all shadow-md">
+                                    {exportLoading ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+                                    Download Raw Database (.db) Backup
                                 </button>
                             </div>
 
