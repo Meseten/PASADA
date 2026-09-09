@@ -1031,7 +1031,13 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     }
 
 @app.put("/franchise/{record_id}")
-def update_franchise(record_id: str, record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_franchise(
+    record_id: str, 
+    record: FranchiseCreate, 
+    auto_change_motor_date: bool = True,
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
     db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
     if not db_record: raise HTTPException(status_code=404)
     
@@ -1080,8 +1086,16 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
             old_make.upper() != new_make.upper()
         ):
             is_change_motor = True
-            db_record.issue_date = manual_issue if user_changed_issue else current_time
-            db_record.valid_until = manual_valid if user_changed_valid else datetime(db_record.issue_date.year, 12, 31)
+            if user_changed_issue:
+                db_record.issue_date = manual_issue
+                db_record.valid_until = manual_valid if user_changed_valid else datetime(manual_issue.year, 12, 31)
+            elif auto_change_motor_date:
+                db_record.issue_date = current_time
+                db_record.valid_until = manual_valid if user_changed_valid else datetime(current_time.year, 12, 31)
+            else:
+                if user_changed_valid:
+                    db_record.valid_until = manual_valid
+                    
             db_record.is_active = True
             
         elif raw_old_sbn != raw_new_sbn: 
@@ -1127,7 +1141,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
         old_make_disp = old_make if old_make else "NONE"
         new_make_disp = new_make if new_make else "NONE"
         
-        details_str = f"Motor: {old_motor_disp} -> {new_motor_disp}; Chassis: {old_chas_disp} -> {new_chas_disp}; Make: {old_make_disp} -> {new_make_disp}. Date Issued: {db_record.issue_date.strftime('%Y-%m-%d')}."
+        details_str = f"Motor: {old_motor_disp} -> {new_motor_disp}; Chassis: {old_chas_disp} -> {new_chas_disp}; Make: {old_make_disp} -> {new_make_disp}. Date Issued: {db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else 'NONE'}."
         
         changed_fields = []
         if old_motor.upper() != new_motor.upper(): changed_fields.append("MOTOR_NO")
@@ -1146,7 +1160,7 @@ def update_franchise(record_id: str, record: FranchiseCreate, current_user: User
             field_changed=", ".join(changed_fields),
             old_value=old_motor_disp,
             new_value=new_motor_disp,
-            secondary_value=db_record.issue_date.strftime('%Y-%m-%d')
+            secondary_value=db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else ""
         )
     elif is_renewal:
         log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
