@@ -17,6 +17,7 @@ export const clearAuthAndRedirect = () => {
     localStorage.removeItem("pasada_full_name");
     localStorage.removeItem("role");
     localStorage.removeItem("pasada_role");
+    sessionStorage.removeItem("pasada_pin_unlocked");
     window.location.href = "/";
   }
 }

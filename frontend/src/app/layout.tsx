@@ -4,7 +4,24 @@ import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { ThemeProvider, useTheme } from "next-themes"
 import { useEffect, useState, useCallback, useRef } from "react"
-import { Moon, Sun, UploadCloud, ArchiveX, Settings, Search, LogOut, LayoutDashboard, ClipboardList, Map, Pin, Trash2 } from "lucide-react"
+import { 
+  Moon, 
+  Sun, 
+  UploadCloud, 
+  ArchiveX, 
+  Settings, 
+  Search, 
+  LogOut, 
+  LayoutDashboard, 
+  ClipboardList, 
+  Map, 
+  Pin, 
+  Trash2, 
+  Lock, 
+  Unlock, 
+  AlertTriangle, 
+  ShieldCheck 
+} from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { API_URL, fetchWithAuth, clearAuthAndRedirect } from "@/lib/api"
 
@@ -60,6 +77,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null)
   const isScrollingRef = useRef(false) // Guard against restoring while actively scrolling
 
+  // PIN Lock State
+  const [isLocked, setIsLocked] = useState(false)
+  const [pinInput, setPinInput] = useState("")
+  const [pinError, setPinError] = useState("")
+
   const fetchRoutes = useCallback(async () => {
     try {
       const res = await fetchWithAuth(`${API_URL}/stats/global`)
@@ -73,6 +95,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       console.error("Sidebar route fetch failed")
     }
   }, [])
+
+  // INITIAL MOUNT ONLY: Evaluate PIN lock status independently of pathname changes
+  useEffect(() => {
+    const token = localStorage.getItem("token") || localStorage.getItem("pasada_token");
+    const savedPin = localStorage.getItem("pasada_pin");
+    const isUnlocked = sessionStorage.getItem("pasada_pin_unlocked");
+    
+    if (token && savedPin && !isUnlocked) {
+      setIsLocked(true);
+    }
+  }, []);
 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true))
@@ -138,6 +171,28 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
   }
 
+  const handleUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+        const msgBuffer = new TextEncoder().encode(pinInput);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        
+        if (hashHex === localStorage.getItem("pasada_pin")) {
+            setIsLocked(false);
+            sessionStorage.setItem("pasada_pin_unlocked", "true");
+            setPinError("");
+            setPinInput("");
+        } else {
+            setPinError("Incorrect PIN.");
+            setPinInput("");
+        }
+    } catch(e) {
+        setPinError("Security verification error.");
+    }
+  };
+
   const togglePin = (e: React.MouseEvent, route: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -199,6 +254,61 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="antialiased text-foreground bg-background">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+          
+          {/* ========================================================= */}
+          {/* REDESIGNED PIN LOCK OVERLAY                               */}
+          {/* ========================================================= */}
+          {isLocked && !isAuthPage && (
+              <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-slate-900/40 dark:bg-black/60 backdrop-blur-md animate-in fade-in duration-300 p-4">
+                  <div className="w-full max-w-[420px] bg-card border border-border/60 p-8 md:p-10 rounded-[2rem] shadow-[0_0_40px_rgba(0,0,0,0.1)] dark:shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden">
+                      
+                      {/* Subtle Top Color Accent */}
+                      <div className="absolute top-0 left-0 right-0 h-1.5 bg-blue-600" />
+                      
+                      <div className="flex flex-col items-center mb-8 text-center mt-2">
+                          <div className="w-16 h-16 bg-blue-50 dark:bg-blue-900/20 text-blue-600 rounded-2xl flex items-center justify-center mb-5 shadow-sm border border-blue-100 dark:border-blue-800">
+                              <ShieldCheck className="w-8 h-8" />
+                          </div>
+                          <h2 className="text-2xl font-black tracking-tight text-foreground">Welcome back,</h2>
+                          <p className="text-xl font-black text-blue-600 dark:text-blue-400 mt-0.5">{userName}</p>
+                          <p className="text-sm text-muted-foreground font-medium mt-3 px-2 leading-relaxed">
+                            Please enter your security PIN to resume your authorized session.
+                          </p>
+                      </div>
+
+                      <form onSubmit={handleUnlock} className="space-y-6">
+                          {pinError && (
+                              <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 text-sm rounded-xl font-bold flex items-center justify-center gap-2 animate-in slide-in-from-top-2 fade-in">
+                                  <AlertTriangle size={16} /> {pinError}
+                              </div>
+                          )}
+                          
+                          <div className="space-y-2">
+                              <input 
+                                type="password" 
+                                autoFocus 
+                                value={pinInput} 
+                                onChange={e => setPinInput(e.target.value)} 
+                                placeholder="••••" 
+                                className="w-full bg-muted/30 border-2 border-border/80 rounded-xl px-4 text-center text-4xl tracking-[0.5em] font-black h-20 focus:outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10 transition-all text-slate-800 dark:text-slate-100 placeholder:text-slate-300 dark:placeholder:text-slate-700" 
+                                required 
+                              />
+                          </div>
+
+                          <button type="submit" className="w-full bg-blue-600 text-white font-bold h-14 rounded-xl hover:bg-blue-700 transition-all shadow-lg hover:shadow-blue-600/25 flex items-center justify-center gap-2 text-base">
+                              <Unlock size={18} /> Unlock PASADA
+                          </button>
+                      </form>
+
+                      <div className="mt-8 text-center border-t border-border/50 pt-6">
+                          <button onClick={handleLogout} className="flex items-center justify-center gap-2 w-full text-sm text-muted-foreground hover:text-red-600 font-bold transition-colors">
+                              <LogOut size={16} /> Not {userName.split(' ')[0]}? Log out
+                          </button>
+                      </div>
+                  </div>
+              </div>
+          )}
+
           {isAuthPage ? (
             children
           ) : (
