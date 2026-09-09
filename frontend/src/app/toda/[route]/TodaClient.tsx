@@ -55,6 +55,11 @@ const KNOWN_ROUTES = [
   'TCTODA', 'VASTODA', 'VISTODA'
 ];
 
+const HOURS = Array.from({length: 24}, (_, i) => ({
+    val: i.toString(),
+    label: i === 0 ? "12 AM" : i < 12 ? `${i} AM` : i === 12 ? "12 PM" : `${i - 12} PM`
+}));
+
 export default function TodaClient() {
   const params = useParams()
   const pathname = usePathname()
@@ -99,8 +104,15 @@ export default function TodaClient() {
   const [batchSpecificDate, setBatchSpecificDate] = useState("")
   const [batchStartDate, setBatchStartDate] = useState("")
   const [batchEndDate, setBatchEndDate] = useState("")
-  const [batchPrinting, setBatchPrinting] = useState(false)
-  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 })
+  
+  const [batchSpecificHour, setBatchSpecificHour] = useState("8")
+  const [batchStartHour, setBatchStartHour] = useState("8")
+  const [batchEndHour, setBatchEndHour] = useState("17")
+
+  // Background Batch Generation State
+  const [isBackgroundGenerating, setIsBackgroundGenerating] = useState(false)
+  const [bgProgress, setBgProgress] = useState({ current: 0, total: 0 })
+  const [readyPrintData, setReadyPrintData] = useState<{ url: string, count: number } | null>(null)
 
   const [historyLogs, setHistoryLogs] = useState<LogEntry[]>([])
   const [activeMember, setActiveMember] = useState<Member | null>(null)
@@ -702,7 +714,6 @@ export default function TodaClient() {
     try {
       const res = await fetchWithAuth(`${API_URL}/franchise/generate/${member.id}`, { method: 'POST' });
       if (!res.ok) {
-        showToast(`Failed to generate document for ${member.sbn_no}.`, "error");
         return 'failed';
       }
       
@@ -753,13 +764,11 @@ export default function TodaClient() {
       }
     } catch (error) {
       console.error("Batch print failed", error);
-      showToast(`Network error generating ${member.sbn_no}.`, "error");
       return 'failed';
     }
   };
 
   const executeBatchPrint = async () => {
-    setBatchPrinting(true)
     let targetRecords: Member[] = []
     
     if (batchScope === "THIS") {
@@ -782,7 +791,6 @@ export default function TodaClient() {
 
     if (targetRecords.length === 0) {
       showToast("No route records found for selected scope.", "error")
-      setBatchPrinting(false)
       return
     }
     
@@ -805,6 +813,10 @@ export default function TodaClient() {
           return recordDateString === todayString && hour >= 0 && hour < 12
         case "TODAY_AFTERNOON":
           return recordDateString === todayString && hour >= 12 && hour <= 23
+        case "TODAY_SPECIFIC_HOUR":
+          return recordDateString === todayString && hour === parseInt(batchSpecificHour)
+        case "TODAY_HOUR_RANGE":
+          return recordDateString === todayString && hour >= parseInt(batchStartHour) && hour <= parseInt(batchEndHour)
         case "SPECIFIC_DATE":
           return recordDateString === batchSpecificDate
         case "DATE_RANGE":
@@ -816,16 +828,17 @@ export default function TodaClient() {
     
     if (filteredTargetRecords.length === 0) {
       showToast(`No records found for scope ${batchScope} with filter ${batchFilterType.replace('_', ' ')}.`, "error")
-      setBatchPrinting(false)
       return
     }
     
-    setBatchProgress({ current: 0, total: filteredTargetRecords.length })
+    // START NON-BLOCKING BACKGROUND GENERATION
+    setBatchModalOpen(false);
+    setIsBackgroundGenerating(true);
+    setBgProgress({ current: 0, total: filteredTargetRecords.length });
     
     const recordIds = filteredTargetRecords.map(r => r.id);
 
     try {
-        // Attempt unified merge endpoint first
         const res = await fetchWithAuth(`${API_URL}/franchise/generate-batch`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -835,77 +848,70 @@ export default function TodaClient() {
         if (res.ok) {
             const blob = await res.blob();
             if (blob.type === "application/pdf") {
-                setBatchProgress({ current: filteredTargetRecords.length, total: filteredTargetRecords.length });
-                
+                setBgProgress({ current: filteredTargetRecords.length, total: filteredTargetRecords.length });
                 const url = window.URL.createObjectURL(blob);
-                const existingIframe = document.getElementById('pasada-print-frame');
-                if (existingIframe) document.body.removeChild(existingIframe);
-                
-                const iframe = document.createElement('iframe');
-                iframe.id = 'pasada-print-frame';
-                iframe.style.position = 'fixed';
-                iframe.style.right = '-2000px';
-                iframe.style.bottom = '-2000px';
-                iframe.style.width = '500px';
-                iframe.style.height = '500px';
-                iframe.src = url;
-                document.body.appendChild(iframe);
-                
-                await new Promise<void>((resolve) => {
-                    setTimeout(() => {
-                        try {
-                            iframe.contentWindow?.focus();
-                            iframe.contentWindow?.print();
-                        } catch (e) {
-                            console.error("Batch print error:", e);
-                        }
-                        setTimeout(() => {
-                            window.URL.revokeObjectURL(url);
-                            resolve();
-                        }, 1200);
-                    }, 1500);
-                });
-
-                setBatchPrinting(false);
-                setBatchModalOpen(false);
-                setBatchProgress({ current: 0, total: 0 });
-                showToast(`Batch print complete. Sent ${filteredTargetRecords.length} documents to the printer.`, "success");
+                setReadyPrintData({ url, count: filteredTargetRecords.length });
+                setIsBackgroundGenerating(false);
                 return;
             }
         }
     } catch (e) {
-        console.error("Batch merge failed on server, falling back to sequential:", e);
+        console.error("Batch merge failed on server, falling back to sequential processing...");
     }
     
-    // Sequential fallback if backend lacks PDF merge support
+    // NON-BLOCKING SEQUENTIAL FALLBACK LOOP
     let printedCount = 0;
     let downloadedCount = 0;
     let failedCount = 0;
 
     for (let i = 0; i < filteredTargetRecords.length; i++) {
-      setBatchProgress({ current: i + 1, total: filteredTargetRecords.length })
+      setBgProgress({ current: i + 1, total: filteredTargetRecords.length })
       const result = await printBatchDocument(filteredTargetRecords[i])
       
       if (result === 'printed') printedCount++; 
       else if (result === 'downloaded') downloadedCount++;
       else failedCount++;
-      
-      await new Promise(resolve => setTimeout(resolve, 800))
     }
 
-    setBatchPrinting(false)
-    setBatchModalOpen(false)
-    setBatchProgress({ current: 0, total: 0 })
+    setIsBackgroundGenerating(false);
     
     if (failedCount > 0) {
-      showToast(`Batch complete. Printed ${printedCount}, Downloaded ${downloadedCount}, Failed ${failedCount}.`, "error");
-    } else if (printedCount === filteredTargetRecords.length) {
-      showToast(`Batch print complete. Sent ${printedCount} document(s) to the printer.`, "success");
-    } else if (downloadedCount === filteredTargetRecords.length) {
-      showToast(`PDF conversion unavailable — downloaded ${downloadedCount} Word document(s) instead.`, "success");
+      showToast(`Batch fallback complete. Printed/Downloaded ${printedCount + downloadedCount}, Failed ${failedCount}.`, "error");
     } else {
-      showToast(`Batch print complete. Printed ${printedCount}, Downloaded ${downloadedCount} fallback(s).`, "success");
+      showToast(`Batch fallback complete. Exported ${printedCount + downloadedCount} documents.`, "success");
     }
+  };
+
+  const handleExecuteReadyPrint = async () => {
+    if (!readyPrintData) return;
+    const { url } = readyPrintData;
+    
+    const existingIframe = document.getElementById('pasada-print-frame');
+    if (existingIframe) document.body.removeChild(existingIframe);
+    
+    const iframe = document.createElement('iframe');
+    iframe.id = 'pasada-print-frame';
+    iframe.style.position = 'fixed';
+    iframe.style.right = '-2000px';
+    iframe.style.bottom = '-2000px';
+    iframe.style.width = '500px';
+    iframe.style.height = '500px';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+    
+    setTimeout(() => {
+        try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+        } catch (e) {
+            console.error("Batch print error:", e);
+        }
+        setTimeout(() => {
+            window.URL.revokeObjectURL(url);
+        }, 300000);
+    }, 1500);
+
+    setReadyPrintData(null);
   };
 
   const handleOpenHistory = async (member: Member) => {
@@ -1091,8 +1097,39 @@ export default function TodaClient() {
   );
 
   return (
-    <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500">
+    <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500 relative">
       
+      {/* BACKGROUND GENERATION FLOATING UI */}
+      {isBackgroundGenerating && (
+          <div className="fixed bottom-24 right-6 z-[9998] bg-card border border-border shadow-2xl rounded-xl p-5 w-80 animate-in slide-in-from-bottom-4">
+              <div className="flex items-center gap-3 mb-3">
+                  <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+                  <h4 className="font-black text-sm tracking-tight">Preparing Batch Documents</h4>
+              </div>
+              <div className="w-full bg-muted rounded-full h-2.5 mb-2.5 overflow-hidden shadow-inner relative">
+                  <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{width: `${(bgProgress.current / bgProgress.total) * 100}%`}}></div>
+              </div>
+              <p className="text-xs text-muted-foreground font-bold">Processing {bgProgress.current} of {bgProgress.total}</p>
+          </div>
+      )}
+
+      {/* PRINT READY FLOATING UI */}
+      {readyPrintData && (
+          <div className="fixed bottom-24 right-6 z-[9998] bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 shadow-2xl rounded-xl p-5 w-80 animate-in slide-in-from-bottom-4">
+              <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-500" />
+                      <h4 className="font-black text-sm text-emerald-900 dark:text-emerald-400">Print Ready</h4>
+                  </div>
+                  <button onClick={() => setReadyPrintData(null)} className="text-emerald-700 hover:text-emerald-900 transition-colors"><X size={16}/></button>
+              </div>
+              <p className="text-xs text-emerald-800 dark:text-emerald-500/80 font-bold mb-4 leading-snug">Your {readyPrintData.count} documents have been successfully merged into a single file.</p>
+              <Button onClick={handleExecuteReadyPrint} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold h-10 shadow-md">
+                  <Printer className="w-4 h-4 mr-2" /> Print Now ({readyPrintData.count})
+              </Button>
+          </div>
+      )}
+
       {/* PAGE HEADER */}
       <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-6">
         
@@ -1348,129 +1385,163 @@ export default function TodaClient() {
             </DialogDescription>
           </DialogHeader>
           
-          {batchPrinting ? (
-            <div className="flex flex-col items-center justify-center py-8 space-y-6 text-center">
-              <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
-              <div className="space-y-2 w-full">
-                <p className="font-bold text-lg">Preparing Documents</p>
-                <p className="text-sm text-muted-foreground font-medium">
-                  Printing {batchProgress.current} of {batchProgress.total}...
-                </p>
-                <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-3 mt-4 overflow-hidden shadow-inner">
-                  <div 
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-700 ease-out"
-                    style={{ width: `${Math.max((batchProgress.current / batchProgress.total) * 100, 5)}%` }}
-                  ></div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-6 mt-4">
-              {/* SCOPE SELECTOR */}
-              <div className="space-y-3">
-                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                  <Shield size={14} /> Batch Scope
-                </Label>
-                <select
-                  value={batchScope}
-                  onChange={(e) => setBatchScope(e.target.value)}
-                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
-                >
-                  <option value="THIS">This TODA Only ({safeRouteName})</option>
-                  <option value="ALL">All TODAs</option>
-                  <option value="CUSTOM">Custom Selection</option>
-                </select>
-              </div>
-
-              {/* CUSTOM ROUTE CHECKLIST */}
-              {batchScope === "CUSTOM" && (
-                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select TODAs</Label>
-                  <div className="grid grid-cols-2 gap-2 p-3 border border-border rounded-lg bg-muted/10 max-h-48 overflow-y-auto">
-                    {KNOWN_ROUTES.map(route => (
-                      <label key={route} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
-                        <input 
-                          type="checkbox" 
-                          checked={customRoutes.includes(route)}
-                          onChange={(e) => {
-                            if (e.target.checked) setCustomRoutes(prev => [...prev, route]);
-                            else setCustomRoutes(prev => prev.filter(r => r !== route));
-                          }}
-                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        />
-                        {route}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* DATE FILTER */}
-              <div className="space-y-3">
-                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                  <Filter size={14} /> Date Filter
-                </Label>
-                <select
-                  value={batchFilterType}
-                  onChange={(e) => setBatchFilterType(e.target.value)}
-                  className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
-                >
-                  <option value="TODAY_ALL">Today - All Applications</option>
-                  <option value="TODAY_MORNING">Today - Morning (12AM - 11:59AM)</option>
-                  <option value="TODAY_AFTERNOON">Today - Afternoon (12PM - 11:59PM)</option>
-                  <option value="SPECIFIC_DATE">Single Date Selection</option>
-                  <option value="DATE_RANGE">Custom Date Range</option>
-                </select>
-              </div>
-
-              {batchFilterType === "SPECIFIC_DATE" && (
-                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                    <Calendar size={14} /> Select Date
-                  </Label>
-                  <Input 
-                    type="date" 
-                    value={batchSpecificDate} 
-                    onChange={(e) => setBatchSpecificDate(e.target.value)} 
-                    className="h-12 font-semibold"
-                  />
-                </div>
-              )}
-
-              {batchFilterType === "DATE_RANGE" && (
-                <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
-                  <div className="space-y-3">
-                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                      <Calendar size={14} /> Start Date
-                    </Label>
-                    <Input type="date" value={batchStartDate} onChange={(e) => setBatchStartDate(e.target.value)} className="h-12 font-semibold" />
-                  </div>
-                  <div className="space-y-3">
-                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                      <Calendar size={14} /> End Date
-                    </Label>
-                    <Input type="date" value={batchEndDate} onChange={(e) => setBatchEndDate(e.target.value)} className="h-12 font-semibold" />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {!batchPrinting && (
-            <DialogFooter className="pt-4">
-              <Button 
-                onClick={executeBatchPrint}
-                disabled={
-                  (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
-                  (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate)) ||
-                  (batchScope === "CUSTOM" && customRoutes.length === 0)
-                }
-                className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
+          <div className="space-y-6 mt-4">
+            {/* SCOPE SELECTOR */}
+            <div className="space-y-3">
+              <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                <Shield size={14} /> Batch Scope
+              </Label>
+              <select
+                value={batchScope}
+                onChange={(e) => setBatchScope(e.target.value)}
+                className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
               >
-                <CheckCircle className="mr-2 h-5 w-5" /> Start Batch Print
-              </Button>
-            </DialogFooter>
-          )}
+                <option value="THIS">This TODA Only ({safeRouteName})</option>
+                <option value="ALL">All TODAs</option>
+                <option value="CUSTOM">Custom Selection</option>
+              </select>
+            </div>
+
+            {/* CUSTOM ROUTE CHECKLIST */}
+            {batchScope === "CUSTOM" && (
+              <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select TODAs</Label>
+                <div className="grid grid-cols-2 gap-2 p-3 border border-border rounded-lg bg-muted/10 max-h-48 overflow-y-auto">
+                  {KNOWN_ROUTES.map(route => (
+                    <label key={route} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={customRoutes.includes(route)}
+                        onChange={(e) => {
+                          if (e.target.checked) setCustomRoutes(prev => [...prev, route]);
+                          else setCustomRoutes(prev => prev.filter(r => r !== route));
+                        }}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      {route}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* DATE FILTER */}
+            <div className="space-y-3">
+              <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                <Filter size={14} /> Date Filter
+              </Label>
+              <select
+                value={batchFilterType}
+                onChange={(e) => setBatchFilterType(e.target.value)}
+                className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+              >
+                <option value="TODAY_ALL">Today - All Applications</option>
+                <option value="TODAY_MORNING">Today - Morning (12AM - 11:59AM)</option>
+                <option value="TODAY_AFTERNOON">Today - Afternoon (12PM - 11:59PM)</option>
+                <option value="TODAY_SPECIFIC_HOUR">Today - Specific Hour</option>
+                <option value="TODAY_HOUR_RANGE">Today - Hour Range</option>
+                <option value="SPECIFIC_DATE">Single Date Selection</option>
+                <option value="DATE_RANGE">Custom Date Range</option>
+              </select>
+            </div>
+
+            {batchFilterType === "TODAY_SPECIFIC_HOUR" && (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                    <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                        <Calendar size={14} /> Select Specific Hour
+                    </Label>
+                    <select
+                        value={batchSpecificHour}
+                        onChange={(e) => setBatchSpecificHour(e.target.value)}
+                        className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                    >
+                        {HOURS.map(h => <option key={h.val} value={h.val}>{h.label}</option>)}
+                    </select>
+                </div>
+            )}
+
+            {batchFilterType === "TODAY_HOUR_RANGE" && (
+                <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
+                    <div className="space-y-3">
+                        <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                            <Calendar size={14} /> Start Hour
+                        </Label>
+                        <select
+                            value={batchStartHour}
+                            onChange={(e) => setBatchStartHour(e.target.value)}
+                            className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                        >
+                            {HOURS.map(h => <option key={`start-${h.val}`} value={h.val}>{h.label}</option>)}
+                        </select>
+                    </div>
+                    <div className="space-y-3">
+                        <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                            <Calendar size={14} /> End Hour
+                        </Label>
+                        <select
+                            value={batchEndHour}
+                            onChange={(e) => setBatchEndHour(e.target.value)}
+                            className="appearance-none bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888888%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[right_1rem_center] bg-[length:16px_16px] flex h-12 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer pr-10"
+                        >
+                            {HOURS.map(h => <option key={`end-${h.val}`} value={h.val}>{h.label}</option>)}
+                        </select>
+                    </div>
+                </div>
+            )}
+
+            {(batchFilterType === "TODAY_SPECIFIC_HOUR" || batchFilterType === "TODAY_HOUR_RANGE") && (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400 font-bold bg-amber-50 dark:bg-amber-950/30 p-2 rounded border border-amber-200 dark:border-amber-900/50 mt-2">
+                    * Note: Hour-level filtering only applies to records created directly in the app. Imported or manual-date records default to 12 AM.
+                </p>
+            )}
+
+            {batchFilterType === "SPECIFIC_DATE" && (
+              <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                  <Calendar size={14} /> Select Date
+                </Label>
+                <Input 
+                  type="date" 
+                  value={batchSpecificDate} 
+                  onChange={(e) => setBatchSpecificDate(e.target.value)} 
+                  className="h-12 font-semibold"
+                />
+              </div>
+            )}
+
+            {batchFilterType === "DATE_RANGE" && (
+              <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
+                <div className="space-y-3">
+                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                    <Calendar size={14} /> Start Date
+                  </Label>
+                  <Input type="date" value={batchStartDate} onChange={(e) => setBatchStartDate(e.target.value)} className="h-12 font-semibold" />
+                </div>
+                <div className="space-y-3">
+                  <Label className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+                    <Calendar size={14} /> End Date
+                  </Label>
+                  <Input type="date" value={batchEndDate} onChange={(e) => setBatchEndDate(e.target.value)} className="h-12 font-semibold" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="pt-4">
+            <Button 
+              onClick={executeBatchPrint}
+              disabled={
+                isBackgroundGenerating ||
+                (batchFilterType === "SPECIFIC_DATE" && !batchSpecificDate) || 
+                (batchFilterType === "DATE_RANGE" && (!batchStartDate || !batchEndDate)) ||
+                (batchScope === "CUSTOM" && customRoutes.length === 0)
+              }
+              className="w-full h-12 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors text-white"
+            >
+              {isBackgroundGenerating ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <CheckCircle className="mr-2 h-5 w-5" />} 
+              {isBackgroundGenerating ? "Generating..." : "Start Batch Print"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
