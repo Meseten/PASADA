@@ -950,8 +950,15 @@ export default function TodaClient() {
         driving_route: finalDrivingRoute,
         route: safeRouteName
       }
+
+      const autoMotorDate = localStorage.getItem("pasada_auto_change_motor_date");
+      const autoMotorDateEnabled = autoMotorDate === null ? true : autoMotorDate === "true";
       
-      const response = await fetchWithAuth(isAdd ? `${API_URL}/api/operators` : `${API_URL}/franchise/${formData.id}`, {
+      const endpointUrl = isAdd 
+        ? `${API_URL}/api/operators` 
+        : `${API_URL}/franchise/${formData.id}?auto_change_motor_date=${autoMotorDateEnabled}`;
+
+      const response = await fetchWithAuth(endpointUrl, {
         method: isAdd ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -1595,7 +1602,7 @@ export default function TodaClient() {
                     <Input type="date" name="valid_until" value={formData.valid_until} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
                 </div>
             </div>
-            <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
+            <p className="text-xs text-muted-foreground mt-2 italic">* Dates auto-generate for Renewals. For Change Motor, auto-date can be toggled in Settings; otherwise use Set Today.</p>
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Operator</Button>
             </DialogFooter>
@@ -1653,7 +1660,7 @@ export default function TodaClient() {
                     <Input type="date" name="valid_until" value={formData.valid_until} onChange={handleInputChange} className="h-11 bg-background text-foreground" />
                 </div>
             </div>
-            <p className="text-xs text-muted-foreground mt-2 italic">* Leave dates blank to auto-generate for Renewals & Change Motor.</p>
+            <p className="text-xs text-muted-foreground mt-2 italic">* Dates auto-generate for Renewals. For Change Motor, auto-date can be toggled in Settings; otherwise use Set Today.</p>
             <DialogFooter className="pt-4">
               <Button type="submit" className="w-full h-11 text-md font-bold bg-blue-600 hover:bg-blue-700 transition-colors shadow-md text-white">Save Changes</Button>
             </DialogFooter>
