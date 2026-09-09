@@ -37,6 +37,8 @@ export default function Settings() {
   
   // Client-side UI Preferences
   const [showSavePreview, setShowSavePreview] = useState(true);
+  const [autoChangeMotorDate, setAutoChangeMotorDate] = useState(true);
+  
   const [hasPin, setHasPin] = useState(false);
   const [newPin, setNewPin] = useState("");
   
@@ -69,8 +71,11 @@ export default function Settings() {
     setAvailableYears(years);
     
     // Load Client-side UI preferences
-    const pref = localStorage.getItem("pasada_show_save_preview");
-    if (pref !== null) setShowSavePreview(pref === "true");
+    const prefPreview = localStorage.getItem("pasada_show_save_preview");
+    if (prefPreview !== null) setShowSavePreview(prefPreview === "true");
+
+    const prefAutoMotor = localStorage.getItem("pasada_auto_change_motor_date");
+    if (prefAutoMotor !== null) setAutoChangeMotorDate(prefAutoMotor === "true");
 
     if (localStorage.getItem("pasada_pin")) {
       setHasPin(true);
@@ -104,6 +109,12 @@ export default function Settings() {
     setShowSavePreview(val);
     localStorage.setItem("pasada_show_save_preview", String(val));
     showToast(`Save preview ${val ? "enabled" : "disabled"}.`, "success");
+  };
+
+  const handleToggleAutoMotorDate = (val: boolean) => {
+    setAutoChangeMotorDate(val);
+    localStorage.setItem("pasada_auto_change_motor_date", String(val));
+    showToast(`Auto-date for Change Motor ${val ? "enabled" : "disabled"}.`, "success");
   };
 
   const handleSetPin = async (e: React.FormEvent) => {
@@ -371,7 +382,7 @@ export default function Settings() {
                       Control how the system behaves immediately following the creation or renewal of an operator record.
                     </p>
 
-                    <div className="pt-2">
+                    <div className="pt-2 space-y-3">
                       <div 
                         onClick={() => handleToggleSavePreview(!showSavePreview)}
                         className="flex items-start gap-3 p-4 bg-background border border-border rounded-xl cursor-pointer hover:border-blue-500/50 transition-all shadow-sm"
@@ -390,14 +401,26 @@ export default function Settings() {
                           </p>
                         </div>
                       </div>
-                    </div>
-                  </div>
 
-                  <div className="p-3 bg-background/50 border border-border/80 rounded-xl flex items-center justify-between text-xs font-bold text-muted-foreground">
-                    <span>Active Workflow Mode:</span>
-                    <span className={showSavePreview ? "text-blue-600 font-black" : "text-emerald-600 font-black"}>
-                      {showSavePreview ? "Interactive Preview Modal" : "Rapid Continuous Entry"}
-                    </span>
+                      <div 
+                        onClick={() => handleToggleAutoMotorDate(!autoChangeMotorDate)}
+                        className="flex items-start gap-3 p-4 bg-background border border-border rounded-xl cursor-pointer hover:border-blue-500/50 transition-all shadow-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={autoChangeMotorDate}
+                          onChange={(e) => handleToggleAutoMotorDate(e.target.checked)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 mt-0.5 cursor-pointer"
+                        />
+                        <div className="flex-1">
+                          <p className="text-sm font-bold text-foreground">Auto-set Date Issued on Change Motor</p>
+                          <p className="text-xs text-muted-foreground font-medium mt-1 leading-relaxed">
+                            When ON, changing motor/chassis/make sets the Date Issued to today automatically. When OFF, the date is kept and you set it manually with the Set Today button. Renewals always auto-set the date.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
