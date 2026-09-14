@@ -320,13 +320,13 @@ export default function Dashboard() {
     let clusterColor = "bg-blue-50/50 border-blue-500/20 text-blue-600 dark:bg-blue-950/20";
     let textColor = "text-blue-600";
     
-    if (statusText.includes("GREEN CLUSTER")) {
+    if (statusText.includes("GREEN")) {
         clusterColor = "bg-emerald-50/50 border-emerald-500/30 text-emerald-700 dark:bg-emerald-950/20";
         textColor = "text-emerald-600";
-    } else if (statusText.includes("YELLOW CLUSTER")) {
+    } else if (statusText.includes("YELLOW")) {
         clusterColor = "bg-amber-50/50 border-amber-500/30 text-amber-700 dark:bg-amber-950/20";
         textColor = "text-amber-600";
-    } else if (statusText.includes("RED CLUSTER")) {
+    } else if (statusText.includes("RED")) {
         clusterColor = "bg-red-50/50 border-red-500/30 text-red-700 dark:bg-red-950/20";
         textColor = "text-red-600";
     }
@@ -680,7 +680,7 @@ export default function Dashboard() {
             <div className="bg-card border border-border p-5 rounded-xl shadow-sm">
                 <h3 className="text-sm font-bold flex items-center gap-2 mb-3">
                     <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" />
-                    Route Density Analysis
+                    Route Fullness Check
                 </h3>
                 
                 <div className="flex flex-wrap gap-1.5 mb-4">
@@ -702,7 +702,7 @@ export default function Dashboard() {
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div className={`col-span-1 border rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-inner h-[160px] transition-colors duration-500 ${clusterColor}`}>
                         <p className="text-[10px] font-black uppercase tracking-widest mb-1 opacity-80">
-                            SATURATION STATUS
+                            HOW FULL IS THIS ROUTE
                         </p>
                         <h2 className="text-sm md:text-md font-black mb-2 leading-tight px-2">
                             {predictionData ? predictionData.forecast_period : "AWAITING DATA"}
@@ -724,7 +724,7 @@ export default function Dashboard() {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[160px]">
                             <div>
                                 <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                                    <Activity size={12} /> Contributing Factors
+                                    <Activity size={12} /> What Affects This
                                 </h4>
                                 <div className="space-y-2 relative group">
                                     {predictionData ? predictionData.feature_importances.map((feat: any) => (
@@ -741,7 +741,7 @@ export default function Dashboard() {
                                         </div>
                                     )) : (
                                         <div className="text-xs font-medium text-muted-foreground italic text-center py-4 bg-muted/30 rounded-lg border border-border">
-                                            Insufficient demographic data.
+                                            Not enough info yet. Fill in the population and road length on the right.
                                         </div>
                                     )}
                                 </div>
@@ -749,7 +749,7 @@ export default function Dashboard() {
                             
                             <div className="bg-muted/20 border border-border/50 rounded-lg p-3 flex flex-col justify-between">
                                 <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                                    <Settings2 size={12} /> Adjust Route Parameters
+                                    <Settings2 size={12} /> Route Info (population & road length)
                                 </h4>
                                 <form onSubmit={handleUpdateRouteData} className="space-y-2.5">
                                     <div className="flex items-center gap-2">
@@ -784,7 +784,7 @@ export default function Dashboard() {
                                         disabled={isUpdatingRoute}
                                         className="w-full h-7 mt-1 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rounded-md text-[10px] font-bold hover:opacity-90 transition-opacity disabled:opacity-50"
                                     >
-                                        {isUpdatingRoute ? "Updating..." : "Update Route Factors"}
+                                        {isUpdatingRoute ? "Saving..." : "Save Route Info"}
                                     </button>
                                 </form>
                             </div>

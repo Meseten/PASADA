@@ -85,7 +85,8 @@ export default function Login() {
             "Content-Type": "application/json",  
         },  
         body: JSON.stringify({  
-            username: username,  
+            // uppercase sa submit na lang, yung input may text-transform na sa CSS
+            username: username.trim().toUpperCase(),  
             password: password  
         }),  
         cache: "no-store"  
@@ -106,7 +107,7 @@ export default function Login() {
         setError(errData.detail || "Invalid login credentials.");  
       }  
     } catch (err) {  
-      setError("Cannot connect to server. Ensure the backend is running.");  
+      setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");  
     } finally {  
       setLoading(false);  
     }  
@@ -150,7 +151,7 @@ export default function Login() {
               <input  
                 type="text"  
                 value={username}  
-                onChange={(e) => setUsername(e.target.value.toUpperCase())}  
+                onChange={(e) => setUsername(e.target.value)}  
                 placeholder="E.g. JUAN DELA CRUZ"  
                 className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"  
                 required  

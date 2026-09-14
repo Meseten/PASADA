@@ -147,17 +147,30 @@ export default function Settings() {
   const saveSettings = async () => {
     setLoading(true);
     try {
-      await fetchWithAuth(`${API_URL}/settings`, {
+      // uppercase dito na lang sa save, yung input field may text-transform na sa CSS.
+      // siyempre isama na rin natin yung enable_esignature kasi required yun sa backend
+      // (dati nag-422 na lang bigla kapag walang nakasama, at walang user feedback).
+      const res = await fetchWithAuth(`${API_URL}/settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ committee_chair: chairName })
+        body: JSON.stringify({ committee_chair: chairName.trim().toUpperCase(), enable_esignature: false })
       });
+      if (!res.ok) {
+        // may tumanggi sa backend — huwag padalos-dalos sa "success" toast
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Failed to save settings. Please check the value and try again.", "error");
+        setLoading(false);
+        return;
+      }
       showToast("Signatory settings saved successfully.", "success");
     } catch (e) {
       showToast("Failed to save settings. Network Error.", "error");
     }
     setLoading(false);
   };
+
+  // SAFETY NET: kapag hindi 2xx ang sagot, hindi dapat tahimik lang ang button.
+  // Sinisiguro natin na may error toast kahit anong mangyari sa backend.
 
   const handleMassExport = async () => {
     setExportLoading(true);
@@ -214,7 +227,7 @@ export default function Settings() {
   };
 
   const handleRefreshDb = async () => {
-    const confirmClean = window.confirm("Are you sure you want to clean up the database? This standardizes SBN formats, removes duplicate operators, and clears empty slots automatically.");
+    const confirmClean = window.confirm("This checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted. Continue?");
     if (!confirmClean) return;
 
     setIsCleaningDb(true);
@@ -224,10 +237,10 @@ export default function Settings() {
       });
       if (res.ok) {
         const result = await res.json();
-        showToast(result.message || "Database cleaned and refreshed successfully.", "success");
+        showToast(result.message || "Record check finished.", "success");
       } else {
         const err = await res.json();
-        showToast(err.detail || "Failed to clean database.", "error");
+        showToast(err.detail || "Could not finish the record check.", "error");
       }
     } catch (err) {
       showToast("Network error while trying to clean database.", "error");
@@ -243,7 +256,7 @@ export default function Settings() {
       const res = await fetchWithAuth(`${API_URL}/users/username`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_username: newUsername })
+        body: JSON.stringify({ new_username: newUsername.trim().toUpperCase() })
       });
       if (res.ok) {
         showToast("Username changed successfully. Please log in again.", "success");
@@ -354,7 +367,7 @@ export default function Settings() {
                       <input
                         type="text"
                         value={chairName}
-                        onChange={(e) => setChairName(e.target.value.toUpperCase())}
+                        onChange={(e) => setChairName(e.target.value)}
                         className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:ring-2 focus:ring-blue-500"
                         placeholder="e.g. HON. RODRIGO A. CASTILLO"
                       />
@@ -507,10 +520,10 @@ export default function Settings() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-amber-900 dark:text-amber-400">
                       <RefreshCw className="text-amber-600 shrink-0" size={20} />
-                      <h3 className="text-base font-bold">Clean Up Database</h3>
+                      <h3 className="text-base font-bold">Fix Common Record Problems</h3>
                     </div>
                     <p className="text-xs text-amber-800/80 dark:text-amber-300 font-medium leading-relaxed">
-                      Scans the registry to strip unnecessary year numbers from SBN identifiers, eliminates redundant operator duplicates, standardizes route strings, and normalizes vacant franchise slots.
+                      Checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted.
                     </p>
                   </div>
 
@@ -520,7 +533,7 @@ export default function Settings() {
                     className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3.5 px-6 rounded-lg transition-all flex items-center justify-center gap-2 shadow-md text-sm"
                   >
                     {isCleaningDb ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                    {isCleaningDb ? "Cleaning Database..." : "Clean Up Database Now"}
+                    {isCleaningDb ? "Fixing Records..." : "Fix Records Now"}
                   </button>
                 </div>
               </div>
@@ -552,7 +565,7 @@ export default function Settings() {
                       <input 
                         type="text" 
                         value={newUsername} 
-                        onChange={(e) => setNewUsername(e.target.value.toUpperCase())} 
+                        onChange={(e) => setNewUsername(e.target.value)}
                         placeholder="ENTER NEW USERNAME" 
                         className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" 
                         required 
@@ -689,7 +702,7 @@ export default function Settings() {
                 <h2 className="text-lg font-bold flex items-center gap-2">
                   <Server className="text-blue-600" size={20} /> Network Connection
                 </h2>
-                <p className="text-sm text-muted-foreground mt-1 font-medium">Local Area Network (LAN) peer details for multi-workstation synchronizations.</p>
+                <p className="text-sm text-muted-foreground mt-1 font-medium">Computers connected for automatic sharing of records.</p>
               </div>
               
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
@@ -727,9 +740,9 @@ export default function Settings() {
                   <div className="w-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center">
                     <div className="flex items-center gap-2">
                       <RefreshCw className="h-5 w-5 animate-spin" />
-                      <span>Sync is Automatic</span>
+                      <span>Automatic</span>
                     </div>
-                    <p className="text-[10px] font-medium opacity-80 mt-1">Background synchronization active</p>
+                    <p className="text-[10px] font-medium opacity-80 mt-1">Records are shared on their own — no need to press anything.</p>
                   </div>
                 </div>
               </div>

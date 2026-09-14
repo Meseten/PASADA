@@ -80,7 +80,7 @@ export default function MassImport() {
     try {       
       if (isDatabaseFile) {         
         if (dbImportMode === 'restore') {
-            const confirmed = window.confirm("WARNING: Full Restore will OVERWRITE all existing records that match the backup by ID. Are you sure you want to proceed?");
+            const confirmed = window.confirm("This replaces the current records with the ones from the backup. Records with the same entry number will be overwritten. Continue?");
             if (!confirmed) {
                 setUploading(false);
                 return;
@@ -231,7 +231,7 @@ export default function MassImport() {
                 <input                 
                   type="text"                 
                   value={selectedRoute}                 
-                  onChange={(e) => setSelectedRoute(e.target.value.toUpperCase())}                 
+                  onChange={(e) => setSelectedRoute(e.target.value)}                 
                   disabled={uploading}                 
                   placeholder="E.g. BATODA (Required for Excel/Word files)"                 
                   className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase transition-all disabled:opacity-60"               
@@ -275,7 +275,7 @@ export default function MassImport() {
                  <label className="flex items-start gap-3 cursor-pointer">
                    <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} className="mt-0.5" />
                    <div>
-                     <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (overwrite existing by ID)</p>
+                     <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (replaces matching records)</p>
                      <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup.</p>
                    </div>
                  </label>
