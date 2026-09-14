@@ -5,15 +5,18 @@ pandas
 openpyxl
 python-docx
 passlib
-bcrypt==3.2.0
+# bcrypt 4.0.1 still works with passlib AND ships Windows wheels for Python 3.12
+# (3.2.0 has no Windows wheels and would fail the cloud build)
+bcrypt==4.0.1
 pydantic
 python-multipart
 requests
 scikit-learn
 pytz
-pyinstaller
-numpy<2
-psutil
-python-jose
-pywin32; sys_platform == 'win32'
+python-jose[cryptography]
+platformdirs
 pypdf
+psutil
+numpy<2
+pyinstaller
+pywin32; sys_platform == "win32"

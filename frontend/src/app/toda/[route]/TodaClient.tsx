@@ -55,6 +55,34 @@ const KNOWN_ROUTES = [
   'TCTODA', 'VASTODA', 'VISTODA'
 ];
 
+// Matching din ito sa ROUTE_DISPLAY_MAP ng backend. Dito nakalagay yung buong
+// opisyal na pangalan ng TODA at yung kumpletong address ng mga barangay na
+// sakop nito, para sa header ng bawat route page. Ayaw namin ng ganyan na
+// "PAL.CENTRAL" o "Tim.balsahan" na shortcut sa harap mismo ng page.
+const ROUTE_FULL_ADDRESSES: Record<string, string> = {
+  BATODA: "BANCAAN/SAPA",
+  BBSTODA: "BUCANA/BAGONG KALSADA/SAPA",
+  CNTODA: "CIUDAD NUEVO",
+  CO1TODA: "TIMALAN BALSAHAN/HILLSVIEW",
+  CO2TODA: "TIMALAN BALSAHAN / HILLSVIEW",
+  DOMMSATODA: "NAIC/MUZON/MARAGONDON",
+  HCTODA: "HALANG/CALUBCOB",
+  HMTODA: "HUMBAC/MAKINA",
+  HVRTODA: "HILLSVIEW/TIMALAN BALSAHAN",
+  MALATODA: "MABULO/LABAC",
+  MMTODA: "MALAINEN LUMA/MOLINO",
+  MMGTODA: "MUNTING MAPINO",
+  NCTODA: "POBLACION",
+  NPTODA: "POBLACION",
+  PAL1TODA: "PALANGUE CENTRAL",
+  PAL2TODA: "PALANGUE 2&3",
+  SABANGTODA: "SABANG",
+  SMSTODA: "SAN ROQUE/MALAINEN BAGO/SANTULAN",
+  TCTODA: "TIMALAN CONCEPCION",
+  VASTODA: "VILLA APOLONIA",
+  VISTODA: "FREEDOMVILLE"
+};
+
 const HOURS = Array.from({length: 24}, (_, i) => ({
     val: i.toString(),
     label: i === 0 ? "12 AM" : i < 12 ? `${i} AM` : i === 12 ? "12 PM" : `${i - 12} PM`
@@ -135,6 +163,9 @@ export default function TodaClient() {
   const [formData, setFormData] = useState({
     id: "",
     sbn_no: "",
+    // SBN na nakita sa modal nung binuksan — pang-reference ng backend para malaman
+    // kung talagang bago lang yung SBN (renewal) o display suffix lang ang diperensya.
+    original_sbn_no: "",
     operator_name: "",
     address: "",
     motor_no: "",
@@ -224,7 +255,7 @@ export default function TodaClient() {
       return fetchedMembers;
     } catch (error) {
       console.error("Failed to fetch data", error)
-      showToast("Network error. Ensure backend is running and connected.", "error")
+      showToast("Connection problem. Is the PASADA program open on this computer?", "error")
       return [];
     } finally {
       setIsLoading(false);
@@ -247,6 +278,7 @@ export default function TodaClient() {
     setFormData({
       id: "",
       sbn_no: "", // Left blank to allow backend auto-generation without conflict
+      original_sbn_no: "", // wala pang existing SBN sa add
       operator_name: "",
       address: "",
       motor_no: "",
@@ -308,9 +340,13 @@ export default function TodaClient() {
   }, [handleOpenAdd]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const isDate = e.target.name === "issue_date" || e.target.name === "valid_until";
-    const val = isDate ? e.target.value : e.target.value.toUpperCase();
-    setFormData({ ...formData, [e.target.name]: val })
+    // NOTE: walang .toUpperCase() dito sa onChange. Dati kasi kapag nag-type ka ng
+    // "dela" sa gitna ng pangalan, madi-dispatch yung toUpperCase() -> magbabago
+    // yung value -> aksidente tatangalin ng React yung cursor position kaya dulo ng
+    // text bagsak yung mga susunod na letra. Sa halip, ang uppercase ay inilalagay na
+    // lang sa CSS (text-transform) para sa display at sa handleSubmitForm bago
+    // mag-save, para hindi gumalaw yung cursor habang nagta-type.
+    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
   const handleOpenEdit = (member: Member) => {
@@ -328,6 +364,11 @@ export default function TodaClient() {
         ...member,
         address: safeAddress,
         route: safeRouteName,
+      sbn_no: member.sbn_no,
+      // Ipinapasa natin yung SBN na nakikita ng user sa modal para sa renewal
+      // detection sa backend. Display suffix kasi (base + year) yung sa listahan,
+      // hindi laging tugma sa naka-store na SBN lalo na sa mga backdated records.
+      original_sbn_no: member.sbn_no,
       issue_date: member.issue_date ? member.issue_date.split('T')[0] : "",
       valid_until: member.valid_until ? member.valid_until.split('T')[0] : ""
     })
@@ -345,13 +386,13 @@ export default function TodaClient() {
       const res = await fetchWithAuth(`${API_URL}/admin/refresh-db`, { method: "POST" });
       if (res.ok) {
         await fetchMembersAndInfo();
-        showToast("Database refreshed successfully!", "success");
+        showToast("Record check finished!", "success");
       } else {
         const err = await res.json();
-        showToast(err.detail || "Failed to refresh database.", "error");
+        showToast(err.detail || "Could not finish the record check.", "error");
       }
     } catch {
-      showToast("Network error while trying to refresh the database.", "error");
+      showToast("Connection problem. Is the PASADA program open on this computer?", "error");
     } finally {
       setIsRefreshing(false);
     }
@@ -467,14 +508,20 @@ export default function TodaClient() {
 
   const handleRenameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renameData.new_route_name.toUpperCase()}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`)) return;
+    // uppercase sa submit na lang, hindi habang nagta-type (cursor jump fix)
+    const renamePayload = {
+      new_route_name: renameData.new_route_name.trim().toUpperCase(),
+      new_prefix: renameData.new_prefix.trim().toUpperCase(),
+      new_driving_route: renameData.new_driving_route.trim().toUpperCase()
+    };
+    if (!window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renamePayload.new_route_name}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`)) return;
 
     setIsRenaming(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(renameData)
+        body: JSON.stringify(renamePayload)
       });
       
       if (res.ok) {
@@ -598,7 +645,9 @@ export default function TodaClient() {
         showToast(`Masterlist exported successfully.`, "success");
         setTimeout(() => setExportSuccess(false), 2000);
       } else {
-        showToast("Failed to export masterlist.", "error")
+        // may case na 404 (walang tugma sa filter) — bigyan ng mas malinaw na mensahe
+        const err = await response.json().catch(() => ({}))
+        showToast(err.detail || "Failed to export masterlist.", "error")
       }
     } catch {
       showToast("Network error while exporting.", "error")
@@ -935,6 +984,10 @@ export default function TodaClient() {
       const finalIssueDate = formData.issue_date;
       const finalValidUntil = formData.valid_until;
 
+      // Dito lang inilalagay yung uppercase (sa save), hindi habang nagta-type.
+      // Ganito rin sa ibang text fields para walang cursor jump sa gitna ng typing.
+      const upperTrim = (s: string) => s.toUpperCase();
+
       let finalAddress = formData.address.trim().toUpperCase();
       if (finalAddress) {
           if (!finalAddress.endsWith("NAIC, CAVITE")) {
@@ -945,9 +998,16 @@ export default function TodaClient() {
       const payload = { 
         ...formData, 
         address: finalAddress,
+        sbn_no: upperTrim(formData.sbn_no.trim()),
+        original_sbn_no: upperTrim((formData.original_sbn_no || "").trim()),
+        operator_name: upperTrim(formData.operator_name.trim()),
+        motor_no: upperTrim(formData.motor_no.trim()),
+        chassis_no: upperTrim(formData.chassis_no.trim()),
+        make: upperTrim(formData.make.trim()),
+        plate_no: upperTrim(formData.plate_no.trim()),
+        driving_route: upperTrim(finalDrivingRoute),
         issue_date: finalIssueDate,
         valid_until: finalValidUntil,
-        driving_route: finalDrivingRoute,
         route: safeRouteName
       }
 
@@ -1072,9 +1132,12 @@ export default function TodaClient() {
   const isAllPageSelected = paginatedMembers.length > 0 && paginatedMembers.every(m => selectedIds.includes(m.id));
 
   // DYNAMIC SUBTITLE LOGIC
-  const subtitleText = routeInfo?.dominant_route 
-    ? routeInfo.dominant_route 
-    : routeInfo?.display_name || "\u00A0";
+  // Yung address line sa ilalim ng route name: buong opisyal na address dapat,
+  // hindi yung dominant driving route lang. Yung mga "PAL.central" / "Tim.balsahan"
+  // na ganap nang na-expand sa backend side, dito natin nilalagay ang kumpleto.
+  const subtitleText = 
+    ROUTE_FULL_ADDRESSES[safeRouteName] || 
+    (routeInfo?.display_name ? routeInfo.display_name.replace(/^[A-Z0-9&]+TODA\s*\(?/, "").replace(/\)$/, "") : "\u00A0");
 
   const renderPagination = (position: 'top' | 'bottom') => (
     <div className={`flex flex-col sm:flex-row items-center justify-between px-6 py-4 bg-muted/10 border-border/60 ${position === 'top' ? 'border-b' : 'border-t'}`}>
@@ -1185,7 +1248,7 @@ export default function TodaClient() {
               </select>
             </div>
 
-            <Button variant="outline" onClick={() => { if(window.confirm("This will execute the self-healing protocol: cleaning ghost dates, fixing route names, and restoring tally accuracy. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Self-Heal Database">
+            <Button variant="outline" onClick={() => { if(window.confirm("This checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Fix Common Record Problems">
               {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
               Refresh DB
             </Button>
@@ -1261,7 +1324,7 @@ export default function TodaClient() {
               <Label className="font-semibold text-foreground">New TODA Code Name</Label>
               <Input 
                 value={renameData.new_route_name} 
-                onChange={(e) => setRenameData({...renameData, new_route_name: e.target.value.toUpperCase()})} 
+                onChange={(e) => setRenameData(prev => ({ ...prev, new_route_name: e.target.value }))} 
                 className="h-11 font-bold bg-muted/40 uppercase focus:bg-background"
                 required
               />
@@ -1270,7 +1333,7 @@ export default function TodaClient() {
               <Label className="font-semibold text-foreground">Standardized SBN Prefix <span className="text-xs text-muted-foreground font-normal ml-2">(Optional)</span></Label>
               <Input 
                 value={renameData.new_prefix} 
-                onChange={(e) => setRenameData({...renameData, new_prefix: e.target.value.toUpperCase()})} 
+                onChange={(e) => setRenameData(prev => ({ ...prev, new_prefix: e.target.value }))} 
                 placeholder="e.g. NP"
                 className="h-11 font-bold font-mono bg-muted/40 uppercase focus:bg-background"
               />
@@ -1280,7 +1343,7 @@ export default function TodaClient() {
               <Label className="font-semibold text-foreground">Dominant Driving Route <span className="text-xs text-muted-foreground font-normal ml-2">(Optional)</span></Label>
               <Input 
                 value={renameData.new_driving_route} 
-                onChange={(e) => setRenameData({...renameData, new_driving_route: e.target.value.toUpperCase()})} 
+                onChange={(e) => setRenameData(prev => ({ ...prev, new_driving_route: e.target.value }))} 
                 placeholder="e.g. POBLACION"
                 className="h-11 font-bold bg-muted/40 uppercase focus:bg-background"
               />
@@ -1565,20 +1628,18 @@ export default function TodaClient() {
                 <Label className="font-semibold flex justify-between">SBN No. <span className="text-blue-500 font-normal italic text-xs">Auto-Generated</span></Label>
                 <Input name="sbn_no" value={formData.sbn_no} onChange={handleInputChange} placeholder="Auto-assigned if blank" className="border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 font-mono text-lg font-bold shadow-inner h-11 w-full" />
               </div>
-              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
-            </div>
-            
-            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11 uppercase" /></div>
+            </div>              <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11 uppercase" /></div>
             <div className="space-y-2">
               <Label className="font-semibold flex justify-between items-center">
                 <span>Barangay <span className="text-[10px] text-muted-foreground font-normal ml-1">(* , NAIC, CAVITE is auto-added)</span></span>
               </Label>
-              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11" />
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11 uppercase" />
             </div>
             
             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" className="uppercase" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" className="uppercase" /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -1623,25 +1684,23 @@ export default function TodaClient() {
                 <Label className="font-semibold flex justify-between">SBN No. <span className="text-blue-500 font-normal italic text-xs">Edit to Renew</span></Label>
                 <Input name="sbn_no" value={formData.sbn_no} onChange={handleInputChange} className="border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 font-mono text-lg font-bold shadow-inner h-11 w-full" required />
               </div>
-              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
-            </div>
-            
-            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11 uppercase" /></div>
+            </div>              <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11 uppercase" /></div>
             <div className="space-y-2">
               <Label className="font-semibold flex justify-between items-center">
                 <span>Barangay <span className="text-[10px] text-muted-foreground font-normal ml-1">(* , NAIC, CAVITE is auto-added)</span></span>
               </Label>
-              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11" />
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11 uppercase" />
             </div>
             
             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" className="uppercase" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" className="uppercase" /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} placeholder="Optional" onChange={handleInputChange} /></div>
+              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" className="uppercase" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" className="uppercase" /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4 mt-2">
@@ -1930,10 +1989,16 @@ export default function TodaClient() {
                           </div>
                         </TableCell>
                         <TableCell className="py-3">
-                          <div className="font-bold text-foreground truncate max-w-[200px]" title={member.operator_name || "VACANT"}>
+                          <div className="font-bold text-foreground truncate max-w-[220px]" title={member.operator_name || "VACANT"}>
                             {member.operator_name || <span className="text-blue-600 italic">VACANT SLOT</span>}
                           </div>
-                          <div className="text-xs text-muted-foreground truncate max-w-[200px] mt-0.5 font-medium" title={member.make}>
+                          {/* full address ni operator, hindi yung pa-shortcut version */}
+                          {member.address && (
+                            <div className="text-xs text-muted-foreground truncate max-w-[220px] mt-0.5 font-medium" title={member.address}>
+                              {member.address}
+                            </div>
+                          )}
+                          <div className={`text-xs truncate max-w-[220px] font-medium ${member.address ? "text-muted-foreground/70" : "text-muted-foreground mt-0.5"}`} title={member.make}>
                             {member.make || "No Vehicle Info"}
                           </div>
                         </TableCell>

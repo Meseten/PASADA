@@ -116,10 +116,12 @@ def run_kmeans_clustering(db: Session, target_route: str):
             road_val = float(target_info['road_length'])
             density_val = float(target_info['density'])
 
+        # 25010: Usability — simple words lang sa user-facing labels, walang jargon.
+        # Pumo-prefix pa rin ng GREEN/YELLOW/RED para sa color mapping ng dashboard.
         status_map = {
-            0: "GREEN CLUSTER: Under-saturated (Accept Applications)", 
-            1: "YELLOW CLUSTER: Optimal/Warning", 
-            2: "RED CLUSTER: Over-saturated (Freeze Applications)"
+            0: "GREEN: Not full yet — can accept new operators", 
+            1: "YELLOW: Almost full — keep watch", 
+            2: "RED: Full — stop accepting new operators"
         }
         
         max_fleet = df['fleet_size'].max() or 1
@@ -130,7 +132,7 @@ def run_kmeans_clustering(db: Session, target_route: str):
             {"factor": "Active Fleet Size (Supply X1)", "weight": round((fleet_val / max_fleet) * 100, 1)},
             {"factor": "Barangay Population (Demand X2)", "weight": round((pop_val / max_pop) * 100, 1)},
             {"factor": "Road Network Length (Space X3)", "weight": round((road_val / max_road) * 100, 1)},
-            {"factor": "Algorithm Density Score", "weight": round(min(density_val * 10, 100), 1)}
+            {"factor": "Density Score", "weight": round(min(density_val * 10, 100), 1)}
         ]
 
         result = [{

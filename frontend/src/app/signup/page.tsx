@@ -75,9 +75,10 @@ export default function Signup() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    first_name: firstName.trim(),
-                    last_name: lastName.trim(),
-                    username: username.trim(),
+                    // uppercase sa submit na lang (yung input may text-transform sa CSS)
+                    first_name: firstName.trim().toUpperCase(),
+                    last_name: lastName.trim().toUpperCase(),
+                    username: username.trim().toUpperCase(),
                     password: password,
                     role: "Clerk", 
                 }),
@@ -90,7 +91,7 @@ export default function Signup() {
                 setError(errData.detail || "Registration failed. Username may already be taken.");
             }
         } catch (err) {
-            setError("Cannot connect to server. Ensure the backend is running.");
+            setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");
         } finally {
             setLoading(false);
         }
@@ -132,7 +133,7 @@ export default function Signup() {
                                 <input
                                     type="text"
                                     value={firstName}
-                                    onChange={(e) => setFirstName(e.target.value.toUpperCase())}
+                                    onChange={(e) => setFirstName(e.target.value)}
                                     onBlur={() => setFirstName(firstName.trim())}
                                     className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"
                                     required
@@ -143,7 +144,7 @@ export default function Signup() {
                                 <input
                                     type="text"
                                     value={lastName}
-                                    onChange={(e) => setLastName(e.target.value.toUpperCase())}
+                                    onChange={(e) => setLastName(e.target.value)}
                                     onBlur={() => setLastName(lastName.trim())}
                                     className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all uppercase text-slate-900 dark:text-white"
                                     required

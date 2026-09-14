@@ -159,9 +159,8 @@ function GlobalSearchClient() {
   const paginatedMembers = filteredMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const isDate = e.target.name === "issue_date" || e.target.name === "valid_until";
-    const val = isDate ? e.target.value : e.target.value.toUpperCase();
-    setFormData({ ...formData, [e.target.name]: val })
+    // uppercase na lang sa submit, hindi dito sa onChange para di lumusot yung cursor
+    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
   const handleOpenEdit = (member: Member) => {
@@ -232,10 +231,17 @@ function GlobalSearchClient() {
           }
       }
       
+      // uppercase sa save na lang para hindi mag-jump yung cursor habang nagta-type
       const payload = { 
         ...formData, 
         address: finalAddress,
-        driving_route: finalDrivingRoute
+        sbn_no: formData.sbn_no.trim().toUpperCase(),
+        operator_name: formData.operator_name.trim().toUpperCase(),
+        motor_no: formData.motor_no.trim().toUpperCase(),
+        chassis_no: formData.chassis_no.trim().toUpperCase(),
+        make: formData.make.trim().toUpperCase(),
+        plate_no: formData.plate_no.trim().toUpperCase(),
+        driving_route: finalDrivingRoute.toUpperCase()
       }
       
       const response = await fetchWithAuth(`${API_URL}/franchise/${formData.id}`, {
@@ -637,25 +643,25 @@ function GlobalSearchClient() {
                 <Label className="font-semibold flex justify-between">SBN No. <span className="text-blue-500 font-normal italic text-xs">Edit to Renew</span></Label>
                 <Input name="sbn_no" value={formData.sbn_no} onChange={handleInputChange} className="border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 font-mono text-lg font-bold shadow-inner h-11 w-full" required />
               </div>
-              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Plate No.</Label><Input name="plate_no" value={formData.plate_no} onChange={handleInputChange} placeholder="Leave blank if None" className="h-11 uppercase" /></div>
             </div>
             
-            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11" /></div>
+            <div className="space-y-2"><Label className="font-semibold">Operator Name</Label><Input name="operator_name" value={formData.operator_name} onChange={handleInputChange} placeholder="Leave blank for Vacant Slot" className="h-11 uppercase" /></div>
             <div className="space-y-2">
               <Label className="font-semibold flex justify-between items-center">
                 <span>Barangay <span className="text-[10px] text-muted-foreground font-normal ml-1">(* , NAIC, CAVITE is auto-added)</span></span>
               </Label>
-              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11" />
+              <Input name="address" value={formData.address} onChange={handleInputChange} placeholder="e.g. BANCAAN" className="h-11 uppercase" />
             </div>
             
             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" /></div>
-               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Make</Label><Input name="make" value={formData.make} onChange={handleInputChange} placeholder="e.g. HONDA" className="uppercase" /></div>
+               <div className="space-y-2"><Label className="font-semibold">Driving Route</Label><Input name="driving_route" value={formData.driving_route} onChange={handleInputChange} placeholder="Leave blank to inherit" className="uppercase" /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" /></div>
-              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Motor No.</Label><Input name="motor_no" value={formData.motor_no} onChange={handleInputChange} placeholder="Optional" className="uppercase" /></div>
+              <div className="space-y-2"><Label className="font-semibold">Chassis No.</Label><Input name="chassis_no" value={formData.chassis_no} onChange={handleInputChange} placeholder="Optional" className="uppercase" /></div>
             </div>
 
             <div className="grid grid-cols-2 gap-4 mt-2">

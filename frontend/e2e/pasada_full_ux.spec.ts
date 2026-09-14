@@ -60,7 +60,7 @@ test.describe('PASADA Comprehensive E2E & UX Test Suite', () => {
     await expect(page.locator('text=Total Registered Operators')).toBeVisible();
     await expect(page.locator('text=Active Operators')).toBeVisible();
     await expect(page.locator('text=Route Distribution')).toBeVisible();
-    await expect(page.locator('text=Route Density Analysis')).toBeVisible();
+    await expect(page.locator('text=Route Fullness Check')).toBeVisible();
   });
 
   test('TODA Line: Full Operator Add, Edit, Manual Date Override, and Search Cycle', async ({ page }) => {

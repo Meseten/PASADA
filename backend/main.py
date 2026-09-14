@@ -17,7 +17,7 @@ if sys.platform == "win32":
 import traceback
 import re
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import zipfile
 import threading
 import multiprocessing
@@ -186,7 +186,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    # timezone-aware na UTC para hindi na mag-warning sa Python 3.12+ (deprecated na yung utcnow)
+    expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
 
@@ -209,6 +210,10 @@ def init_settings(db: Session):
 # --- PYDANTIC MODELS ---
 class FranchiseCreate(BaseModel):
     sbn_no: Optional[str] = ""
+    # Yung SBN na nakita ng user sa edit modal nung binuksan nya yung form.
+    # Ito ang basehan ng renewal detection, hindi yung stored value, kasi
+    # display lang sa listahan yung base + year suffix. See update endpoint notes.
+    original_sbn_no: Optional[str] = ""
     operator_name: Optional[str] = ""
     address: Optional[str] = ""
     motor_no: Optional[str] = ""
@@ -586,6 +591,53 @@ ROUTE_DISPLAY_MAP = {
     "VISTODA": "VISTODA (FREEDOMVILLE)"
 }
 
+# FULL ADDRESS MAP: yung mga klerk minsan pa-shortcut pagta-type ng barangay
+# (PAL.CENTRAL, TIM.BALSAHAN, ganyan) tapos yun na yung nailalagay sa records.
+# Dito natin nila-expand para laging kumpleto ang address sa certificates,
+# sa listahan, at sa exports. Exact match lang sa buong address para hindi
+# tayo makasabit ng ibang barangay na may parehong simula.
+FULL_ADDRESS_MAP = {
+    "PAL.CENTRAL": "PALANGUE CENTRAL",
+    "PAL. CENTRAL": "PALANGUE CENTRAL",
+    "PAL CENTRAL": "PALANGUE CENTRAL",
+    "PALANGUE CENTRAL": "PALANGUE CENTRAL",
+    "TIM.BALSAHAN": "TIMALAN BALSAHAN",
+    "TIM. BALSAHAN": "TIMALAN BALSAHAN",
+    "TIM BALSAHAN": "TIMALAN BALSAHAN",
+    "TIMALAN BALSAN": "TIMALAN BALSAHAN",
+    "BALSAHAN": "TIMALAN BALSAHAN",
+    "TIMALAN BALSAHAN": "TIMALAN BALSAHAN",
+    "TIM.CONCEPCION": "TIMALAN CONCEPCION",
+    "TIM. CONCEPCION": "TIMALAN CONCEPCION",
+    "TIM CONCEPCION": "TIMALAN CONCEPCION",
+    "CONCEPCION": "TIMALAN CONCEPCION",
+    "TIMALAN CONCEPCION": "TIMALAN CONCEPCION",
+}
+
+def expand_address_abbreviations(address: Optional[str]) -> str:
+    """Nililinis dito yung mga pa-shortcut na address bago ma-save sa DB.
+    Binabaliwala rin natin kung may nakadugtong nang ', NAIC, CAVITE' - ibabalik
+    natin yun pagkatapos i-expand para consistent sa format ng ibang records."""
+    if not address:
+        return ""
+    cleaned = str(address).strip().upper()
+
+    # alisin muna yung suffix kung meron na, tapos ibalik pagkatapos ng expansion
+    had_suffix = False
+    for suffix in (", NAIC, CAVITE", "NAIC, CAVITE"):
+        if cleaned.endswith(suffix):
+            had_suffix = True
+            cleaned = cleaned[: -len(suffix)].strip().rstrip(",").strip()
+            break
+
+    if not cleaned:
+        return ""
+
+    expanded = FULL_ADDRESS_MAP.get(cleaned, cleaned)
+    if had_suffix and expanded:
+        expanded = f"{expanded}, NAIC, CAVITE"
+    return expanded
+
 def get_toda_summary_data(db: Session):
     global _TODA_SUMMARY_CACHE
     if time.time() - _TODA_SUMMARY_CACHE["time"] < 60 and _TODA_SUMMARY_CACHE["data"]:
@@ -646,8 +698,10 @@ def delete_single_operator(identifier: str, current_user: User = Depends(get_cur
         clean_sbn = records[0].sbn_no if records else identifier
     else:
         clean_sbn = normalize_base_sbn(identifier)
+        # May LIKE clause tayo para kapag base SBN ang binigay (hal. BAT-002 habang
+        # naka-store as BAT-002-26), mahahanap pa rin. Dati 404 ang sagot dito.
         records = db.query(FranchiseRecord).filter(
-            ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper())) &
+            ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper()) | (FranchiseRecord.sbn_no.like(f"{clean_sbn}-%"))) &
             (FranchiseRecord.is_deleted == False)
         ).all()
         
@@ -678,8 +732,9 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
             ).all()
         else:
             clean_sbn = normalize_base_sbn(identifier)
+            # same fix as single delete: hanapin din yung may year suffix (BAT-002-26)
             records = db.query(FranchiseRecord).filter(
-                ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper())) &
+                ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper()) | (FranchiseRecord.sbn_no.like(f"{clean_sbn}-%"))) &
                 (FranchiseRecord.is_deleted == False)
             ).all()
             
@@ -862,10 +917,10 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
     db.commit()
     invalidate_ml_cache() 
     clear_api_caches()
-    log_action(db, get_full_name(current_user), "REFRESH_DB", "0", "ALL", f"Cleaned SBNs, fixed route strings, reversed phantom dates, and removed {deleted_count} duplicates.")
+    log_action(db, get_full_name(current_user), "REFRESH_DB", "0", "ALL", f"Fixed wrong dates and route names, and removed {deleted_count} duplicate entries.")
     return {
         "status": "success",
-        "message": f"Database refreshed successfully. Deleted {deleted_count} duplicate records. Total remaining across all routes: {len(route_sbn_map)}."
+        "message": f"Finished. Removed {deleted_count} duplicate records. Remaining records: {len(route_sbn_map)}."
     }
 
 @app.post("/signup")
@@ -885,12 +940,73 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     log_action(db, "SYSTEM ADMIN", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {username_upper}")
     return {"message": "Account created"}
 
+# --- LOGIN RATE LIMITING & ACCOUNT LOCKOUT ---
+# 25010 Characteristic: Security.
+# Ginagamit lang nito ang memorya (walang bagong table, walang internet) kaya
+# gumagana ito sa air-gapped LGU LAN. Auto-reset din ito kapag nag-restart ang
+# server, kaya walang naiiwang lock na hindi maibabalik nang lokal.
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+_login_attempts = {}
+_login_lock = threading.Lock()
+
+def _get_lock_state(username: str):
+    """Returns (failed_count, seconds_left). (0, 0) kapag walang lock."""
+    entry = _login_attempts.get(username)
+    if not entry:
+        return 0, 0
+    failed, locked_until = entry
+    now = time.monotonic()
+    if locked_until and now < locked_until:
+        return failed, int(locked_until - now) + 1
+    return failed, 0
+
+def _register_failed_login(username: str):
+    with _login_lock:
+        failed, _ = _login_attempts.get(username, (0, 0))
+        failed += 1
+        locked_until = time.monotonic() + LOGIN_LOCKOUT_SECONDS if failed >= LOGIN_MAX_ATTEMPTS else 0
+        _login_attempts[username] = (failed, locked_until)
+
 @app.post("/token")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     username_upper = payload.username.upper()
+    
+    # 1. Account lockout check — bago kahit anong password attempt.
+    failed_count, seconds_left = _get_lock_state(username_upper)
+    if seconds_left > 0:
+        mins = max(1, seconds_left // 60)
+        log_action(
+            db, username_upper, "LOGIN_BLOCKED", "0", "SYSTEM",
+            f"Login attempt blocked — account locked. Try again in {mins} minute(s).",
+            ip_or_source=payload.username
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Account locked. Try again in {mins} minute(s)."
+        )
+    
     user = db.query(User).filter(User.username == username_upper).first()
     if not user or not pwd_context.verify(payload.password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Incorrect credentials")
+        # 2. Failed attempt — i-record at i-lock kapag umabot na sa limit.
+        _register_failed_login(username_upper)
+        new_failed, locked = _get_lock_state(username_upper)
+        if locked > 0:
+            log_action(
+                db, username_upper, "LOGIN_LOCKED", "0", "SYSTEM",
+                f"Account locked after {new_failed} failed login attempts. Auto-unlocks in {LOGIN_LOCKOUT_SECONDS // 60} minutes.",
+                ip_or_source=payload.username
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many failed attempts. Account locked for {LOGIN_LOCKOUT_SECONDS // 60} minutes."
+            )
+        remaining = LOGIN_MAX_ATTEMPTS - new_failed
+        raise HTTPException(status_code=400, detail=f"Incorrect credentials. {remaining} attempt(s) left before lockout.")
+    
+    # 3. Success — burahin ang failure counter.
+    with _login_lock:
+        _login_attempts.pop(username_upper, None)
     
     full_name = get_full_name(user)
     access_token = create_access_token(data={"sub": username_upper})
@@ -979,6 +1095,7 @@ def create_operator_api(record: FranchiseCreate, current_user: User = Depends(ge
 @app.post("/franchise/")
 def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     record.route = alias_route(record.route)
+    record.address = expand_address_abbreviations(record.address)
 
     full_name = get_full_name(current_user)
     current_time = get_pht_now()
@@ -1003,7 +1120,8 @@ def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_c
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, record.route) or record.route
 
-    update_data = record.model_dump(exclude={'issue_date', 'valid_until'})
+    # original_sbn_no ay hindi column — form bookkeeping lang yan para sa renewal detection.
+    update_data = record.model_dump(exclude={'issue_date', 'valid_until', 'original_sbn_no'})
     new_record = FranchiseRecord(
         **update_data, processed_by=full_name, issue_date=actual_issue_date,
         valid_until=actual_valid_until, is_active=actual_active
@@ -1041,11 +1159,35 @@ def update_franchise(
     db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
     if not db_record: raise HTTPException(status_code=404)
     
-    record.route = alias_route(record.route)
-    raw_old_sbn = str(db_record.sbn_no).strip().upper()
-    raw_new_sbn = str(record.sbn_no).strip().upper()
+    # I-refresh muna nang buo yung record mula sa DB bago kahit anong pagbabago.
+    # Kapag may nag-GET kasi bago tumuloy yung PUT (hal. nag-refresh yung listahan
+    # habang bukas yung edit modal), hindi pa na-load yung ibang fields sa object
+    # tapos pagbabasehan natin ng comparison, mababasa natin bilang NULL kahit may
+    # I-refresh muna natin galing sa DB yung object bago tayo mang-compare. Kapag
+    # may ibang request na nagbasa ng record (15s polling ng frontend, page refresh,
+    # etc.) bago pa ma-commit yung PUT, nag-eexpire yung record sa session at
+    # nagmumukhang "lahat ng specs nagbago" kahit wala namang pinagbago — doon
+    # nanggagaling yung mga phantom change-motor entries. Isang refresh lang, dito.
+    db.refresh(db_record)
     
+    record.route = alias_route(record.route)
+    record.address = expand_address_abbreviations(record.address)
+
+    # RENEWAL DETECTION — dito nagluluko dati. Yung listahan na nababasa ng modal
+    # ay may year suffix na derived lang sa issue_date (format_sbn_with_year),
+    # pero hindi yun laging tugma sa stored SBN (hal. backdated record: display
+    # "BA-280-25" pero naka-store "BA-280-26"). Dahil raw string compare lang ang
+    # dating logic, kahit pangalan lang ang binago mo ay nag-fi-fire yung renewal
+    # branch — napapalitan ng date today ang Date Issued. Kaya ngayon, ang
+    # kinukumpara natin ay yung SBN na hinawakan ng user sa modal nung binuksan
+    # nya yung form (original_sbn_no), hindi yung naka-store.
+    original_sbn = str(getattr(record, "original_sbn_no", "") or "").strip().upper()
+    modal_sbn = str(record.sbn_no).strip().upper()
     new_base_sbn = normalize_base_sbn(record.sbn_no)
+    # Fall back sa lumang compare kung wala yung original (old clients / direct API calls)
+    sbn_edit_reference = original_sbn or str(db_record.sbn_no).strip().upper()
+    sbn_edited = modal_sbn != sbn_edit_reference
+
     is_renewal = False
     is_change_motor = False
     record.plate_no = sanitize_plate(record.plate_no, record.chassis_no, record.motor_no)
@@ -1054,37 +1196,54 @@ def update_franchise(
     
     current_time = get_pht_now()
     
-    old_motor = str(db_record.motor_no or "").strip()
-    new_motor = str(record.motor_no or "").strip()
-    old_chassis = str(db_record.chassis_no or "").strip()
-    new_chassis = str(record.chassis_no or "").strip()
-    old_make = str(db_record.make or "").strip()
-    new_make = str(record.make or "").strip()
+    # --- CHANGE MOTOR CHECK (motor specs lang dapat ang nagti-trigger nito) ---
+    # Dito tayo nag-i-snapshot ng LUMANG values, pagkatapos na ma-refresh yung object
+    # para siguradong galing sa DB ang pagkukumpara at hindi sa stale session state.
+    def norm_spec(v):
+        return str(v or "").strip().upper()
+
+    old_motor = norm_spec(db_record.motor_no)
+    old_chassis = norm_spec(db_record.chassis_no)
+    old_make = norm_spec(db_record.make)
+    
+    new_motor = norm_spec(record.motor_no)
+    new_chassis = norm_spec(record.chassis_no)
+    new_make = norm_spec(record.make)
+    
+    motor_specs_changed = (
+        old_motor != new_motor or
+        old_chassis != new_chassis or
+        old_make != new_make
+    )
     
     def safe_date_str(dt):
         return dt.strftime('%Y-%m-%d') if dt else ""
-        
+
+    # NOTE: huwag nang mag-refresh ulit dito — nasa taas na yung db.refresh(db_record),
+    # at kapag inulit mo pa, mabubura lang yung mga binago natin sa taas.
+
     old_issue_str = safe_date_str(db_record.issue_date)
-    new_issue_str = record.issue_date.split('T')[0] if record.issue_date else ""
+    new_issue_str = (record.issue_date or "").split('T')[0]
     user_changed_issue = (old_issue_str != new_issue_str) and new_issue_str != ""
     
     old_valid_str = safe_date_str(db_record.valid_until)
-    new_valid_str = record.valid_until.split('T')[0] if record.valid_until else ""
+    new_valid_str = (record.valid_until or "").split('T')[0]
     user_changed_valid = (old_valid_str != new_valid_str) and new_valid_str != ""
 
     manual_issue = parse_safe_date(record.issue_date, current_time.year) if record.issue_date else None
     manual_valid = parse_safe_date(record.valid_until, current_time.year) if record.valid_until else None
+
+    old_motor = norm_spec(db_record.motor_no)
+    old_chassis = norm_spec(db_record.chassis_no)
+    old_make = norm_spec(db_record.make)
+    old_operator = str(db_record.operator_name or "").strip().upper()
 
     if is_vacant:
         db_record.is_active = False
         db_record.issue_date = None
         db_record.valid_until = None
     else:
-        if (
-            old_motor.upper() != new_motor.upper() or
-            old_chassis.upper() != new_chassis.upper() or
-            old_make.upper() != new_make.upper()
-        ):
+        if motor_specs_changed:
             is_change_motor = True
             if user_changed_issue:
                 db_record.issue_date = manual_issue
@@ -1098,7 +1257,7 @@ def update_franchise(
                     
             db_record.is_active = True
             
-        elif raw_old_sbn != raw_new_sbn: 
+        elif sbn_edited: 
             is_renewal = True
             db_record.issue_date = manual_issue if user_changed_issue else current_time
             db_record.valid_until = manual_valid if user_changed_valid else datetime(db_record.issue_date.year, 12, 31)
@@ -1119,7 +1278,9 @@ def update_franchise(
     if not record.driving_route or str(record.driving_route).strip() == "":
         record.driving_route = get_dominant_driving_route(db, db_record.route) or db_record.route
 
-    update_data = record.model_dump(exclude={'issue_date', 'valid_until'})
+    # NOTE: model_dump pero hindi kasama ang issue_date/valid_until — yung dalawang
+    # yun ay hawak na ng change-motor / renewal logic sa taas, huwag nang i-overwrite.
+    update_data = record.model_dump(exclude={'issue_date', 'valid_until', 'original_sbn_no'})
     for key, value in update_data.items():
         setattr(db_record, key, value)
 
@@ -1134,19 +1295,17 @@ def update_franchise(
     full_name = get_full_name(current_user)
     
     if is_change_motor:
-        old_motor_disp = old_motor if old_motor else "NONE"
-        new_motor_disp = new_motor if new_motor else "NONE"
-        old_chas_disp = old_chassis if old_chassis else "NONE"
-        new_chas_disp = new_chassis if new_chassis else "NONE"
-        old_make_disp = old_make if old_make else "NONE"
-        new_make_disp = new_make if new_make else "NONE"
+        # Ilagay sa log LANG yung specs na talagang nagbago, hindi buong motor/chassis/make
+        # na parang nagbago lahat. Mas malinaw tignan sa Change Motor History page.
+        spec_changes = []
+        if old_motor != new_motor: spec_changes.append(("MOTOR_NO", old_motor, new_motor))
+        if old_chassis != new_chassis: spec_changes.append(("CHASSIS_NO", old_chassis, new_chassis))
+        if old_make != new_make: spec_changes.append(("MAKE", old_make, new_make))
         
-        details_str = f"Motor: {old_motor_disp} -> {new_motor_disp}; Chassis: {old_chas_disp} -> {new_chas_disp}; Make: {old_make_disp} -> {new_make_disp}. Date Issued: {db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else 'NONE'}."
-        
-        changed_fields = []
-        if old_motor.upper() != new_motor.upper(): changed_fields.append("MOTOR_NO")
-        if old_chassis.upper() != new_chassis.upper(): changed_fields.append("CHASSIS_NO")
-        if old_make.upper() != new_make.upper(): changed_fields.append("MAKE")
+        details_str = "; ".join(
+            f"{field}: {old or 'NONE'} -> {new or 'NONE'}" for field, old, new in spec_changes
+        )
+        details_str += f". Date Issued set to {db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else 'NONE'}."
         
         log_action(
             db, 
@@ -1157,13 +1316,16 @@ def update_franchise(
             details_str,
             operator_name=db_record.operator_name,
             sbn_no=new_base_sbn,
-            field_changed=", ".join(changed_fields),
-            old_value=old_motor_disp,
-            new_value=new_motor_disp,
+            field_changed=", ".join(field for field, _, _ in spec_changes),
+            old_value=spec_changes[0][1] or "NONE",
+            new_value=spec_changes[0][2] or "NONE",
             secondary_value=db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else ""
         )
     elif is_renewal:
-        log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to Dec 31, {get_pht_now().year}")
+        # Ilagay sa log yung aktwal na valid_until na na-compute, huwag yung hardcoded
+        # na "Dec 31 ng current year" — minsan magkaiba talaga.
+        _vu_disp = db_record.valid_until.strftime('%Y-%m-%d') if db_record.valid_until else "NO DATE"
+        log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to {_vu_disp}")
     else:
         log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated record for {db_record.operator_name or 'VACANT'} - SBN {db_record.sbn_no} ({db_record.route})")
         
@@ -2096,8 +2258,14 @@ def get_record_history(record_id: str, current_user: User = Depends(get_current_
 
 @app.get("/logs/actions")
 def get_log_actions(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # kasama na rin dito yung routes para may laman yung TODA filter sa logs page
+    # (dating wala, kaya puro fallback list ang nakikita ng user)
+    routes = db.query(AuditLog.target_route).filter(AuditLog.target_route != None, AuditLog.target_route != "").distinct().all()
     actions = db.query(AuditLog.action).filter(AuditLog.action != None).distinct().all()
-    return {"actions": sorted([a[0] for a in actions if a[0]])}
+    return {
+        "routes": sorted({r[0].upper() for r in routes if r[0]}),
+        "actions": sorted([a[0] for a in actions if a[0]])
+    }
 
 @app.get("/logs/change-motor")
 def get_change_motor_logs(
@@ -2319,6 +2487,116 @@ def export_audit_logs(
     
     headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
     return Response(content=output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
+
+@app.get("/export/mass")
+def export_mass_backup(
+    route: str = "ALL",
+    year: str = "ALL",
+    export_status: str = "ALL",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Yung 'Export Filtered Backup Files' button sa Settings page, dati walang
+    endpoint sa backend kaya laging 'No records found' ang sagot kahit anong pindutin.
+    Ngayon, gumagawa na tayo ng totoong ZIP: Excel masterlist + Word certificates
+    ng mga records na tugma sa route/year/status na napili."""
+    route_upper = alias_route(route)
+    
+    if route_upper == "ALL":
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
+    else:
+        records = db.query(FranchiseRecord).filter(
+            FranchiseRecord.route == route_upper,
+            FranchiseRecord.is_deleted == False
+        ).all()
+    
+    records = deduplicate_records_by_base_sbn(records)
+    
+    # Year gate: kapag specific year ang pinili, kunin lang yung records na issued nun
+    if year and year.upper() != "ALL":
+        try:
+            target_year = int(year)
+            records = [r for r in records if r.issue_date and r.issue_date.year == target_year]
+        except ValueError:
+            pass
+    
+    # Status gate: same logic sa compute_record_status para consistent sa ibang filters
+    if export_status and export_status.upper() != "ALL":
+        wanted = export_status.upper()
+        records = [r for r in records if compute_record_status(r) == wanted]
+    
+    if not records:
+        raise HTTPException(status_code=404, detail="No records found matching the selected filters.")
+    
+    records = sorted(records, key=get_sbn_sort_key)
+    current_time = get_pht_now()
+    
+    # --- 1. Excel masterlist ---
+    csv_data = []
+    for r in records:
+        is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+        csv_data.append({
+            "SBN": escape_excel(normalize_base_sbn(r.sbn_no)),
+            "DATE OF RENEWAL": None if is_vacant else r.issue_date,
+            "NAME": "" if is_vacant else escape_excel(r.operator_name),
+            "ADDRESS": escape_excel(r.address),
+            "MAKE": escape_excel(r.make),
+            "MOTOR NO.": escape_excel(r.motor_no),
+            "CHASSIS NO.": escape_excel(r.chassis_no),
+            "PLATE NO.": escape_excel(r.plate_no)
+        })
+    
+    df = pd.DataFrame(csv_data)
+    xlsx_buffer = io.BytesIO()
+    with pd.ExcelWriter(xlsx_buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name="Masterlist")
+    xlsx_buffer.seek(0)
+    
+    # --- 2. Word certificates (para hindi mabagal, docx muna bago i-zip) ---
+    zip_buffer = io.BytesIO()
+    settings = init_settings(db)
+    committee_data = {"committee_chair": settings.committee_chair}
+    
+    doc_count = 0
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        zipf.writestr("MASTERLIST.xlsx", xlsx_buffer.getvalue())
+        
+        for r in records:
+            is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+            if is_vacant:
+                # walang kwentang gumawa ng certificate para sa vacant slot
+                continue
+            try:
+                full_sbn = format_sbn_with_year(r.sbn_no, r.issue_date, is_vacant)
+                cert_data = {
+                    "sbn_no": full_sbn, "operator_name": r.operator_name,
+                    "address": r.address, "motor_no": r.motor_no,
+                    "chassis_no": r.chassis_no, "make": r.make,
+                    "plate_no": r.plate_no, "route": r.route,
+                    "driving_route": r.driving_route,
+                    "issue_date": r.issue_date, "valid_until": r.valid_until
+                }
+                doc_path, _ = generate_certificate(cert_data, committee_data, return_format="docx")
+                if doc_path and os.path.exists(doc_path):
+                    zipf.write(doc_path, f"MTOP/{os.path.basename(doc_path)}")
+                    try: os.remove(doc_path)
+                    except OSError: pass
+                    doc_count += 1
+            except Exception as e:
+                # hindi hadlang ang isang sirang record para matuloy yung buong export
+                force_log(f"Mass export skipped a certificate ({r.sbn_no}): {e}")
+                continue
+    
+    zip_buffer.seek(0)
+    
+    scope_label = route_upper if route_upper != "ALL" else "ALL ROUTES"
+    filename_str = f"PASADA_EXPORT_{scope_label}_{year}_{export_status.upper()}.zip"
+    
+    log_action(db, get_full_name(current_user), "EXPORT_MASS", "0", scope_label,
+               f"Mass export: {len(records)} records, {doc_count} certificates ({year}, {export_status.upper()})")
+    
+    headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+    return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers=headers)
 
 def kill_zombie_port(port):
     try:
