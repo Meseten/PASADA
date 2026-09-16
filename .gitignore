@@ -1,7 +1,21 @@
+# Never commit secrets or databases (they hold LGU records)
+jwt_secret.key
+*.key
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
 backend/dist/
 backend/build/
-frontend/src-tauri/bin/pasada-backend-*
-backend/build/
-backend/dist/
-frontend/src-tauri/bin/pasada-backend-*
 backend/pasada-backend-x86_64-unknown-linux-gnu.spec
+
+# Frontend
+node_modules/
+.next/
+frontend/src-tauri/bin/pasada-backend-*
+frontend/src-tauri/target/

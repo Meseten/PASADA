@@ -129,16 +129,16 @@ def run_kmeans_clustering(db: Session, target_route: str):
         max_road = df['road_length'].max() or 1
         
         importance_data = [
-            {"factor": "Active Fleet Size (Supply X1)", "weight": round((fleet_val / max_fleet) * 100, 1)},
-            {"factor": "Barangay Population (Demand X2)", "weight": round((pop_val / max_pop) * 100, 1)},
-            {"factor": "Road Network Length (Space X3)", "weight": round((road_val / max_road) * 100, 1)},
-            {"factor": "Density Score", "weight": round(min(density_val * 10, 100), 1)}
+            {"factor": "Number of Active Operators", "weight": round((fleet_val / max_fleet) * 100, 1)},
+            {"factor": "People in the Barangay", "weight": round((pop_val / max_pop) * 100, 1)},
+            {"factor": "Road Length", "weight": round((road_val / max_road) * 100, 1)},
+            {"factor": "Fullness Score", "weight": round(min(density_val * 10, 100), 1)}
         ]
 
         result = [{
-            "forecast_period": status_map.get(severity, "GREEN CLUSTER: Under-saturated (Accept Applications)"), 
+            "forecast_period": status_map.get(severity, "GREEN: Not full yet — can accept new operators"), 
             "expected_renewals": fleet_val,  
-            "model_confidence": f"Density Score: {round(density_val, 2)}",
+            "model_confidence": f"Fullness Score: {round(density_val, 2)}",
             "silhouette": round(silhouette_val, 2),
             "davies_bouldin": round(davies_bouldin_val, 2),
             "calinski_harabasz": round(calinski_harabasz_val, 1),

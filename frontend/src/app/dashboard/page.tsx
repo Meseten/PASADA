@@ -677,10 +677,10 @@ export default function Dashboard() {
             </div>
             
             {/* ROUTE DENSITY ANALYSIS */}
-            <div className="bg-card border border-border p-5 rounded-xl shadow-sm">
+            <div className="bg-card border border-border p-5 rounded-xl shadow-sm mt-6">
                 <h3 className="text-sm font-bold flex items-center gap-2 mb-3">
                     <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" />
-                    Route Fullness Check
+                    How Full Is The Route?
                 </h3>
                 
                 <div className="flex flex-wrap gap-1.5 mb-4">
@@ -716,7 +716,7 @@ export default function Dashboard() {
                             Current Active Operators
                         </p>
                         <div className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm">
-                            {predictionData ? predictionData.model_confidence : "Density Score: 0.00"}
+                            {predictionData ? predictionData.model_confidence : "Fullness Score: 0.00"}
                         </div>
                     </div>
                     
@@ -734,7 +734,7 @@ export default function Dashboard() {
                                             </span>
                                             <div className="w-1/2 bg-muted rounded-full h-2.5 overflow-hidden relative cursor-crosshair">
                                                 <div
-                                                    className={`h-2.5 rounded-full transition-all duration-1000 ${feat.factor.includes('Density') ? 'bg-slate-700 dark:bg-slate-300' : 'bg-blue-500'}`}
+                                                    className={`h-2.5 rounded-full transition-all duration-1000 ${feat.factor.includes('Fullness') ? 'bg-slate-700 dark:bg-slate-300' : 'bg-blue-500'}`}
                                                     style={{ width: `${feat.weight}%` }}
                                                 ></div>
                                             </div>
@@ -791,8 +791,25 @@ export default function Dashboard() {
                         </div>
                     </div>
                 </div>
-            </div>
 
+                {/* HOW SURE ARE WE — plain-words version of the grouping checks */}
+                {predictionData && (
+                    <div className="mt-4 pt-3 border-t border-border/50 flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <span className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">How sure are we?</span>
+                        <span className={`text-[10px] font-bold flex items-center gap-1 ${predictionData.silhouette >= 0.5 ? "text-emerald-600 dark:text-emerald-400" : predictionData.silhouette >= 0.26 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}>
+                            {predictionData.silhouette >= 0.5 ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                            {`Silhouette ${predictionData.silhouette} — ${predictionData.silhouette >= 0.5 ? "Groups are clear and far apart" : predictionData.silhouette >= 0.26 ? "Groups somewhat overlap" : "Groups overlap a lot — double-check before deciding"}`}
+                        </span>
+                        <span className="text-[10px] font-semibold text-muted-foreground">
+                            {`Davies-Bouldin ${predictionData.davies_bouldin} — ${Number(predictionData.davies_bouldin) > 0 && Number(predictionData.davies_bouldin) <= 1 ? "✓ Close and alike routes grouped well" : "Route groupings could be tighter"}`}
+                        </span>
+                        <span className="text-[10px] font-semibold text-muted-foreground">
+                            {`Calinski-Harabasz ${Math.round(predictionData.calinski_harabasz)} — ${Number(predictionData.calinski_harabasz) >= 100 ? "✓ Strong grouping for this many routes" : "Few routes to compare so far"}`}
+                        </span>
+                    </div>
+                )}
+            </div>
+            
             {/* CUSTOM TOAST CONTAINER */}
             <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 pointer-events-none">
                 {toasts.map(toast => (

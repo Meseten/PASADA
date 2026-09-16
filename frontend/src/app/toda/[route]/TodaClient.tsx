@@ -1888,13 +1888,13 @@ export default function TodaClient() {
             </div>
             
             <div className="relative w-full md:w-[24rem]">
-              <Search className="absolute left-3.5 top-3 h-4 w-4 text-muted-foreground" />
               <Input
+                type="search"
                 ref={searchInputRef}
                 placeholder="Search Operator, SBN, Make... (Press '/' to focus)"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="pl-10 h-10 bg-muted/40 border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
+                className="h-10 bg-muted/40 border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
               />
             </div>
           </div>

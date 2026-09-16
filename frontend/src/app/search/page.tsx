@@ -407,13 +407,13 @@ function GlobalSearchClient() {
           </div>
         </div>
         <div className="relative w-full xl:w-[32rem]">
-            <Search className="absolute left-3.5 top-3 h-5 w-5 text-blue-600" />
-            <input
+            <Input
+              type="search"
               autoFocus
-              placeholder="Search across all TODAs..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-11 h-12 bg-background border-2 border-blue-500/50 focus:border-blue-600 transition-all rounded-xl shadow-md font-bold text-lg focus:outline-none focus:ring-4 focus:ring-blue-500/20"
+              placeholder="Search across all TODAs..."
+              className="h-12 border-2 border-blue-500/50 focus:border-blue-600 rounded-xl shadow-md font-bold text-lg focus:ring-4 focus:ring-blue-500/20"
             />
         </div>
       </div>

@@ -326,7 +326,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   <p className="text-xs text-muted-foreground font-medium">{userRole}</p>
                 </div>
                 
-                <nav ref={navRef} onScroll={handleScroll} className="flex-1 space-y-1 p-4 overflow-y-auto custom-scrollbar">
+                {/* FIXED MIDDLE: main pages and the search boxes never move */}
+                <div className="shrink-0 px-4 pt-4 space-y-1">
                   <Link prefetch={false} href="/dashboard" className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${pathname === '/dashboard' ? 'bg-blue-50/50 text-blue-600 border-l-4 border-blue-600' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <LayoutDashboard className="mr-2 h-4 w-4" /> Dashboard
                   </Link>
@@ -346,13 +347,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </Link>
 
                   {/* GLOBAL SEARCH */}
-                  <form onSubmit={handleGlobalSearch} className="px-1 mb-6 relative">
-                    <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                    <Input 
-                      placeholder="Search all records..." 
+                  <form onSubmit={handleGlobalSearch} className="px-1 mb-6">
+                    <Input
+                      type="search"
+                      placeholder="Search all records..."
                       value={globalSearch}
                       onChange={(e) => setGlobalSearch(e.target.value)}
-                      className="h-10 pl-9 text-xs font-bold bg-muted/30 border border-border shadow-sm focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg" 
+                      className="h-10 text-xs font-bold bg-muted/30 border border-border shadow-sm focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg"
                     />
                   </form>
                   
@@ -360,17 +361,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     <div className="pt-2 pb-2 space-y-3">
                       <p className="px-3 text-xs font-black text-muted-foreground uppercase tracking-widest">TODA Lines</p>
                       <div className="px-3 relative">
-                        <Search className="absolute left-5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                        <Input 
-                          placeholder="Filter lines..." 
+                        <Input
+                          type="search"
+                          placeholder="Filter lines..."
                           value={routeSearch}
                           onChange={(e) => setRouteSearch(e.target.value)}
-                          className="h-8 pl-8 text-[11px] font-semibold bg-background border border-border shadow-sm focus-visible:ring-2 focus-visible:ring-blue-500" 
+                          className="h-8 pl-8 text-[11px] font-semibold bg-background border border-border shadow-sm focus-visible:ring-2 focus-visible:ring-blue-500"
                         />
                       </div>
                     </div>
                   )}
-                  
+                </div>
+
+                {/* THE ONLY SCROLLING PART: the list of Toda lines */}
+                <nav ref={navRef} onScroll={handleScroll} className="flex-1 min-h-0 overflow-y-auto px-4 pb-4 custom-scrollbar">
                   <div className="space-y-1 mt-1">
                     {pinnedList.length > 0 && (
                         <div className="mb-2">
