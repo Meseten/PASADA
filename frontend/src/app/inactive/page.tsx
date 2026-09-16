@@ -361,12 +361,12 @@ export default function InactiveLines() {
                     </Button>
 
                     <div className="relative w-full md:w-72 group">
-                        <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-muted-foreground group-focus-within:text-blue-600 transition-colors" />
-                        <Input 
+                        <Input
+                            type="search"
                             placeholder="Search Operator, SBN..."
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            className="pl-10 h-11 bg-card border-border/50 focus:bg-background transition-all rounded-lg shadow-sm font-medium"
+                            className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
                         />
                     </div>
                 </div>
