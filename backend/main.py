@@ -40,7 +40,7 @@ import starlette.formparsers
 import uvicorn
 
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy import func, extract, create_engine, inspect
+from sqlalchemy import func, extract, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from jose import JWTError, jwt
@@ -988,38 +988,124 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
 
 # --- LOGIN RATE LIMITING & ACCOUNT LOCKOUT ---
 # 25010 Characteristic: Security.
-# Ginagamit lang nito ang memorya (walang bagong table, walang internet) kaya
-# gumagana ito sa air-gapped LGU LAN. Auto-reset din ito kapag nag-restart ang
-# server, kaya walang naiiwang lock na hindi maibabalik nang lokal.
+# Mabilis na counter sa memorya + AKTIBONG lock na naka-mirror sa SQLite
+# (login_lockouts table). Dati, memorya lang: restart ng backend = reset ng
+# lock, kaya puwedeng i-reset ng attacker ang brute-force sa pamamagitan ng
+# paulit-ulit na restart. Ngayon, pagkatapos ng restart, babasahin mula sa DB
+# ang aktibong lock BAGO kahit isang password attempt. Local SQLite lang —
+# walang internet, walang migration step (CREATE TABLE IF NOT EXISTS sa
+# unang login), at ang expired na lock ay kusang binubura para hindi
+# ma-stuck ang lehitimong user o umipon ang lumang failure count.
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 15 * 60
 _login_attempts = {}
 _login_lock = threading.Lock()
 
-def _get_lock_state(username: str):
-    """Returns (failed_count, seconds_left). (0, 0) kapag walang lock."""
-    entry = _login_attempts.get(username)
-    if not entry:
-        return 0, 0
-    failed, locked_until = entry
-    now = time.monotonic()
-    if locked_until and now < locked_until:
-        return failed, int(locked_until - now) + 1
-    return failed, 0
+def _ensure_lock_table(db: Session) -> bool:
+    """Tinitiyak na mayroong login_lockouts table sa kasalukuyang database.
+    Nililikha sa unang paggamit kada database kaya gumagana pa rin ang mga
+    test na may sariling test DB, at walang kailangang migration sa mga
+    existing na installation. CREATE TABLE IF NOT EXISTS lang ito kada tawag —
+    mura sa SQLite at hindi bumibitaw kapag pinalitan ang database file."""
+    try:
+        db.execute(text(
+            "CREATE TABLE IF NOT EXISTS login_lockouts ("
+            "username VARCHAR PRIMARY KEY, "
+            "failed_count INTEGER NOT NULL DEFAULT 0, "
+            "locked_until REAL)"
+        ))
+        db.commit()
+        return True
+    except Exception as e:
+        force_log(f"Login lockout table unavailable (RAM counter still active): {e}")
+        return False
 
-def _register_failed_login(username: str):
+def _persist_lock(username: str, failed: int, locked_until: float, db: Session):
+    """Best-effort na pagsulat ng lock state sa DB (wall-clock time)."""
+    try:
+        if not _ensure_lock_table(db):
+            return
+        db.execute(text(
+            "INSERT INTO login_lockouts (username, failed_count, locked_until) "
+            "VALUES (:u, :f, :l) "
+            "ON CONFLICT(username) DO UPDATE SET failed_count=:f, locked_until=:l"
+        ), {"u": username, "f": failed, "l": locked_until})
+        db.commit()
+    except Exception as e:
+        force_log(f"Login lockout persistence skipped (RAM counter still active): {e}")
+
+def _load_persisted_lock(username: str, db: Session):
+    """Bumabalik na (failed_count, wall_clock_locked_until) mula sa DB, o (0, 0)."""
+    try:
+        if not _ensure_lock_table(db):
+            return 0, 0.0
+        row = db.execute(text(
+            "SELECT failed_count, locked_until FROM login_lockouts WHERE username = :u"
+        ), {"u": username}).fetchone()
+        if not row:
+            return 0, 0.0
+        failed, locked_until = int(row[0] or 0), float(row[1] or 0)
+        if locked_until and locked_until <= time.time():
+            # Lumipas na ang lock habang naka-shutdown: burahin para malinis
+            # ang susunod na pag-detected ng attack at hindi manatili ang lumang count.
+            _clear_persisted_lock(username, db)
+            return 0, 0.0
+        return failed, locked_until
+    except Exception as e:
+        force_log(f"Login lockout read skipped (RAM counter still active): {e}")
+        return 0, 0.0
+
+def _clear_persisted_lock(username: str, db: Session):
+    """Binubura ang mirror sa DB (tamang login o expired na lock)."""
+    try:
+        if not _ensure_lock_table(db):
+            return
+        db.execute(text("DELETE FROM login_lockouts WHERE username = :u"), {"u": username})
+        db.commit()
+    except Exception as e:
+        force_log(f"Login lockout cleanup skipped: {e}")
+
+def _get_lock_state(username: str, db: Session = None):
+    """Returns (failed_count, seconds_left). (0, 0) kapag walang lock.
+    Kapag walang entry sa RAM (hal. pagkatapos ng restart), ibinabalik ang
+    lock mula sa DB bago magpatuloy."""
+    with _login_lock:
+        entry = _login_attempts.get(username)
+        if entry:
+            failed, locked_until = entry
+            now = time.monotonic()
+            if locked_until and now < locked_until:
+                return failed, int(locked_until - now) + 1
+            return failed, 0
+    # WALANG entry sa RAM — tingnan ang DB (restart-proof na lock).
+    if db is not None:
+        failed, wall_until = _load_persisted_lock(username, db)
+        if wall_until > time.time():
+            monotonic_until = time.monotonic() + (wall_until - time.time())
+            with _login_lock:
+                current = _login_attempts.get(username)
+                if not current or current[1] < monotonic_until:
+                    _login_attempts[username] = (failed, monotonic_until)
+            return failed, int(wall_until - time.time()) + 1
+    return 0, 0
+
+def _register_failed_login(username: str, db: Session = None):
     with _login_lock:
         failed, _ = _login_attempts.get(username, (0, 0))
         failed += 1
         locked_until = time.monotonic() + LOGIN_LOCKOUT_SECONDS if failed >= LOGIN_MAX_ATTEMPTS else 0
         _login_attempts[username] = (failed, locked_until)
+    if db is not None:
+        # I-mirror ang aktibong lock sa DB (wall-clock) para survibahin ang restart.
+        _persist_lock(username, failed, time.time() + (locked_until - time.monotonic() if locked_until else 0), db)
 
 @app.post("/token")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     username_upper = payload.username.upper()
     
     # 1. Account lockout check — bago kahit anong password attempt.
-    failed_count, seconds_left = _get_lock_state(username_upper)
+    #    dala ang db para mabawi ang lock mula sa DB pagkatapos ng restart.
+    failed_count, seconds_left = _get_lock_state(username_upper, db)
     if seconds_left > 0:
         mins = max(1, seconds_left // 60)
         log_action(
@@ -1034,8 +1120,9 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     
     user = db.query(User).filter(User.username == username_upper).first()
     if not user or not pwd_context.verify(payload.password, user.password_hash):
-        # 2. Failed attempt — i-record at i-lock kapag umabot na sa limit.
-        _register_failed_login(username_upper)
+        # 2. Failed attempt — i-record at i-lock kapag umabot na sa limit
+        #    (i-mirror din sa DB para hindi mabura ng restart).
+        _register_failed_login(username_upper, db)
         new_failed, locked = _get_lock_state(username_upper)
         if locked > 0:
             log_action(
@@ -1050,9 +1137,10 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         remaining = LOGIN_MAX_ATTEMPTS - new_failed
         raise HTTPException(status_code=400, detail=f"Incorrect credentials. {remaining} attempt(s) left before lockout.")
     
-    # 3. Success — burahin ang failure counter.
+    # 3. Success — burahin ang failure counter (RAM at DB mirror).
     with _login_lock:
         _login_attempts.pop(username_upper, None)
+    _clear_persisted_lock(username_upper, db)
     
     full_name = get_full_name(user)
     access_token = create_access_token(data={"sub": username_upper})

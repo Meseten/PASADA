@@ -38,6 +38,16 @@ jobs:
 
       - name: Build Tauri Frontend
         shell: bash
+        # tauri.conf.json enables createUpdaterArtifacts, so the Tauri CLI needs
+        # the minisign PRIVATE key at build time to produce the .sig update
+        # signatures. Without these env vars the build dies right after the
+        # bundles are produced with "A public key has been found, but no private
+        # key". The public key itself lives in tauri.conf.json (plugins.updater
+        # .pubkey); these secrets must hold the .key file from
+        # `npx tauri signer generate` and its passphrase.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cd frontend
           npm install

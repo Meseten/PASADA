@@ -53,7 +53,7 @@ This document serves as an audit artifact mapping the system's architectural dec
 | :--- | :--- | :--- |
 | **Confidentiality** | Passwords are stored only as bcrypt hashes and never logged, exported, or synced between peer machines (the LAN sync payload strips `password_hash`). | `backend/main.py`, `backend/main.py:sync_pull()` |
 | **Non-repudiation / Accountability** | Every login, lockout, and record change is written to a tamper-evident audit log with the acting account and time. Failed-login throttling events (`LOGIN_LOCKED`, `LOGIN_BLOCKED`) are recorded alongside ordinary actions so brute-force attempts leave a trace. | `backend/main.py:log_action()`, `backend/main.py:login()` |
-| **Integrity** | The `/token` login endpoint throttles brute-force attempts: after 5 consecutive failed passwords for the same username, the account is locked for 15 minutes and returns HTTP 429 even if the correct password is then supplied. A successful login clears the counter. The throttle lives in server memory only — no new database tables, no internet dependency — so it works unchanged on the air-gapped LGU LAN and resets cleanly on service restart. | `backend/main.py:login()`, `backend/tests/test_api_endpoints.py:test_login_rate_limit_and_lockout()` |
+| **Integrity** | The `/token` login endpoint throttles brute-force attempts: after 5 consecutive failed passwords for the same username, the account is locked for 15 minutes and returns HTTP 429 even if the correct password is then supplied. A successful login clears the counter. The active lock is mirrored to SQLite (`login_lockouts`) so a backend restart can no longer reset it mid-attack; no internet dependency, works unchanged on the air-gapped LGU LAN. | `backend/main.py:login()`, `backend/tests/test_api_endpoints.py:test_login_rate_limit_and_lockout()`, `test_login_lockout_persists_across_restart()` |
 
 ## 7. Verification Log (Live End-to-End Smoke Test, Sept 14, 2026)
 
@@ -81,7 +81,7 @@ Regression tests pinning scenarios 1–3 live in `backend/tests/test_api_endpoin
 
 # ISO/IEC 25010 Full Evaluation (September 27, 2026)
 
-Re-evaluation against the complete ISO/IEC 25010:2023 characteristic set, covering all changes staged since the smoke test above: signed LAN sync, LAN binding, the real background update pipeline, the UI/UX passes (tooltips, spotlight, sidebar highlight, shortcuts, right-click menu), account-name broadcasting, dropdown readability, and the documentation overhaul. **No code was changed for this evaluation**; every row below maps to existing, tested code.
+Re-evaluation against the complete ISO/IEC 25010:2023 characteristic set, covering all changes since the smoke test above: signed LAN sync, LAN binding, the real background update pipeline, the UI/UX passes (tooltips, spotlight, sidebar highlight, shortcuts, right-click menu), account-name broadcasting, dropdown readability, the documentation overhaul, and the post-evaluation hardening (restart-persistent login lockout, CI updater signing). Where this document says **no code was changed**, only the initial 8–16 tables were written without touching code; the hardening items below were implemented and are marked as such.
 
 ## Evaluation method and measured baseline
 
@@ -90,7 +90,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | Metric | Value |
 | :--- | :--- |
 | Backend production code | 3,954 lines of Python across 6 modules (`main.py` 2,916; `doc_generator.py` 397; `sync_engine.py` 241; `database.py` 170; `ml_engine.py` 156; `extractor.py` 74) |
-| Backend test code | 901 lines across 5 test files, **49 tests** (22 endpoint, 16 sync-security, 8 business-logic, 2 performance, 1 migration), pytest 49/49 |
+| Backend test code | 1,001 lines across 5 test files, **51 tests** (24 endpoint, 16 sync-security, 8 business-logic, 2 performance, 1 migration), pytest 51/51 |
 | Frontend code | 8,963 lines of TypeScript/TSX; vitest **8/8**; `tsc --noEmit` clean; `next build` clean |
 | Rust shell | `cargo check` clean (11m 39s); Tauri v2 updater with minisign verification |
 | CI | `.github/workflows/build-windows.yml`: every push to `main` builds the backend (PyInstaller, 12 pinned hidden imports) and frontend (Node 22, Rust stable, Python 3.12) on `windows-latest` and publishes a downloadable **PASADA-Windows-Installer** artifact (`.msi` + NSIS `.exe`) |
@@ -191,6 +191,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | Sync message authentication | HMAC-SHA256 over addressed host + timestamp + nonce; wrong-address signature fails closed | `backend/main.py:_verify_pull_signature()` |
 | Replay protection | caches on both pull and discovery; 5-minute freshness window | `main.py`, `sync_engine.py` |
 | Brute-force lockout | 5 consecutive failures → 15-minute lock, HTTP 429, audited (`LOGIN_LOCKED`/`LOGIN_BLOCKED`) | `backend/main.py:login()` |
+| Lockout persistence | active lock mirrored to SQLite (`login_lockouts`, wall-clock) and re-read after a backend restart — restarting no longer resets a brute-force lock (pinned by `test_login_lockout_persists_across_restart`; hardened after this evaluation flagged it) | `main.py:_load_persisted_lock()` |
 | Password storage | bcrypt only; never logged, exported, or synced (`password_hash` stripped from pull payloads) | `backend/main.py:sync_pull()` |
 | Session tokens | JWT HS256, per-installation secret file, 30-day expiry | `backend/main.py` |
 | Update authenticity | installers verified against developer's minisign signature; prepared updates re-verified before reuse | `frontend/src-tauri/src/lib.rs` |
@@ -201,14 +202,14 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **Explanation.** The threat model is an air-gapped municipal LAN with untrusted-by-default broadcasts. The design answers it with signed-only pulls (fail closed), replay caches, freshness windows, and a display name that is deliberately excluded from all trust decisions. Secrets (cluster key, JWT secret) never cross the network; browser-based local reads are blocked by the CORS allowlist; brute force is throttled and audited.
 
-**Remarks.** 9, not 10, because four risks are *accepted and documented* rather than eliminated: no TLS on the LAN (HMAC covers integrity, not wire confidentiality), the discovery broadcast is readable by anyone on the segment (name only, nothing secret), the cluster secret is shared by copying a file, and the login lockout counter lives in memory so a backend restart resets it. All four are conscious trade-offs recorded in `docs/THREAT_MODEL.md` — appropriate for the context, but they are the honest distance to a perfect score.
+**Remarks.** 9, not 10, because three risks remain *accepted and documented* rather than eliminated: no TLS on the LAN (HMAC covers integrity, not wire confidentiality), the discovery broadcast is readable by anyone on the segment (name only, nothing secret), and the cluster secret is shared by copying a file. All three are conscious trade-offs recorded in `docs/THREAT_MODEL.md` — appropriate for the context, but they are the honest distance to a perfect score. The fourth earlier gap (RAM-only lockout reset by a restart) has since been **closed in code**: the active lock is mirrored to SQLite and re-read on boot, pinned by a dedicated regression test.
 
-**Notes.** CI (`.github/workflows/build-windows.yml`) produces downloadable installer artifacts on every commit to `main`, but artifact signing in the pipeline is not yet wired in; release signing remains a manual minisign step. Account names broadcast on the LAN are display-only and grant nothing.
+**Notes.** CI produces a signed, downloadable installer on every commit to `main` (`.github/workflows/build.yml` now passes `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD` to the Tauri build, so the updater `.zip` + `.sig` pairs are produced in the pipeline, not only at release time). Account names broadcast on the LAN are display-only and grant nothing.
 
 **What to improve**
-1. Persist the lockout counter (one SQLite table) so a backend restart cannot reset a brute-force lockout mid-attack.
+1. ~~Persist the lockout counter~~ **Done** after this evaluation: `login_lockouts` SQLite mirror, re-read on boot, test-pinned.
 2. Automate cluster-secret distribution for new machines (e.g. a first-run pairing code entered on the new machine) instead of manual file copying.
-3. Add a minisign step to the GitHub Actions workflow so published installer artifacts are signed by CI, not only locally.
+3. ~~Add a minisign step to the GitHub Actions workflow~~ **Done**: the push-build now signs updater artifacts with the repo's minisign secrets.
 
 ## 12. Reliability — Grade: 9/10
 *Degree to which a system performs specified functions under specified conditions for a specified period of time.*
@@ -244,8 +245,9 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 | Metric | Value | Source |
 | :--- | :--- | :--- |
-| Test-to-code ratio (backend) | 901 test lines / 3,954 production lines ≈ 0.23 | `backend/` |
-| Test distribution | 5 backend files (logic 8, endpoints 22, performance 2, migration 1, sync-security 16) + 8 frontend tests | `backend/tests/`, `frontend/src/lib/api.test.ts` |
+| Test-to-code ratio (backend) | 1,001 test lines / 3,954 production lines ≈ 0.25 | `backend/` |
+| Test distribution | 5 backend files (logic 8, endpoints 24, performance 2, migration 1, sync-security 16) + 8 frontend tests | `backend/tests/`, `frontend/src/lib/api.test.ts` |
+| Coverage (statement, measured Sept 27 2026 via `pytest --cov`) | **50%** backend-wide; the security-critical modules lead: `test_sync_security.py` 100%, `database.py` 94%, endpoint tests 98%; the uncovered weight sits in Windows-only document/Excel generation (`doc_generator.py` 8%, `extractor.py` 12%) and the export/report endpoints of `main.py` (42%) | measured with `pytest tests/ --cov` |
 | Order independence | per-module DB fixtures installed in fixtures, not import time — suite passes in any order | `backend/tests/` |
 | Regression-pinning style | every client-reported defect became a named test (`test_suffix_drift_edit_is_not_renewal`, `test_computer_name_never_defaults_to_hostname`, …) | `test_api_endpoints.py`, `test_sync_security.py` |
 | CI build | reproducible Windows build on every push to `main`; 12 PyInstaller hidden imports pinned explicitly with rationale comment | `.github/workflows/build-windows.yml` |
@@ -255,13 +257,13 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **Explanation.** The codebase demonstrates maintainability empirically: five consecutive feature/hardening passes each re-verified against the same green battery, which is the strongest possible evidence that modules are separable and the tests catch regressions. The defect-pinning convention (every reported bug becomes a named regression test) means the suite documents the system's history.
 
-**Remarks.** Held at 8 for two reasons: the tracked `backend/venv/` in the git index bloats the repository (a hygiene defect, not a quality one), and there is no coverage measurement, so "what the 57 tests do not cover" is unknown rather than managed.
+**Remarks.** Held at 8 for two reasons: the tracked `backend/venv/` in the git index bloats the repository (a hygiene defect, not a quality one), and statement coverage sits at 50% — now measured and recorded above instead of unknown, with the bulk of the gap in Windows-only document generation and Excel extraction code that cannot execute on the Linux dev machine.
 
 **Notes.** `main.py` at 2,916 lines is the one file pulling its weight reluctantly; it is well-commented but is the natural next extraction candidate (endpoints vs. sync vs. background tasks). The CI workflow's PyInstaller flags carry an explicit comment about the `multipart`/`python_multipart` rename — exactly the kind of tribal knowledge that belongs in-repo.
 
 **What to improve**
 1. Remove `backend/venv/` from the git index and add it to `.gitignore` (already offered as a follow-up; pure repo hygiene).
-2. Add coverage reporting (`pytest --cov`) and record the number here so the next evaluation can grade coverage instead of guessing.
+2. ~~Add coverage reporting (`pytest --cov`)~~ **Done**: 50% statements, recorded in the metrics table; the follow-up is lifting `main.py`'s export/report endpoints, since the other big gaps need a Windows runner.
 3. Extract sync and background-task code from `main.py` into modules as it grows, keeping `main.py` as the wiring layer.
 4. Add a workflow step running the backend pytest suite in CI so the downloadable builds are always built from a green-tested commit.
 
@@ -347,13 +349,13 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | Compatibility | **9** | none | signed cross-machine sync verified live; 16 refusal tests |
 | Interaction Capability | **8** | none | 208+ tooltips measured with zero pokes; 44px standard; screen-reader audit outstanding |
 | Reliability | **9** | none | 49/49 tests; live fault injection stayed graceful |
-| Security | **9** | none open | HMAC + replay caches + lockout, all live-verified; 4 accepted risks in `THREAT_MODEL.md` |
+| Security | **9** | none open | HMAC + replay caches + lockout, all live-verified; 3 accepted risks in `THREAT_MODEL.md`; restart-persistent lockout added |
 | Maintainability | **8** | none | 5 clean modification passes; CI green per commit; venv bloat + no coverage measurement |
 | Flexibility | **8** | none | zero-config install + CI-built artifacts; secret sharing manual by design |
 | Safety | **9** | none | reversibility everywhere; idle-gated installs |
 | **Overall** | **8.6 / 10** | — | compliant with ISO/IEC 25010:2023 for its deployment context, zero open blocking issues |
 
-**Interpretation of the overall grade.** The distance to 10 is fully enumerated and none of it is architectural: performance needs one synthetic-scale run (§8), usability needs a screen-reader audit (§10), security needs persistent lockout + signed CI artifacts (§11), maintainability needs coverage measurement and venv cleanup (§13), and flexibility needs a safer secret-sharing ritual (§14). Every remaining item is incremental work on an already-verified foundation.
+**Interpretation of the overall grade.** The distance to 10 is fully enumerated and none of it is architectural: performance needs one synthetic-scale run (§8), usability needs a screen-reader audit (§10), security's remaining distance is the three accepted LAN risks (§11), maintainability needs venv cleanup and coverage of the export endpoints (§13), and flexibility needs a safer secret-sharing ritual (§14). Two of the originally listed gaps (restart-persistent lockout, signed CI artifacts) were closed the same day; the rest are incremental work on an already-verified foundation.
 
 **Deployment readiness:** YES, with the conditions documented in `README.md`, section "Packaging and deployment readiness" (Windows-only packaging, version lockstep, signed releases, UDP broadcast allowance, first-run account creation). CI already produces downloadable Windows installers on every commit to `main`; release-signing those artifacts in the pipeline is the highest-leverage next step (§11, item 3).
 
