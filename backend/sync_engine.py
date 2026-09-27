@@ -1,6 +1,9 @@
 import socket
 import threading
 import time
+import hmac
+import hashlib
+import secrets
 import requests
 import os
 from database import SessionLocal, FranchiseRecord, get_pht_now, BASE_DIR
@@ -10,7 +13,32 @@ BROADCAST_PORT = 54321
 API_PORT = 43888
 PEERS = set()
 
-# CLUSTER SECRET: Secures local endpoints from random unauthorized network callers
+# FRIENDLY COMPUTER NAMES: each machine broadcasts the name of the ACCOUNT
+# signed in on it (set automatically by the frontend after login, editable
+# in Settings) so the Connections tab shows who is who. The name is DISPLAY
+# ONLY: trust still comes exclusively from the HMAC signature, so a lying
+# or duplicate name joins nothing and reads nothing. Before anyone signs
+# in, the neutral placeholder "PASADA" is broadcast instead of a hostname.
+COMPUTER_NAME_PATH = os.path.join(BASE_DIR, "computer_name.key")
+if os.path.exists(COMPUTER_NAME_PATH):
+    with open(COMPUTER_NAME_PATH, "r") as f:
+        COMPUTER_NAME = f.read().strip()[:40]
+else:
+    # Neutral placeholder until someone signs in: the frontend then announces
+    # the signed-in ACCOUNT's name automatically. Never the PC/hostname.
+    COMPUTER_NAME = "PASADA"
+PEER_NAMES = {}
+
+def set_computer_name(name: str):
+    """Store the office-given name for this computer and broadcast it from now on."""
+    global COMPUTER_NAME
+    COMPUTER_NAME = name.strip()[:40]
+    with open(COMPUTER_NAME_PATH, "w") as f:
+        f.write(COMPUTER_NAME)
+
+# CLUSTER SECRET: shared by the office computers that sync records. It never
+# crosses the network in readable form: discovery broadcasts carry an HMAC
+# signature and the pull request carries an HMAC over the request itself.
 CLUSTER_SECRET_PATH = os.path.join(BASE_DIR, "cluster_secret.key")
 if os.path.exists(CLUSTER_SECRET_PATH):
     with open(CLUSTER_SECRET_PATH, "r") as f:
@@ -20,6 +48,74 @@ else:
     CLUSTER_SECRET = str(uuid.uuid4())
     with open(CLUSTER_SECRET_PATH, "w") as f:
         f.write(CLUSTER_SECRET)
+
+# Signatures older than this are refused, so a captured broadcast cannot be
+# replayed to sneak a fake peer onto the list. Broadcasts repeat every 10s,
+# and clocks across one office stay well within a few seconds, so 5 minutes
+# leaves a wide margin for a machine whose clock drifted.
+BROADCAST_MAX_AGE_SECONDS = 300
+
+# REPLAY PROTECTION: a valid broadcast captured on the wire must not be
+# reusable. Each received payload's nonce is remembered for the freshness
+# window; a repeat is dropped as a replay. (The pull endpoint keeps its own
+# nonce cache for the same reason.)
+_seen_broadcast_nonces = {}
+_seen_broadcast_lock = threading.Lock()
+
+def _broadcast_nonce_seen(nonce: str, now: float) -> bool:
+    """True when this nonce was never used before (and records it)."""
+    with _seen_broadcast_lock:
+        current = now
+        for k in [k for k, exp in _seen_broadcast_nonces.items() if exp <= current]:
+            del _seen_broadcast_nonces[k]
+        if nonce in _seen_broadcast_nonces:
+            return False
+        _seen_broadcast_nonces[nonce] = current + BROADCAST_MAX_AGE_SECONDS
+        return True
+
+def _hmac_hex(message: bytes) -> str:
+    return hmac.new(CLUSTER_SECRET.encode('utf-8'), message, hashlib.sha256).hexdigest()
+
+def build_discovery_payload(local_ip: str, now: float = None) -> bytes:
+    """PASADA_NODE:<ip>:<timestamp>:<nonce>:<name>:<hmac>, secret never on the wire.
+
+    The friendly computer name travels INSIDE the signed body, so a tampered
+    name breaks the signature like any other change."""
+    if now is None:
+        now = time.time()
+    timestamp = str(int(now))
+    nonce = secrets.token_hex(8)
+    body = f"PASADA_NODE:{local_ip}:{timestamp}:{nonce}:{COMPUTER_NAME}".encode('utf-8')
+    return body + b":" + _hmac_hex(body).encode('ascii')
+
+def parse_discovery_payload(data: bytes, local_ip: str, now: float = None):
+    """Return (sender's IP, friendly name) when the signature is fresh and valid, else None.
+
+    Verification compares HMACs in constant time, so an eavesdropper who
+    records broadcasts cannot forge one without the secret. An empty name is
+    rejected outright: a peer without a name is malformed, not trusted."""
+    if now is None:
+        now = time.time()
+    try:
+        parts = data.decode('utf-8').split(":")
+        if len(parts) != 6 or parts[0] != "PASADA_NODE":
+            return None
+        peer_ip, timestamp, nonce, name, signature = parts[1], parts[2], parts[3], parts[4], parts[5]
+        body = f"PASADA_NODE:{peer_ip}:{timestamp}:{nonce}:{name}".encode('utf-8')
+        if not hmac.compare_digest(_hmac_hex(body), signature):
+            return None
+        age = abs(now - float(timestamp))
+        if age > BROADCAST_MAX_AGE_SECONDS:
+            return None
+        if not _broadcast_nonce_seen(nonce, now):
+            return None
+        if not name.strip():
+            return None
+        if peer_ip != local_ip:
+            return (peer_ip, name)
+        return None
+    except Exception:
+        return None
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -39,9 +135,8 @@ def broadcast_presence():
     
     while True:
         try:
-            # AUTHENTICATED BROADCAST
-            message = f"PASADA_NODE:{CLUSTER_SECRET}:{local_ip}".encode('utf-8')
-            udp_socket.sendto(message, ('<broadcast>', BROADCAST_PORT))
+            # SIGNED BROADCAST: proves membership without revealing the secret.
+            udp_socket.sendto(build_discovery_payload(local_ip), ('<broadcast>', BROADCAST_PORT))
         except Exception:
             pass
         time.sleep(10)
@@ -55,14 +150,13 @@ def listen_for_peers():
     while True:
         try:
             data, addr = udp_socket.recvfrom(1024)
-            message = data.decode('utf-8')
-            if message.startswith("PASADA_NODE:"):
-                parts = message.split(":")
-                # STRICT AUTH: Only add peers matching cluster secret
-                if len(parts) == 3 and parts[1] == CLUSTER_SECRET:
-                    peer_ip = parts[2]
-                    if peer_ip != local_ip and peer_ip not in PEERS:
-                        PEERS.add(peer_ip)
+            result = parse_discovery_payload(data, local_ip)
+            if result:
+                peer_ip, name = result
+                if peer_ip not in PEERS:
+                    PEERS.add(peer_ip)
+                # Always refresh the name: the office may rename a machine.
+                PEER_NAMES[peer_ip] = name
         except Exception:
             pass
 
@@ -76,8 +170,24 @@ def sync_with_peers():
             
             for peer in list(PEERS):
                 try:
-                    headers = {"X-Cluster-Secret": CLUSTER_SECRET}
-                    response = requests.get(f"http://{peer}:{API_PORT}/api/sync/pull?since={last_sync_time}", headers=headers, timeout=5)
+                    # PULL AUTH: sign the request instead of sending the secret.
+                    # The signature covers the IP this machine is ADDRESSED to
+                    # (the peer's LAN address), the timestamp, and a one-time
+                    # nonce. The peer rebuilds the same HMAC from its own copy
+                    # of the cluster secret.
+                    ts = str(int(time.time()))
+                    nonce = secrets.token_hex(8)
+                    body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
+                    signature = _hmac_hex(body)
+                    response = requests.get(
+                        f"http://{peer}:{API_PORT}/api/sync/pull?since={last_sync_time}",
+                        headers={
+                            "X-Cluster-Timestamp": ts,
+                            "X-Cluster-Nonce": nonce,
+                            "X-Cluster-Signature": signature,
+                        },
+                        timeout=5,
+                    )
                     if response.ok:
                         incoming_data = response.json()
                         

@@ -128,6 +128,24 @@
     @apply font-sans;
   }
 }
+
+/* NATIVE DROPDOWN LISTS: the closed select is styled with theme tokens, but
+   the OPEN list is drawn by the browser with its own defaults, which came
+   out as near-white text on a white list in dark mode (and washed out on
+   some Windows builds even in light mode). Pin option colors to the popover
+   tokens so they flip with the theme, and declare color-scheme per theme so
+   every native part (popup, scrollbar, date picker) follows too. */
+:root {
+  color-scheme: light;
+}
+.dark {
+  color-scheme: dark;
+}
+select option,
+select optgroup {
+  background-color: var(--popover);
+  color: var(--popover-foreground);
+}
 @media print {
   body * {
     visibility: hidden;
@@ -149,4 +167,56 @@
     size: A4;
     margin: 0;
   }
+}
+
+/* Guided tutorial (driver.js): match the app's quiet office look.
+   Design tokens are oklch, so colors are used raw (hsl() around an oklch
+   value is invalid and made the popover fall back to driver.js defaults). */
+.pasada-tour-popover.driver-popover {
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.pasada-tour-popover .driver-popover-title {
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--card-foreground);
+}
+.pasada-tour-popover .driver-popover-description {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted-foreground);
+}
+.pasada-tour-popover .driver-popover-progress-text {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted-foreground);
+}
+.pasada-tour-popover .driver-popover-navigation-btns button {
+  font-weight: 700;
+  border-radius: 8px;
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+.pasada-tour-popover .driver-popover-navigation-btns button:last-child {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+.pasada-tour-popover .driver-popover-navigation-btns button:hover {
+  opacity: 0.9;
+}
+.pasada-tour-popover .driver-popover-close-btn {
+  color: var(--muted-foreground);
+}
+.pasada-tour-popover .driver-popover-close-btn:hover {
+  color: var(--card-foreground);
+}
+/* Keep popovers clear of the window edge on small screens. */
+.driver-popover.pasada-tour-popover {
+  max-width: 360px;
 }

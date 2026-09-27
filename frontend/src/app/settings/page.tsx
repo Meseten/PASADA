@@ -17,13 +17,44 @@ import {
   Database, 
   Lock, 
   KeyRound, 
+  ShieldQuestion,
   User, 
   FileText, 
   Sparkles,
   ShieldCheck,
-  Trash2
+  Trash2,
+  ArrowUpCircle
 } from "lucide-react";
 import { API_URL, fetchWithAuth } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import UpdateCard from "./UpdateCard";
+
+// Office-friendly security questions offered as suggestions. Each one stays
+// true for years and is easy for the person who set it to remember. The
+// questions can also be written from scratch with the "Write my own" choice.
+const RECOVERY_QUESTION_OPTIONS = [
+  "What is the name of your first pet?",
+  "What city or municipality were you born in?",
+  "What was the name of your first school?",
+  "What is your mother's maiden name?",
+  "What was your favorite food as a child?",
+  "Who is your closest childhood friend?",
+  "What is the name of the street you grew up on?",
+];
+const CUSTOM_QUESTION = "__write_my_own__";
+
+interface RecoveryConfig {
+  configured: boolean;
+  q1: string;
+  q2: string;
+  q3: string;
+}
+
+// Must match the version in src-tauri/tauri.conf.json; the updater compares
+// against it to decide whether a new release exists.
+const APP_VERSION = "0.82.0";
 
 interface Toast {
   id: number;
@@ -49,7 +80,19 @@ export default function Settings() {
   const [availableYears, setAvailableYears] = useState<number[]>([]);
   const [newPassword, setNewPassword] = useState("");
   const [newUsername, setNewUsername] = useState("");
-  const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[] } | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryConfig>({ configured: false, q1: "", q2: "", q3: "" });
+  const [recoveryForm, setRecoveryForm] = useState({ q1: RECOVERY_QUESTION_OPTIONS[0], q2: RECOVERY_QUESTION_OPTIONS[1], q3: RECOVERY_QUESTION_OPTIONS[2], a1: "", a2: "", a3: "" });
+  // Per-question flag: true when the user chose to write their own question
+  // instead of picking a suggested one. Existing questions that are not in
+  // the suggestion list also show as custom on load.
+  const [customSlots, setCustomSlots] = useState({ 1: false, 2: false, 3: false });
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[]; peer_names?: Record<string, string>; computer_name?: string } | null>(null);
+  // FRIENDLY COMPUTER NAME: what this machine broadcasts on the network so
+  // other computers can show a real label next to its IP.
+  const [computerName, setComputerName] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
+  const [isSavingName, setIsSavingName] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [isCleaningDb, setIsCleaningDb] = useState(false);
@@ -80,7 +123,26 @@ export default function Settings() {
     if (localStorage.getItem("pasada_pin")) {
       setHasPin(true);
     }
-    
+
+    fetchWithAuth(`${API_URL}/recovery/status`)
+      .then(res => res.json())
+      .then((data: RecoveryConfig) => {
+        setRecovery({ configured: !!data.configured, q1: data.q1 || "", q2: data.q2 || "", q3: data.q3 || "" });
+        // A saved question that is not one of the suggestions shows as a
+        // custom question so it can be edited or kept as-is.
+        setCustomSlots({
+          1: !!data.q1 && !RECOVERY_QUESTION_OPTIONS.includes(data.q1),
+          2: !!data.q2 && !RECOVERY_QUESTION_OPTIONS.includes(data.q2),
+          3: !!data.q3 && !RECOVERY_QUESTION_OPTIONS.includes(data.q3),
+        });
+        setRecoveryForm(prev => ({
+          ...prev,
+          q1: data.q1 || prev.q1,
+          q2: data.q2 || prev.q2,
+          q3: data.q3 || prev.q3,
+        }));
+      }).catch(e => console.error(e));
+
     fetchWithAuth(`${API_URL}/settings`)
       .then(res => res.json())
       .then(data => {
@@ -100,10 +162,43 @@ export default function Settings() {
     if (activeTab === "network") {
       fetchWithAuth(`${API_URL}/system/network`)
         .then(res => res.json())
-        .then(data => setNetworkInfo(data))
+        .then(data => {
+          setNetworkInfo(data);
+          setComputerName(data.computer_name || "");
+          setNameDraft(data.computer_name || "");
+        })
         .catch(e => console.error(e));
     }
   }, [activeTab]);
+
+  const handleSaveComputerName = async () => {
+    const name = nameDraft.trim();
+    if (!name) {
+      showToast("Give this computer a name first.", "error");
+      return;
+    }
+    setIsSavingName(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/system/computer-name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setComputerName(data.name || name);
+        setNameDraft(data.name || name);
+        showToast(`This computer is now announced as "${data.name || name}".`, "success");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Could not save the computer name.", "error");
+      }
+    } catch {
+      showToast("Network error while saving the computer name.", "error");
+    } finally {
+      setIsSavingName(false);
+    }
+  };
 
   const handleToggleSavePreview = (val: boolean) => {
     setShowSavePreview(val);
@@ -156,7 +251,7 @@ export default function Settings() {
         body: JSON.stringify({ committee_chair: chairName.trim().toUpperCase(), enable_esignature: false })
       });
       if (!res.ok) {
-        // may tumanggi sa backend — huwag padalos-dalos sa "success" toast
+        // may tumanggi sa backend: huwag padalos-dalos sa "success" toast
         const err = await res.json().catch(() => ({}));
         showToast(err.detail || "Failed to save settings. Please check the value and try again.", "error");
         setLoading(false);
@@ -249,6 +344,42 @@ export default function Settings() {
     }
   };
 
+  const handleRecoverySave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!recoveryForm.q1.trim() || !recoveryForm.q2.trim() || !recoveryForm.q3.trim() ||
+        !recoveryForm.a1.trim() || !recoveryForm.a2.trim() || !recoveryForm.a3.trim()) {
+      showToast("Fill in all three questions and answers.", "error");
+      return;
+    }
+    setRecoveryLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/recovery/setup`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q1: recoveryForm.q1,
+          q2: recoveryForm.q2,
+          q3: recoveryForm.q3,
+          a1: recoveryForm.a1,
+          a2: recoveryForm.a2,
+          a3: recoveryForm.a3,
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setRecovery({ configured: true, q1: recoveryForm.q1, q2: recoveryForm.q2, q3: recoveryForm.q3 });
+        setRecoveryForm(prev => ({ ...prev, a1: "", a2: "", a3: "" }));
+        showToast(data.message || "Recovery questions saved.", "success");
+      } else {
+        showToast(data.detail || "Failed to save recovery questions.", "error");
+      }
+    } catch (err) {
+      showToast("Network error. Could not save recovery questions.", "error");
+    } finally {
+      setRecoveryLoading(false);
+    }
+  };
+
   const handleUsernameUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -310,8 +441,8 @@ export default function Settings() {
           <SettingsIcon className="w-7 h-7" />
         </div>
         <div>
-          <h1 className="text-3xl font-black tracking-tight">System Settings</h1>
-          <p className="text-muted-foreground mt-0.5 text-sm font-medium">Manage committee chairman name, database backups, security, and LAN connectivity.</p>
+          <h1 className="text-3xl font-black tracking-tight">Settings</h1>
+          <p className="text-muted-foreground mt-0.5 text-sm font-medium">The chairman name printed on documents, backups, sign-in details, app updates, and connections between computers.</p>
         </div>
       </div>
       
@@ -319,10 +450,10 @@ export default function Settings() {
         {/* Navigation Tabs */}
         <div className="flex w-full overflow-x-auto border-b border-border bg-muted/10">
           {[
-            { id: "general", label: "General Settings", icon: <SettingsIcon size={16} /> },
-            { id: "backup", label: "Backup & Database Cleanup", icon: <Download size={16} /> },
-            { id: "security", label: "Account Security", icon: <Shield size={16} /> },
-            { id: "network", label: "Network Connection", icon: <Server size={16} /> }
+            { id: "general", label: "General", icon: <SettingsIcon size={16} /> },
+            { id: "backup", label: "Backups", icon: <Download size={16} /> },
+            { id: "security", label: "Security", icon: <Shield size={16} /> },
+            { id: "network", label: "Connections", icon: <Server size={16} /> }
           ].map(tab => (
             <button
               key={tab.id}
@@ -346,8 +477,8 @@ export default function Settings() {
           {activeTab === "general" && (
             <div className="space-y-6">
               <div>
-                <h2 className="text-xl font-black tracking-tight">General System Configuration</h2>
-                <p className="text-sm text-muted-foreground font-medium mt-1">Configure global print signatory details and record creation behavior.</p>
+                <h2 className="text-xl font-black tracking-tight">General</h2>
+                <p className="text-sm text-muted-foreground font-medium mt-1">The name printed on official documents, and how saving records works.</p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -356,10 +487,10 @@ export default function Settings() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2.5 text-blue-600">
                       <FileText size={20} />
-                      <h3 className="text-base font-bold text-foreground">MTOP Official Signatory</h3>
+                      <h3 className="text-base font-bold text-foreground">MTOP Signatory</h3>
                     </div>
                     <p className="text-xs text-muted-foreground font-medium leading-relaxed">
-                      This name replaces the committee chairman placeholder across all printed MTOP certificates, official Word documents, and TODA summary PDFs.
+                      This name is printed on MTOP certificates, Word documents, and TODA summary PDFs.
                     </p>
                     
                     <div className="space-y-1.5 pt-2">
@@ -389,10 +520,10 @@ export default function Settings() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2.5 text-blue-600">
                       <Sparkles size={20} />
-                      <h3 className="text-base font-bold text-foreground">Operator Entry Workflow</h3>
+                      <h3 className="text-base font-bold text-foreground">Saving Records</h3>
                     </div>
                     <p className="text-xs text-muted-foreground font-medium leading-relaxed">
-                      Control how the system behaves immediately following the creation or renewal of an operator record.
+                      What happens right after you save or renew a record.
                     </p>
 
                     <div className="pt-2 space-y-3">
@@ -436,6 +567,24 @@ export default function Settings() {
                     </div>
                   </div>
                 </div>
+
+                {/* Card 3: App Updates. Spans the full row so its two inner
+                    columns fill both sides: no empty half next to it. */}
+                <div
+                  className="bg-muted/15 border border-border p-6 rounded-2xl flex flex-col space-y-6 lg:col-span-2"
+                  data-tour="tour-guide-card"
+                >
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2.5 text-blue-600">
+                      <ArrowUpCircle size={20} />
+                      <h3 className="text-base font-bold text-foreground">App Updates and Guide</h3>
+                    </div>
+                    <p className="text-xs text-muted-foreground font-medium leading-relaxed">
+                      Keep PASADA current, and replay the step by step guide anytime.
+                    </p>
+                  </div>
+                  <UpdateCard appVersion={APP_VERSION} />
+                </div>
               </div>
             </div>
           )}
@@ -449,9 +598,9 @@ export default function Settings() {
               <div className="bg-muted/15 border border-border p-6 rounded-2xl space-y-6">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
-                    <Download className="text-blue-600" size={20} /> Export Filtered Backup Files
+                    <Download className="text-blue-600" size={20} /> Export Backup Files
                   </h2>
-                  <p className="text-xs text-muted-foreground mt-1 font-medium">Download a consolidated ZIP archive containing Excel masterlists and generated Word document certificates.</p>
+                  <p className="text-xs text-muted-foreground mt-1 font-medium">Download a ZIP with Excel masterlists and Word certificates for the filters you picked.</p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -498,10 +647,10 @@ export default function Settings() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-slate-800 dark:text-slate-200">
                       <Database className="text-blue-600 shrink-0" size={20} />
-                      <h3 className="text-base font-bold">Raw Database Backup (.db)</h3>
+                      <h3 className="text-base font-bold">Full Database Backup (.db)</h3>
                     </div>
                     <p className="text-xs text-muted-foreground font-medium leading-relaxed">
-                      Download a direct byte-for-byte snapshot of the live SQLite registry. Keep this safe before executing migrations, batch deletes, or testing. You can restore this file anytime from the Import page.
+                      Download an exact copy of the whole database. Save one before big cleanups or tests. You can restore it anytime from the Import page.
                     </p>
                   </div>
 
@@ -511,7 +660,7 @@ export default function Settings() {
                     className="w-full bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold py-3.5 px-6 rounded-lg flex items-center justify-center gap-2 hover:bg-slate-800 dark:hover:bg-slate-200 transition-all shadow-md"
                   >
                     {exportLoading ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
-                    Download Raw Database (.db)
+                    Download Database (.db)
                   </button>
                 </div>
 
@@ -550,7 +699,7 @@ export default function Settings() {
                 <h2 className="text-lg font-bold flex items-center gap-2">
                   <Shield className="text-blue-600" size={20} /> Account Credentials
                 </h2>
-                <p className="text-xs text-muted-foreground mt-1 font-medium">Update your login username and account access password.</p>
+                <p className="text-xs text-muted-foreground mt-1 font-medium">Change the name you use to sign in, and your password.</p>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
@@ -619,7 +768,7 @@ export default function Settings() {
                       <Lock className="text-blue-600" size={18} /> Quick PIN Unlock
                     </h3>
                     <p className="text-xs text-muted-foreground font-medium mt-0.5">
-                      Set a short numeric PIN to quickly unlock PASADA whenever the application is reopened.
+                      Set a short PIN to unlock PASADA quickly when you reopen it.
                     </p>
                   </div>
 
@@ -667,9 +816,9 @@ export default function Settings() {
                   {/* Right Column: Information & Removal */}
                   <div className="h-full bg-background border border-border rounded-xl p-5 flex flex-col justify-between space-y-4 shadow-sm">
                     <div className="space-y-1.5">
-                      <p className="text-xs font-bold text-foreground">How PIN Unlock works:</p>
+                      <p className="text-xs font-bold text-foreground">How it works:</p>
                       <p className="text-xs text-muted-foreground font-medium leading-relaxed">
-                        Your session stays authenticated via your primary token. Closing and reopening PASADA locks the interface behind your PIN instead of prompting you for full credentials every time.
+                        After you close PASADA, reopening it asks for this PIN instead of your full name and password. Your sign-in stays valid while the app is open.
                       </p>
                     </div>
 
@@ -684,14 +833,126 @@ export default function Settings() {
                       </button>
                     ) : (
                       <div className="text-[11px] text-muted-foreground font-semibold italic">
-                        No PIN is currently assigned to this installation.
+                        No PIN set yet.
                       </div>
                     )}
                   </div>
                 </div>
               </div>
+
+            {/* ACCOUNT RECOVERY (SECURITY QUESTIONS) */}
+            <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2">
+                    <ShieldQuestion className="text-blue-600" size={18} /> Forgot Password Recovery
+                  </h3>
+                  <p className="text-xs text-muted-foreground font-medium mt-0.5">
+                    Pick three questions only you can answer. On the login screen, answering them correctly lets you set a new password.
+                  </p>
+                </div>
+                <div className="w-max">
+                  {recovery.configured ? (
+                    <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-full text-xs font-black">
+                      <CheckCircle2 size={13} />
+                      Recovery Ready
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 px-3 py-1 bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30 rounded-full text-xs font-bold">
+                      <XCircle size={13} />
+                      Not Set Up
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                <form onSubmit={handleRecoverySave} className="space-y-4">
+                  {([1, 2, 3] as const).map((n) => {
+                    const qKey = `q${n}` as "q1" | "q2" | "q3";
+                    const aKey = `a${n}` as "a1" | "a2" | "a3";
+                    const isCustom = customSlots[n as 1 | 2 | 3];
+                    return (
+                      <div key={n} className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Question {n}</label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomSlots(prev => ({ ...prev, [n]: !prev[n as 1 | 2 | 3] }));
+                              if (!isCustom) {
+                                // Switching to custom: clear the picked suggestion.
+                                setRecoveryForm(prev => ({ ...prev, [qKey]: "" }));
+                              }
+                            }}
+                            className="text-[11px] font-bold text-blue-600 hover:text-blue-700 underline underline-offset-2"
+                          >
+                            {isCustom ? "Choose a suggested question" : "Write my own"}
+                          </button>
+                        </div>
+                        {isCustom ? (
+                          <input
+                            type="text"
+                            value={recoveryForm[qKey]}
+                            onChange={(e) => setRecoveryForm(prev => ({ ...prev, [qKey]: e.target.value }))}
+                            placeholder="Write your question here"
+                            aria-label={`Security question ${n} (custom)`}
+                            data-tip="Your own question. Keep it one only you can answer, and one you will still remember years from now."
+                            className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            required
+                          />
+                        ) : (
+                          <select
+                            value={recoveryForm[qKey]}
+                            onChange={(e) => setRecoveryForm(prev => ({ ...prev, [qKey]: e.target.value }))}
+                            aria-label={`Security question ${n}`}
+                            className="w-full bg-background border border-border shadow-sm rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                            required
+                          >
+                            {RECOVERY_QUESTION_OPTIONS.map(q => <option key={q} value={q}>{q}</option>)}
+                          </select>
+                        )}
+                        <input
+                          type="text"
+                          value={recoveryForm[aKey]}
+                          onChange={(e) => setRecoveryForm(prev => ({ ...prev, [aKey]: e.target.value }))}
+                          placeholder={`Answer ${n}`}
+                          aria-label={`Security answer ${n}`}
+                          data-tip="Only you will see this question. Capitalization and extra spaces do not matter when answering."
+                          autoComplete="off"
+                          className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          required
+                        />
+                      </div>
+                    );
+                  })}
+                  <button
+                    type="submit"
+                    disabled={recoveryLoading}
+                    data-tip="Saves the questions and locks in the answers. The answers themselves are never stored as typed: only unreadable versions of them are saved, and they never sync to other computers."
+                    className="w-full bg-blue-600 text-white font-bold h-11 rounded-lg shadow-md hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
+                  >
+                    {recoveryLoading ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                    {recovery.configured ? "Update Recovery Questions" : "Enable Account Recovery"}
+                  </button>
+                </form>
+
+                <div className="bg-background border border-border rounded-xl p-5 space-y-2 shadow-sm self-start">
+                  <p className="text-xs font-bold text-foreground">How it works</p>
+                  <p className="text-xs text-muted-foreground font-medium leading-relaxed">
+                    On the login screen, Forgot Password asks for your full name, then these three questions, then a new password. Five wrong answers locks recovery for 15 minutes, and every attempt is written to Activity History.
+                  </p>
+                  <p className="text-xs text-muted-foreground font-medium leading-relaxed">
+                    Your answers are never stored as typed: only unreadable versions of them are kept on this computer. They are never shown again, never synced, and never appear in logs.
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-semibold italic pt-1">
+                    {recovery.configured ? "Recovery is ready for this account." : "Not set up yet: without it, a forgotten password needs an administrator."}
+                  </p>
+                </div>
+              </div>
             </div>
-          )}
+          </div>
+        )}
 
           {/* ========================================================================= */}
           {/* TAB 4: NETWORK CONNECTION (Clean Grid)                                    */}
@@ -700,9 +961,9 @@ export default function Settings() {
             <div className="space-y-6">
               <div>
                 <h2 className="text-lg font-bold flex items-center gap-2">
-                  <Server className="text-blue-600" size={20} /> Network Connection
+                  <Server className="text-blue-600" size={20} /> Connections
                 </h2>
-                <p className="text-sm text-muted-foreground mt-1 font-medium">Computers connected for automatic sharing of records.</p>
+                <p className="text-sm text-muted-foreground mt-1 font-medium">Computers that share records with each other on your network.</p>
               </div>
               
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
@@ -711,9 +972,31 @@ export default function Settings() {
                   <p className="text-3xl font-black text-slate-800 dark:text-slate-200 font-mono tracking-wider">
                     {networkInfo?.local_ip || "CHECKING..."}
                   </p>
-                  <div className="flex items-center gap-2 mt-4 text-xs font-bold text-emerald-600 bg-emerald-500/10 w-max px-3 py-1.5 rounded-full border border-emerald-500/20">
+                  <div
+                    className="flex items-center gap-2 mt-4 text-xs font-bold text-emerald-600 bg-emerald-500/10 w-max px-3 py-1.5 rounded-full border border-emerald-500/20"
+                    data-tip="The sync service on this computer listens on port 43888 so other PASADA computers can reach it."
+                  >
                     <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
                     Active on Port 43888
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                      Name other computers see (follows the signed-in account)
+                    </Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={nameDraft}
+                        onChange={(e) => setNameDraft(e.target.value)}
+                        maxLength={40}
+                        placeholder="Sign in to set automatically"
+                        aria-label="This computer's network name"
+                        className="h-9 uppercase font-bold"
+                        data-tip="Usually the account name of whoever is signed in; other PASADA computers show it next to this computer's IP. It is a label only: joining and sharing still require the secret key, so a wrong name cannot do anything."
+                      />
+                      <Button onClick={handleSaveComputerName} disabled={isSavingName || nameDraft.trim() === computerName} size="sm" className="h-9 font-bold shrink-0">
+                        {isSavingName ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 
@@ -727,8 +1010,11 @@ export default function Settings() {
                       <p className="text-xs font-bold text-muted-foreground">No other computers connected.</p>
                     ) : (
                       (networkInfo?.connected_peers ?? []).map(peer => (
-                        <div key={peer} className="text-xs font-bold text-slate-700 bg-white border border-border px-3 py-2 rounded-md font-mono shadow-sm">
-                          {peer}
+                        <div key={peer} className="text-xs font-bold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 border border-border px-3 py-2 rounded-md font-mono shadow-sm flex items-center justify-between gap-2">
+                          <span>{peer}</span>
+                          {networkInfo?.peer_names?.[peer] && (
+                            <span className="text-[11px] font-black text-blue-600 dark:text-blue-400 text-right" title={`Announced by ${peer}`}>{networkInfo.peer_names[peer]}</span>
+                          )}
                         </div>
                       ))
                     )}
@@ -736,13 +1022,16 @@ export default function Settings() {
                 </div>
 
                 <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1 flex flex-col justify-center">
-                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">LAN Sync Status</p>
-                  <div className="w-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center">
+                  <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">Sharing</p>
+                  <div
+                    className="w-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center"
+                    data-tip="Sharing is always ON: PASADA announces itself on the network every 10 seconds and pulls new records from computers it trusts."
+                  >
                     <div className="flex items-center gap-2">
                       <RefreshCw className="h-5 w-5 animate-spin" />
-                      <span>Automatic</span>
+                      <span>Automatic: ON</span>
                     </div>
-                    <p className="text-[10px] font-medium opacity-80 mt-1">Records are shared on their own — no need to press anything.</p>
+                    <p className="text-[10px] font-medium opacity-80 mt-1">Records are shared on their own. No need to press anything.</p>
                   </div>
                 </div>
               </div>

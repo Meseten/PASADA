@@ -210,7 +210,7 @@ export default function MassImport() {
         </div>       
       </div>              
       
-      <div className="bg-card border border-border rounded-2xl p-8 shadow-sm">         
+      <div className="bg-card border border-border rounded-2xl p-8 shadow-sm" data-tour="tour-import">         
         {serverErrors.length > 0 && (           
           <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/20 text-amber-700 rounded-lg shadow-sm text-sm font-bold animate-in fade-in slide-in-from-top-4">             
             <div className="flex items-center gap-2 mb-2">               

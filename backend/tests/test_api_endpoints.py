@@ -76,9 +76,48 @@ def test_health_endpoint():
     assert response.json() == {"status": "online"}
 
 def test_system_network_status():
-    response = client.get("/system/network")
+    token = get_auth_token()
+    response = client.get("/system/network", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert "local_ip" in response.json()
+
+def test_system_network_requires_auth():
+    # 25010 Security: network info (IP + connected peers) must not be readable
+    # by unauthenticated callers on the LAN.
+    response = client.get("/system/network")
+    assert response.status_code in (401, 403)
+
+# --- ROUTE DATA (Route Info card prefill) ---
+def test_get_route_data_defaults_to_unset():
+    # A route with nothing saved yet reports no values. The ML engine's
+    # 5000 / 5.0 are internal defaults and must NOT be shown as if the
+    # office entered them.
+    token = get_auth_token()
+    response = client.get("/route_data/NO_SUCH_ROUTE_XYZ", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"exists": False, "population": None, "road_length_km": None}
+
+def test_get_route_data_roundtrip():
+    # Save via POST, read back via GET: exactly what the dashboard's
+    # Route Info inputs display.
+    token = get_auth_token()
+    post = client.post(
+        "/route_data/RT_ROUNDTRIP",
+        json={"population": 7321, "road_length_km": 4.2},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert post.status_code == 200
+    got = client.get("/route_data/RT_ROUNDTRIP", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 200
+    body = got.json()
+    assert body["exists"] is True
+    assert body["population"] == 7321
+    assert body["road_length_km"] == 4.2
+
+def test_get_route_data_requires_auth():
+    response = client.get("/route_data/BATODA")
+    assert response.status_code in (401, 403)
 
 # --- 2. AUTHENTICATION & USER TESTS ---
 def test_login_success():
@@ -157,16 +196,24 @@ def test_login_success_resets_failure_counter():
     with _login_lock:
         _login_attempts.pop(victim, None)
 
-def test_unlocked_signup():
-    response = client.post("/signup", json={
+def test_signup_bootstrap_only():
+    """25010 Security: signup is first-run bootstrap. The fixture already seeds an
+    account, so every signup from here must answer 403 — an open endpoint would let
+    any device on the LAN mint logins. Server-local admin promotes via the users
+    table; admins then create Clerks in-app."""
+    r = client.post("/signup", json={
         "first_name": "CLERK",
         "last_name": "USER",
         "username": "CLERK USER",
         "password": "clerkpassword123",
         "role": "Clerk"
     })
-    assert response.status_code == 200
-    assert response.json() == {"message": "Account created"}
+    assert r.status_code == 403
+    # The locked door must also actually keep the account from existing.
+    db = TestingSessionLocal()
+    ghost = db.query(User).filter(User.username == "CLERK USER").first()
+    db.close()
+    assert ghost is None
 
 # --- 3. FRANCHISE OPERATOR CRUD TESTS ---
 def test_create_operator_and_auto_sbn():

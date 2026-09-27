@@ -19,3 +19,8 @@ node_modules/
 .next/
 frontend/src-tauri/bin/pasada-backend-*
 frontend/src-tauri/target/
+
+# Backend generated files (exports contain LGU records)
+backend/exports/
+frontend/playwright-report/
+frontend/test-results/

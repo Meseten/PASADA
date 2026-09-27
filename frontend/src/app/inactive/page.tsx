@@ -314,7 +314,7 @@ export default function InactiveLines() {
         <div className="p-6 md:p-8 animate-in fade-in duration-500 min-h-screen bg-muted/5">
             
             {/* HEADER WITH CONTROLS */}
-            <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-8">
+            <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-8" data-tour="tour-inactive">
                 <div className="flex items-center gap-3 shrink-0">
                     <ArchiveX className="w-8 h-8 text-red-600" />
                     <div>
@@ -355,7 +355,7 @@ export default function InactiveLines() {
                         </select>
                     </div>
 
-                    <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
+                    <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600" data-tip="Downloads the inactive list as an Excel file. Only the records matching the TODA route filter above are included.">
                         {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
                         Export Excel
                     </Button>
@@ -544,7 +544,7 @@ export default function InactiveLines() {
                                         </TableCell>
                                         <TableCell className="text-center">
                                             <div className="flex items-center justify-center gap-1">
-                                                <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="View Certificate Preview" onClick={() => handleOpenView(record)}>
+                                                <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="View Certificate Preview" data-tip-align-right data-tip="Opens this archived record's MTOP certificate preview. You can still print the certificate for a revoked operator from here." onClick={() => handleOpenView(record)}>
                                                     <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                                                 </Button>
                                             </div>

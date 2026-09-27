@@ -163,8 +163,13 @@ function GlobalSearchClient() {
     setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
+  // SPOTLIGHT: same as the records page. The row the office opened or just
+  // edited keeps a blue ring so it is easy to find again in the results.
+  const [spotlightId, setSpotlightId] = useState<string | null>(null);
+
   const handleOpenEdit = (member: Member) => {
     setActiveMember(member); 
+    setSpotlightId(member.id);
     
     let safeAddress = member.address || "";
     if (safeAddress.toUpperCase().endsWith(", NAIC, CAVITE")) {
@@ -185,11 +190,13 @@ function GlobalSearchClient() {
 
   const handleOpenView = (member: Member) => {
     setViewMember(member)
+    setSpotlightId(member.id)
     setIsViewOpen(true)
   }
 
   const handleOpenHistory = async (member: Member) => {
     setActiveMember(member)
+    setSpotlightId(member.id)
     try {
       const res = await fetchWithAuth(`${API_URL}/logs/record/${member.id}`)
       if (res.ok) setHistoryLogs(await res.json())
@@ -486,8 +493,9 @@ function GlobalSearchClient() {
                       statusBadge = <Badge variant="outline" className="bg-amber-500/10 text-amber-700 border-amber-500/20 dark:text-amber-400 font-bold tracking-wide shadow-sm"><AlertCircle className="h-3 w-3 mr-1"/> 1-Year Non-Renewal</Badge>;
                     }
 
+                    const isSpotlit = spotlightId === member.id;
                     return (
-                      <TableRow key={member.id} className={`${rowColor} border-b border-border/40`}>
+                      <TableRow key={member.id} className={`${rowColor} border-b border-border/40 ${isSpotlit ? "ring-2 ring-inset ring-blue-500 bg-blue-50/40 dark:bg-blue-950/30" : ""}`}>
                         <TableCell className="pl-6 font-mono font-bold text-[13px] text-foreground/90 whitespace-nowrap">
                           <div className="flex flex-col items-start gap-1">
                             <span>{member.sbn_no}</span>
@@ -509,13 +517,13 @@ function GlobalSearchClient() {
                         <TableCell>{statusBadge}</TableCell>
                         <TableCell className="text-center">
                           <div className="flex items-center justify-center gap-1">
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="View Certificate Preview" onClick={() => handleOpenView(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="View Certificate Preview" data-tip-align-right data-tip="Opens the MTOP certificate preview for this operator, where you can print or download it." onClick={() => handleOpenView(member)}>
                               <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                             </Button>
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Edit Operator" onClick={() => handleOpenEdit(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Edit Operator" data-tip-align-right data-tip="Edit or renew this record. Editing the SBN counts as a renewal and updates the dates." onClick={() => handleOpenEdit(member)}>
                               <Edit className="h-3.5 w-3.5" />
                             </Button>
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Record History" data-tip-align-right data-tip="Every change ever recorded for this operator, with dates and who made them." onClick={() => handleOpenHistory(member)}>
                               <History className="h-3.5 w-3.5" />
                             </Button>
                             <Button 
@@ -523,8 +531,7 @@ function GlobalSearchClient() {
                                 size="icon" 
                                 disabled={isDeleting}
                               onClick={() => handleDeleteOne(member)}
-                              className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm" 
-                                title="Delete Operator"
+                              className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm"aria-label="Delete Operator" data-tip-align-right data-tip="Asks first, and the delete can still be undone right after."
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>

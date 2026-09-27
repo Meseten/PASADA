@@ -27,10 +27,12 @@ import calendar
 import uuid
 import platform
 import time
+import hmac
+import hashlib
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header, Request
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -54,8 +56,9 @@ from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, Sy
 from ml_engine import run_kmeans_clustering, invalidate_ml_cache
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
+import sync_engine
 from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 crash_log_path = os.path.join(BASE_DIR, "PASADA_CRASH_LOG.txt")
 
@@ -144,7 +147,20 @@ app = FastAPI(title="PASADA Registry API", lifespan=lifespan)
 
 app.add_middleware(  
     CORSMiddleware,  
-    allow_origins=["*"],  
+    # SECURITY: only the app's own origins need CORS. The API is reached at
+    # http://127.0.0.1:43888 from the app window itself. Windows WebView2
+    # reports the app origin as http://tauri.localhost (https on some builds),
+    # macOS/Linux WebKit use tauri://localhost, and the dev server runs on
+    # localhost:3000. Do NOT put "*" here: with allow_origins=["*"] Starlette
+    # mirrors any Origin header, which would let any website open in a browser
+    # on this computer read LGU records from the local API.
+    allow_origins=[
+        "http://tauri.localhost",  
+        "https://tauri.localhost",  
+        "tauri://localhost",  
+        "http://localhost:3000",  
+        "http://127.0.0.1:3000",  
+    ],  
     allow_credentials=False,  
     allow_methods=["*"],  
     allow_headers=["*"],  
@@ -161,8 +177,19 @@ async def allow_private_network_access(request: _StarletteRequest, call_next):
     else:  
         response = await call_next(request)  
   
-    origin = request.headers.get("origin", "*")  
-    response.headers["Access-Control-Allow-Origin"] = origin  
+    # SECURITY: reflect the Origin only when it is one of the app's own.
+    # Anything else gets no ACAO header, so browsers block the response.
+    # Windows WebView2 sends http://tauri.localhost; WebKit sends tauri://.
+    ALLOWED_ORIGINS = (
+        "http://tauri.localhost",  
+        "https://tauri.localhost",  
+        "tauri://localhost",  
+        "http://localhost:3000",  
+        "http://127.0.0.1:3000",  
+    )
+    origin = request.headers.get("origin", "")  
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin  
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"  
     response.headers["Access-Control-Allow-Headers"] = "*"  
     response.headers["Access-Control-Allow-Private-Network"] = "true"  
@@ -257,6 +284,13 @@ class RouteDataUpdate(BaseModel):
 
 class BulkDeleteRequest(BaseModel):
     sbn_list: List[str]
+
+class SignupRequest(BaseModel):
+    first_name: str = Field(min_length=1, max_length=60)
+    last_name: str = Field(min_length=1, max_length=60)
+    username: str = Field(min_length=3, max_length=60)
+    password: str = Field(min_length=8, max_length=72)  # bcrypt hard limit
+    role: str = "Clerk"  # ignored by the endpoint — see setup_admin_notes
 
 class BatchGenerateRequest(BaseModel):
     record_ids: List[str]
@@ -924,20 +958,32 @@ def refresh_database(current_user: User = Depends(get_current_user), db: Session
     }
 
 @app.post("/signup")
-def signup(user: UserCreate, db: Session = Depends(get_db)):
-    username_upper = user.username.upper()
+def signup(payload: SignupRequest, db: Session = Depends(get_db)):
+    # 25010 Characteristic: Security — bootstrapping-only registration.
+    # The API listens on the whole LAN (0.0.0.0, required by the sync engine), so an
+    # always-open signup would let any nearby device mint accounts. First-run only:
+    # once an account exists, registration answers 403 and accounts are made by an
+    # authenticated admin. New admins are provisioned by promoting an existing
+    # account in the users table (UPDATE users SET role='Admin'), then that admin
+    # creates Clerks through the app.
+    user_count = db.query(User).count()
+    if user_count > 0:
+        raise HTTPException(status_code=403, detail="Registration is closed. Ask an administrator to create your account.")
+    if payload.role != "Clerk":
+        raise HTTPException(status_code=400, detail="Only Clerk accounts can be self-registered.")
+    username_upper = payload.username.upper()
     if db.query(User).filter(User.username == username_upper).first():
         raise HTTPException(status_code=400, detail="Username taken")
     new_user = User(
-        first_name=user.first_name, 
-        last_name=user.last_name, 
-        username=username_upper, 
-        password_hash=pwd_context.hash(user.password), 
-        role=user.role
+        first_name=payload.first_name.upper(),
+        last_name=payload.last_name.upper(),
+        username=username_upper,
+        password_hash=pwd_context.hash(payload.password),
+        role="Clerk"
     )
     db.add(new_user)
     db.commit()
-    log_action(db, "SYSTEM ADMIN", "USER_REGISTRATION", "0", "SYSTEM", f"Registered new account for {username_upper}")
+    log_action(db, "SYSTEM", "USER_REGISTRATION", "0", "SYSTEM", f"Registered first-run account for {username_upper}")
     return {"message": "Account created"}
 
 # --- LOGIN RATE LIMITING & ACCOUNT LOCKOUT ---
@@ -1019,6 +1065,145 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         "role": user.role
     }
 
+# --- ACCOUNT RECOVERY (SECURITY QUESTIONS) ---
+# 25010 Characteristic: Security + Usability.
+# A clerk who forgets their password recovers the account on this computer by
+# answering their three security questions. Only bcrypt hashes of the answers
+# are stored, the flow is rate-limited like login, and every step is written
+# to the audit log WITHOUT the answer text.
+RECOVERY_MAX_ATTEMPTS = 5
+RECOVERY_LOCKOUT_SECONDS = 15 * 60
+_recovery_attempts = {}
+_recovery_lock = threading.Lock()
+
+class RecoverySetup(BaseModel):
+    q1: str
+    q2: str
+    q3: str
+    a1: str
+    a2: str
+    a3: str
+
+class RecoveryQuestions(BaseModel):
+    username: str
+
+class RecoveryAnswers(BaseModel):
+    username: str
+    a1: str
+    a2: str
+    a3: str
+    new_password: str
+
+def _recovery_guard(username: str):
+    """Shared rate limiter for the two recovery endpoints."""
+    with _recovery_lock:
+        failed, locked_until = _recovery_attempts.get(username, (0, 0))
+        now = time.monotonic()
+        if locked_until and now < locked_until:
+            mins = max(1, int(locked_until - now) // 60)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many recovery attempts. Try again in {mins} minute(s)."
+            )
+        return failed
+
+def _recovery_fail(username: str, db: Session, stage: str):
+    with _recovery_lock:
+        failed, _ = _recovery_attempts.get(username, (0, 0))
+        failed += 1
+        locked_until = time.monotonic() + RECOVERY_LOCKOUT_SECONDS if failed >= RECOVERY_MAX_ATTEMPTS else 0
+        _recovery_attempts[username] = (failed, locked_until)
+    log_action(db, username, "RECOVERY_FAILED", "0", "SYSTEM", f"Account recovery failed at {stage}.")
+    if failed >= RECOVERY_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many recovery attempts. Locked for {RECOVERY_LOCKOUT_SECONDS // 60} minutes."
+        )
+    remaining = RECOVERY_MAX_ATTEMPTS - failed
+    raise HTTPException(status_code=400, detail=f"Incorrect answer(s). {remaining} attempt(s) left before lockout.")
+
+def _recovery_ok(username: str, db: Session, stage: str):
+    with _recovery_lock:
+        _recovery_attempts.pop(username, None)
+    log_action(db, username, "RECOVERY_STEP", "0", "SYSTEM", f"Account recovery passed {stage}.")
+
+def _normalize_answer(answer: str) -> str:
+    return " ".join(answer.strip().lower().split())
+
+@app.get("/recovery/questions")
+def get_recovery_questions(username: str, db: Session = Depends(get_db)):
+    # Step 1 of recovery: hand back ONLY the question texts, never answers.
+    # A wrong username gets the same empty list as one without recovery set:
+    # do not reveal which accounts exist.
+    username_upper = username.strip().upper()
+    _recovery_guard(username_upper)
+    user = db.query(User).filter(User.username == username_upper).first()
+    if not user or not (user.security_q1 and user.security_q2 and user.security_q3):
+        raise HTTPException(status_code=404, detail="No security questions are set up for this account. Ask an administrator to reset your password on this computer.")
+    _recovery_ok(username_upper, db, "username lookup")
+    return {"q1": user.security_q1, "q2": user.security_q2, "q3": user.security_q3}
+
+@app.post("/recovery/reset")
+def recovery_reset(payload: RecoveryAnswers, db: Session = Depends(get_db)):
+    # Step 2: verify all three answers (case-insensitive, whitespace-tolerant)
+    # and set the new password. Verification uses constant-time bcrypt verify
+    # per answer; a wrong username counts the same as a wrong answer.
+    username_upper = payload.username.strip().upper()
+    _recovery_guard(username_upper)
+    user = db.query(User).filter(User.username == username_upper).first()
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    answers = [_normalize_answer(payload.a1), _normalize_answer(payload.a2), _normalize_answer(payload.a3)]
+    if not user or not user.security_a1_hash:
+        _recovery_fail(username_upper, db, "answer check")
+    stored = [user.security_a1_hash, user.security_a2_hash, user.security_a3_hash]
+    all_correct = True
+    for answer, a_hash in zip(answers, stored):
+        try:
+            if not a_hash or not pwd_context.verify(answer, a_hash):
+                all_correct = False
+        except Exception:
+            all_correct = False
+    if not all_correct:
+        _recovery_fail(username_upper, db, "answer check")
+    user.password_hash = pwd_context.hash(payload.new_password)
+    db.commit()
+    _recovery_ok(username_upper, db, "password reset")
+    log_action(db, username_upper, "PASSWORD_RESET", "0", "SYSTEM", "Password reset via security questions on this computer.")
+    return {"status": "success", "message": "Password updated. You can now sign in with the new password."}
+
+@app.put("/recovery/setup")
+def recovery_setup(payload: RecoverySetup, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Signed-in users set or replace their recovery questions from Settings.
+    # Answers are normalized then bcrypt-hashed; the plaintext is never stored
+    # or logged.
+    questions = [payload.q1.strip(), payload.q2.strip(), payload.q3.strip()]
+    answers = [_normalize_answer(a) for a in (payload.a1, payload.a2, payload.a3)]
+    if not all(questions) or not all(answers):
+        raise HTTPException(status_code=400, detail="All three questions and answers are required.")
+    if any(len(a) < 2 for a in answers):
+        raise HTTPException(status_code=400, detail="Answers must be at least 2 characters.")
+    current_user.security_q1 = questions[0]
+    current_user.security_q2 = questions[1]
+    current_user.security_q3 = questions[2]
+    current_user.security_a1_hash = pwd_context.hash(answers[0])
+    current_user.security_a2_hash = pwd_context.hash(answers[1])
+    current_user.security_a3_hash = pwd_context.hash(answers[2])
+    db.commit()
+    log_action(db, get_full_name(current_user), "UPDATE_SECURITY", "0", "SYSTEM", "Set account recovery security questions.")
+    return {"status": "success", "message": "Recovery questions saved."}
+
+@app.get("/recovery/status")
+def recovery_status(current_user: User = Depends(get_current_user)):
+    # Settings card shows whether recovery is configured; questions are sent
+    # back so editing is easy. Answer hashes never leave the server.
+    return {
+        "configured": bool(current_user.security_q1 and current_user.security_a1_hash),
+        "q1": current_user.security_q1 or "",
+        "q2": current_user.security_q2 or "",
+        "q3": current_user.security_q3 or "",
+    }
+
 @app.put("/users/password")
 def update_password(payload: PasswordUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if len(payload.new_password) < 8:
@@ -1052,6 +1237,18 @@ def update_settings(settings: SettingsUpdate, current_user: User = Depends(get_c
     log_action(db, get_full_name(current_user), "UPDATE_SETTINGS", "0", "SYSTEM", "Updated Global Committee Settings")
     return {"status": "success"}
 
+@app.get("/route_data/{route_name}")
+def get_route_data(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # What the Route Info card on the dashboard shows before saving: the
+    # values already stored for this route, or nothing when they were never
+    # set (the 5000 / 5.0 the ML engine falls back to are defaults, not
+    # saved values, so they are NOT shown as if the office entered them).
+    route_name = alias_route(route_name)
+    route_info = db.query(RouteData).filter(RouteData.route_name == route_name).first()
+    if not route_info:
+        return {"exists": False, "population": None, "road_length_km": None}
+    return {"exists": True, "population": route_info.population, "road_length_km": route_info.road_length_km}
+
 @app.post("/route_data/{route_name}")
 def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     route_name = alias_route(route_name)
@@ -1069,12 +1266,80 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
     return {"status": "success", "message": f"Updated demographic data for {route_name}"}
 
 @app.get("/system/network")
-def get_network_status():
-    return {"local_ip": get_local_ip(), "connected_peers": list(PEERS)}
+def get_network_status(current_user: User = Depends(get_current_user)):
+    # FRIENDLY NAMES: shown next to peer IPs in Settings > Connections. Names
+    # are display only; trust is the HMAC cluster signature, so a lying name
+    # grants nothing. First-seen wins per IP so one machine cannot flap its
+    # name into someone else's row.
+    peer_names = {}
+    for ip in PEERS:
+        name = sync_engine.PEER_NAMES.get(ip)
+        if name:
+            peer_names[ip] = name
+    return {
+        "local_ip": get_local_ip(),
+        "connected_peers": list(PEERS),
+        "peer_names": peer_names,
+        "computer_name": sync_engine.COMPUTER_NAME,
+    }
+
+@app.post("/system/computer-name")
+def set_computer_name_endpoint(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # The broadcast name is the signed-in ACCOUNT's name (who is using this
+    # computer), not a machine label. The frontend sends the account name
+    # right after login; it can still be edited by hand in Settings.
+    name = str(payload.get("name", "")).strip()[:40]
+    if not name:
+        raise HTTPException(status_code=400, detail="Sign in first so PASADA knows whose computer this is.")
+    sync_engine.set_computer_name(name)
+    return {"status": "success", "name": sync_engine.COMPUTER_NAME}
+
+# PULL SIGNATURE CHECK: mirrors sync_engine's builder. A valid signature is
+# at most PULL_MAX_AGE seconds old and never repeats (replay cache).
+PULL_MAX_AGE_SECONDS = 300
+_seen_pull_nonces = {}
+_seen_pull_lock = threading.Lock()
+
+def _verify_pull_signature(ts: str, nonce: str, signature: str) -> bool:
+    if not ts or not nonce or not signature:
+        return False
+    try:
+        age = abs(time.time() - float(ts))
+    except ValueError:
+        return False
+    if age > PULL_MAX_AGE_SECONDS:
+        return False
+    # The caller signs the IP it ADDRESSED: this machine's LAN IP when sync
+    # runs between office computers, or a loopback name when the caller is on
+    # this same machine (dev, tests). Trying the small candidate list here
+    # keeps the wire format unchanged and still fails closed: without the
+    # cluster secret no candidate ever matches.
+    for peer in (get_local_ip(), "127.0.0.1", "localhost", "::1"):
+        body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
+        expected = hmac.new(CLUSTER_SECRET.encode('utf-8'), body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, signature.lower()):
+            break
+    else:
+        return False
+    # REPLAY GUARD: record each nonce with its expiry and lazily drop stale
+    # ones so the cache cannot grow without bound.
+    with _seen_pull_lock:
+        current = time.time()
+        for k in [k for k, exp in _seen_pull_nonces.items() if exp <= current]:
+            del _seen_pull_nonces[k]
+        if nonce in _seen_pull_nonces:
+            return False
+        _seen_pull_nonces[nonce] = current + PULL_MAX_AGE_SECONDS
+    return True
 
 @app.get("/api/sync/pull")
-def sync_pull(since: str, x_cluster_secret: str = Header(None), db: Session = Depends(get_db)):
-    if x_cluster_secret != CLUSTER_SECRET:
+def sync_pull(since: str, request: Request, db: Session = Depends(get_db)):
+    # SIGNED PULL: the caller proves it holds the cluster secret by signing
+    # (peer, timestamp, nonce). The secret itself never crosses the network.
+    ts = request.headers.get("x-cluster-timestamp", "")
+    nonce = request.headers.get("x-cluster-nonce", "")
+    signature = request.headers.get("x-cluster-signature", "")
+    if not _verify_pull_signature(ts, nonce, signature):
         raise HTTPException(status_code=403, detail="Unauthorized cluster request")
         
     target_time = datetime.fromisoformat(since).replace(tzinfo=None)
@@ -1082,8 +1347,13 @@ def sync_pull(since: str, x_cluster_secret: str = Header(None), db: Session = De
     users = db.query(User).all()
     
     safe_users = []
+    # DATA LEAK GUARD: password and security-answer hashes stay on the machine
+    # that owns the account. Sync shares identity fields only.
+    SENSITIVE_USER_COLUMNS = {
+        "password_hash", "security_a1_hash", "security_a2_hash", "security_a3_hash"
+    }
     for u in users:
-        u_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns if c.name != "password_hash"}
+        u_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns if c.name not in SENSITIVE_USER_COLUMNS}
         safe_users.append(u_dict)
         
     return {"records": [attach_status(r) for r in records], "users": safe_users}
@@ -2152,15 +2422,16 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
         for route in sorted(route_totals.keys())
     ]
 
+    # DAILY TREND: every record ever, bucketed by weekday (Mon through Sun).
+    # Deliberate design by the office: the shape shows how the work week is
+    # distributed across days, not a moving window. Do not "fix" this.
     days_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat'}
     daily_trend_dict = {d: 0 for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}
-    
     for r in deduped_all:
         if r.issue_date:
             day_idx = r.issue_date.strftime('%w')
             if day_idx in days_map:
                 daily_trend_dict[days_map[day_idx]] += 1
-            
     daily_trend = [{"name": k, "val": v} for k, v in daily_trend_dict.items()]
         
     weekly_trend = []
@@ -2629,9 +2900,15 @@ if __name__ == "__main__":
         force_log("Scanning for zombie processes on Port 43888...")
         kill_zombie_port(43888)
         force_log("Port 43888 is clear. Starting Uvicorn server...")
-        print("[Backend] Starting Uvicorn server on http://0.0.0.0:43888 ...")
+        # DEPLOYMENT: the API listens on the LAN so the sync engine on other
+        # office computers can pull records from this machine. Every pull
+        # requires a valid HMAC signature from the cluster secret, so the LAN
+        # exposure is authenticated; the app window itself keeps talking to
+        # 127.0.0.1. Set PASADA_API_HOST to pin a specific interface.
+        api_host = os.environ.get("PASADA_API_HOST", "0.0.0.0")
+        print(f"[Backend] Starting Uvicorn server on http://{api_host}:43888 ...")
         sys.stdout.flush()
-        uvicorn.run(app, host="0.0.0.0", port=43888)
+        uvicorn.run(app, host=api_host, port=43888)
     except Exception as e:
         err_str = traceback.format_exc()
         force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{err_str}")
