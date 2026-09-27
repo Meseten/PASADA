@@ -4,8 +4,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 from datetime import datetime
+import time as _time
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text as _sql_text
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
 
@@ -170,9 +171,14 @@ def test_login_rate_limit_and_lockout():
     assert len(lock_logs) >= 1
     assert lock_logs[-1].clerk_name == victim
 
-    # Iwanan sa malinis na state ang shared counter para sa susunod na tests
+    # Iwanan sa malinis na state ang shared counter + ang DB mirror bago ang
+    # susunod na tests (main.py's success path also clears the mirror).
     with _login_lock:
         _login_attempts.pop(victim, None)
+    db = TestingSessionLocal()
+    db.execute(_sql_text("DELETE FROM login_lockouts"))
+    db.commit()
+    db.close()
 
 def test_login_success_resets_failure_counter():
     """Ang maling attempt na sinusundan ng TAMANG login ay hindi dapat umipon.
@@ -195,6 +201,100 @@ def test_login_success_resets_failure_counter():
 
     with _login_lock:
         _login_attempts.pop(victim, None)
+
+# --- LOGIN LOCKOUT SURVIVES RESTART ---
+# 25010 Security: dati, RAM-only ang lockout — restart ng backend ang sagot
+# ng attacker sa lock. Ngayon, ang aktibong lock ay naka-mirror sa SQLite
+# (login_lockouts table, wall-clock time) at binabasa muli pagkatapos ng
+# restart, kaya hindi na maikakarga ang brute-force sa pamamagitan ng restart.
+
+def _wipe_lock_state(victim: str):
+    """Nililinis ang RAM counter at ang login_lockouts mirror."""
+    from main import _login_attempts, _login_lock
+    with _login_lock:
+        _login_attempts.pop(victim, None)
+    db = TestingSessionLocal()
+    # Ang mirror table ay inililikha lang ng unang failed login sa isang
+    # bagong database, kaya siguraduhing mayroon nito bago mag-DELETE.
+    db.execute(_sql_text(
+        "CREATE TABLE IF NOT EXISTS login_lockouts ("
+        "username VARCHAR PRIMARY KEY, failed_count INTEGER NOT NULL DEFAULT 0, locked_until REAL)"
+    ))
+    db.execute(_sql_text("DELETE FROM login_lockouts"))
+    db.commit()
+    db.close()
+
+def test_login_lockout_persists_across_restart():
+    """Limang maling password = lock. Simulated restart (malinis na RAM counter)
+    ay hindi dapat makapag-reset ng lock: susunod na attempt ay 429 pa rin,
+    kahit TAMANG password pa."""
+    from main import _login_attempts, _login_lock
+
+    victim = "TEST ADMIN"
+    _wipe_lock_state(victim)
+
+    # 1. Limang maling password = lock (RAM + DB mirror)
+    for _ in range(5):
+        r = client.post("/token", json={"username": victim, "password": "wrongpass"})
+    assert r.status_code == 429
+
+    # 2. Ang mirror ay nasa DB na (aktibong lock, wall-clock)
+    db = TestingSessionLocal()
+    row = db.execute(
+        _sql_text("SELECT failed_count, locked_until FROM login_lockouts WHERE username = :u"),
+        {"u": victim},
+    ).fetchone()
+    db.close()
+    assert row is not None
+    assert int(row[0]) >= 5
+    assert float(row[1]) > _time.time()
+
+    # 3. Simulated restart: walang natira sa RAM counter
+    with _login_lock:
+        _login_attempts.pop(victim, None)
+
+    # 4. Tamang password man o mali: 429 pa rin, galing sa DB
+    r = client.post("/token", json={"username": victim, "password": "password123"})
+    assert r.status_code == 429
+    r = client.post("/token", json={"username": victim, "password": "wrongpass"})
+    assert r.status_code == 429
+
+    # 5. Ang audit log ay nagtatala pa rin ng blocked attempt pagkatapos ng restart
+    db = TestingSessionLocal()
+    blocked = db.query(AuditLog).filter(
+        AuditLog.action == "LOGIN_BLOCKED", AuditLog.clerk_name == victim
+    ).all()
+    db.close()
+    assert len(blocked) >= 1
+
+    _wipe_lock_state(victim)
+
+def test_login_success_clears_db_lock_mirror():
+    """Pagkatapos ng matagumpay na login, dapat walang natirang lock sa DB
+    mirror — hindi dapat ma-stuck ang lehitimong user sa lumang lock."""
+    from main import _login_attempts
+
+    victim = "TEST ADMIN"
+    _wipe_lock_state(victim)
+
+    # I-lock muna (4 mali sapat na para may failure count, hindi pa lock)
+    for _ in range(4):
+        client.post("/token", json={"username": victim, "password": "wrongpass"})
+
+    # Ma-unlock: tamang password (this also proves the pre-restart path)
+    r = client.post("/token", json={"username": victim, "password": "password123"})
+    assert r.status_code == 200
+
+    # Ang DB mirror ay walang laman para sa user na ito
+    db = TestingSessionLocal()
+    row = db.execute(
+        _sql_text("SELECT failed_count, locked_until FROM login_lockouts WHERE username = :u"),
+        {"u": victim},
+    ).fetchone()
+    db.close()
+    assert row is None
+
+    _wipe_lock_state(victim)
 
 def test_signup_bootstrap_only():
     """25010 Security: signup is first-run bootstrap. The fixture already seeds an

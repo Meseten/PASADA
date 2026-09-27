@@ -43,9 +43,15 @@ Open **http://localhost:3000** in the browser (Firefox is fine).
    - Try 5: the message says the account is locked for 15 minutes.
 3. While locked, try the CORRECT password — it must still be refused.
 4. Check the Logs page: a lock entry (`LOGIN_LOCKED`) is recorded.
-5. To unlock immediately for testing, restart Terminal 1 (Ctrl+C, then run
-   `python main.py` again). The lock is kept in memory only, so a restart
-   clears it.
+5. To unlock immediately for testing, run the unlock command below (the
+   lock now lives in the `login_lockouts` table so it also survives a
+   restart — restarting the backend no longer clears it):
+
+   sqlite3 "$HOME/.local/share/PASADA/pasada_production.db" \
+     "DELETE FROM login_lockouts;"
+
+   (Adjust the path to your `XDG_DATA_HOME` when testing with a scratch
+   data directory.)
 
 ## 5. Quick pass over the rest
 
