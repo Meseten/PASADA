@@ -113,8 +113,25 @@ export default function Dashboard() {
 
     useEffect(() => {
         fetchML();
-        setPopulation("");
-        setRoadLength("");
+    }, [activePrediction]);
+
+    // ROUTE INFO PREFILL: the Population and Road inputs show the numbers
+    // already saved for this route instead of empty "e.g. 5000" hints, so the
+    // office always sees what is in the database before editing it. Values
+    // come from their own endpoint; blank means never set (the ML engine's
+    // 5000 / 5.0 are internal defaults, not saved values).
+    useEffect(() => {
+        if (!activePrediction) return;
+        let cancelled = false;
+        fetchWithAuth(`${API_URL}/route_data/${activePrediction}`)
+            .then(res => (res.ok ? res.json() : null))
+            .then(data => {
+                if (cancelled || !data) return;
+                setPopulation(data.population != null ? String(data.population) : "");
+                setRoadLength(data.road_length_km != null ? String(data.road_length_km) : "");
+            })
+            .catch(() => {});
+        return () => { cancelled = true };
     }, [activePrediction]);
 
     const handleUpdateRouteData = async (e: React.FormEvent) => {
@@ -135,8 +152,16 @@ export default function Dashboard() {
             });
             if (res.ok) {
                 await fetchML();
-                setPopulation("");
-                setRoadLength("");
+                // Re-pull the saved values so the inputs show exactly what
+                // the database now holds (normalized, e.g. 5.50 -> 5.5).
+                try {
+                    const again = await fetchWithAuth(`${API_URL}/route_data/${activePrediction}`);
+                    if (again.ok) {
+                        const data = await again.json();
+                        setPopulation(data.population != null ? String(data.population) : "");
+                        setRoadLength(data.road_length_km != null ? String(data.road_length_km) : "");
+                    }
+                } catch {}
             }
         } catch (err) {
             console.error(err);
@@ -298,9 +323,9 @@ export default function Dashboard() {
                 </div>
                 
                 {/* Skeleton Bottom Grids */}
-                <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-stretch h-[240px]">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch h-[420px]">
+                    <div className="lg:col-span-1 bg-card border border-border rounded-xl animate-pulse"></div>
                     <div className="lg:col-span-2 bg-card border border-border rounded-xl animate-pulse"></div>
-                    <div className="lg:col-span-3 bg-card border border-border rounded-xl animate-pulse"></div>
                 </div>
             </div>
         );
@@ -355,13 +380,17 @@ export default function Dashboard() {
                         ) : summaryData ? (
                             <div className="space-y-4">
                                 <div className="border rounded-xl overflow-hidden shadow-sm">
-                                    <Table>
+                                    {/* Fixed layout + normal wrapping: the shadcn Table container
+                                        is overflow-x-auto with nowrap cells, which made this preview
+                                        scroll sideways on narrow windows. Locking column widths and
+                                        allowing wraps keeps the whole table visible with no h-scroll. */}
+                                    <Table className="[&_[data-slot=table]]:table-fixed [&_th]:whitespace-normal [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere]">
                                         <TableHeader className="bg-muted/30">
                                             <TableRow>
-                                                <TableHead className="font-bold w-16">#</TableHead>
-                                                <TableHead className="font-bold uppercase">TODA</TableHead>
-                                                <TableHead className="font-bold text-center uppercase">MEMBER PER TODA</TableHead>
-                                                <TableHead className="font-bold text-center text-emerald-600 uppercase">
+                                                <TableHead className="font-bold w-12">#</TableHead>
+                                                <TableHead className="font-bold uppercase w-[36%]">TODA</TableHead>
+                                                <TableHead className="font-bold text-center uppercase w-[27%]">MEMBER PER TODA</TableHead>
+                                                <TableHead className="font-bold text-center text-emerald-600 uppercase w-[27%]">
                                                     RENEWAL AS OF <br /> {summaryData.as_of_date}
                                                 </TableHead>
                                             </TableRow>
@@ -459,8 +488,8 @@ export default function Dashboard() {
             </header>
             
             {/* KPI SUMMARY CARDS */}
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                <div className="bg-card border-l-4 border-l-slate-700 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4" data-tour="dashboard-stats">
+                <div className="bg-card border-l-4 border-l-slate-700 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Every franchise slot on every route, filled or vacant.">
                     <div className="flex justify-between items-center mb-2">
                         <p className="text-xs font-bold text-muted-foreground">Total Registered Operators</p>
                         <Database className="text-slate-400" size={16} />
@@ -470,11 +499,11 @@ export default function Dashboard() {
                             {stats.total_system_capacity}
                         </h3>
                         <p className="text-[10px] font-semibold text-muted-foreground mt-0.5">
-                            Total operators across all 19 routes
+                            Total operators across {stats.route_breakdown.length} routes
                         </p>
                     </div>
                 </div>
-                <div className="bg-card border-l-4 border-l-emerald-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border-l-4 border-l-emerald-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Operators who renewed for the current year. Their certificates are valid until December 31.">
                     <div className="flex justify-between items-center mb-2">
                         <p className="text-xs font-bold text-emerald-600">Active Operators</p>
                         <Users className="text-emerald-500/50" size={16} />
@@ -488,7 +517,7 @@ export default function Dashboard() {
                         </p>
                     </div>
                 </div>
-                <div className="bg-card border-l-4 border-l-amber-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border-l-4 border-l-amber-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Did not renew last year. They keep the slot but must renew this year to stay active.">
                     <div className="flex justify-between items-center mb-2">
                         <p className="text-xs font-bold text-amber-600">1-Year Non-Renewal</p>
                         <AlertTriangle className="text-amber-500/50" size={16} />
@@ -502,7 +531,7 @@ export default function Dashboard() {
                         </p>
                     </div>
                 </div>
-                <div className="bg-card border-l-4 border-l-red-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border-l-4 border-l-red-500 border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Slots with no operator, or whose franchise was revoked after 2+ years without renewal. These can be reassigned.">
                     <div className="flex justify-between items-center mb-2">
                         <p className="text-xs font-bold text-red-600">2+ Years Non-Renewal / Vacant</p>
                         <ArchiveX className="text-red-500/50" size={16} />
@@ -520,7 +549,7 @@ export default function Dashboard() {
             
             {/* TIME-SERIES VOLUME CHARTS */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Issuances and renewals recorded today. The line shows how the all-time totals spread across the days of the week.">
                     <div className="flex justify-between items-start mb-2">
                         <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Daily Volume</p>
                         <Activity className="text-blue-500" size={14} />
@@ -545,7 +574,7 @@ export default function Dashboard() {
                         </div>
                     </div>
                 </div>
-                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Issuances and renewals since Monday of this week. The line shows the last 5 weeks.">
                     <div className="flex justify-between items-start mb-2">
                         <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Weekly Volume</p>
                         <Activity className="text-blue-500" size={14} />
@@ -570,7 +599,7 @@ export default function Dashboard() {
                         </div>
                     </div>
                 </div>
-                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div className="bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col justify-between" data-tip="Issuances and renewals this calendar month. The bars show the last 6 months.">
                     <div className="flex justify-between items-start mb-2">
                         <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Monthly Volume</p>
                         <Calendar className="text-blue-500" size={14} />
@@ -598,8 +627,8 @@ export default function Dashboard() {
             </div>
             
             {/* COMPLIANCE PIE & ROUTE DISTRIBUTION BAR CHARTS */}
-            <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-stretch">
-                <div className="lg:col-span-2 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+                <div className="lg:col-span-1 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col">
                     <div className="flex flex-col mb-1">
                         <h3 className="text-sm font-bold text-foreground">Operator Compliance</h3>
                         <p className="text-[10px] text-muted-foreground mt-0.5">Share of active, pending, and revoked operators.</p>
@@ -628,7 +657,7 @@ export default function Dashboard() {
                     </div>
                 </div>
                 
-                <div className="lg:col-span-3 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col text-slate-800 dark:text-slate-200">
+                <div className="lg:col-span-2 bg-card border border-border p-4 rounded-xl shadow-sm flex flex-col text-slate-800 dark:text-slate-200" data-tour="route-chart">
                     <div className="flex justify-between items-start mb-1">
                         <div className="flex flex-col">
                             <h3 className="text-sm font-bold text-foreground">Route Distribution</h3>
@@ -645,11 +674,24 @@ export default function Dashboard() {
                             TODA Renewal Summary
                         </Button>
                     </div>
-                    <div className="flex-1 min-h-[140px] w-full mt-2">
+                    <div className="flex-1 min-h-[280px] w-full mt-2">
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.route_breakdown.map(r => ({...r, remaining: r.total - r.active}))}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                                <XAxis dataKey="route" angle={-90} textAnchor="end" height={50} fontSize={10} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />
+                                {/* Full TODA names are 7 to 10 chars and must never be cut or skipped:
+                                    - interval={0} forces a tick for every route (default skips labels that collide)
+                                    - dynamic height fits the longest label at -90° (9.5px per char at this size, capped at 105) */}
+                                <XAxis
+                                    dataKey="route"
+                                    angle={-90}
+                                    textAnchor="end"
+                                    interval={0}
+                                    height={Math.min(105, Math.max(55, 12 + 9.5 * Math.max(...stats.route_breakdown.map(r => r.route.length))))}
+                                    fontSize={10}
+                                    tickLine={false}
+                                    axisLine={false}
+                                    tick={{ fill: 'currentColor', fontWeight: 'bold' }}
+                                />
                                 <YAxis fontSize={11} tickLine={false} axisLine={false} tick={{ fill: 'currentColor', fontWeight: 'bold' }} />
                                 <Tooltip
                                     cursor={{ fill: 'transparent' }}
@@ -676,8 +718,7 @@ export default function Dashboard() {
                 </div>
             </div>
             
-            {/* ROUTE DENSITY ANALYSIS */}
-            <div className="bg-card border border-border p-5 rounded-xl shadow-sm mt-6">
+            {/* ROUTE DENSITY ANALYSIS */}                <div className="bg-card border border-border p-5 rounded-xl shadow-sm mt-6" data-tour="route-status">
                 <h3 className="text-sm font-bold flex items-center gap-2 mb-3">
                     <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" />
                     How Full Is The Route?
@@ -715,7 +756,10 @@ export default function Dashboard() {
                         <p className="text-[10px] font-bold opacity-80 mb-2">
                             Current Active Operators
                         </p>
-                        <div className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm">
+                        <div
+                            className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm cursor-help"
+                            data-tip={predictionData ? `Fullness score: active operators compared against the route's expected capacity. Above 1.0 means the route is carrying more tricycles than its roads and population comfortably support.` : "Run an estimate by choosing a route above."}
+                        >
                             {predictionData ? predictionData.model_confidence : "Fullness Score: 0.00"}
                         </div>
                     </div>
@@ -792,19 +836,30 @@ export default function Dashboard() {
                     </div>
                 </div>
 
-                {/* HOW SURE ARE WE — plain-words version of the grouping checks */}
+                {/* HOW SURE ARE WE: plain-words version of the grouping checks */}
                 {predictionData && (
                     <div className="mt-4 pt-3 border-t border-border/50 flex flex-wrap items-center gap-x-4 gap-y-1">
-                        <span className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">How sure are we?</span>
-                        <span className={`text-[10px] font-bold flex items-center gap-1 ${predictionData.silhouette >= 0.5 ? "text-emerald-600 dark:text-emerald-400" : predictionData.silhouette >= 0.26 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}>
+                        <span className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
+                            How sure are we?
+                        </span>
+                        <span
+                            data-tip={`Silhouette score: compares each route to its own group versus the next-closest group. 1.0 is perfect, near 0 means the groups overlap. At ${predictionData.silhouette} the grouping is ${predictionData.silhouette >= 0.5 ? "strong: trust the fullness estimate." : predictionData.silhouette >= 0.26 ? "usable, but double-check big decisions." : "weak: treat the estimate as a hint only."}`}
+                            className={`text-[10px] font-bold flex items-center gap-1 cursor-help ${predictionData.silhouette >= 0.5 ? "text-emerald-600 dark:text-emerald-400" : predictionData.silhouette >= 0.26 ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"}`}
+                        >
                             {predictionData.silhouette >= 0.5 ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-                            {`Silhouette ${predictionData.silhouette} — ${predictionData.silhouette >= 0.5 ? "Groups are clear and far apart" : predictionData.silhouette >= 0.26 ? "Groups somewhat overlap" : "Groups overlap a lot — double-check before deciding"}`}
+                            {`Silhouette ${predictionData.silhouette}: ${predictionData.silhouette >= 0.5 ? "Groups are clear and far apart" : predictionData.silhouette >= 0.26 ? "Groups somewhat overlap" : "Groups overlap a lot. Double-check before deciding"}`}
                         </span>
-                        <span className="text-[10px] font-semibold text-muted-foreground">
-                            {`Davies-Bouldin ${predictionData.davies_bouldin} — ${Number(predictionData.davies_bouldin) > 0 && Number(predictionData.davies_bouldin) <= 1 ? "✓ Close and alike routes grouped well" : "Route groupings could be tighter"}`}
+                        <span
+                            data-tip={`Davies-Bouldin score: how similar routes inside a group are to each other. LOWER is better, 0 is perfect. At ${predictionData.davies_bouldin} the grouping is ${Number(predictionData.davies_bouldin) > 0 && Number(predictionData.davies_bouldin) <= 1 ? "tight: routes in a group really belong together." : "loose: some grouped routes are not that alike."}`}
+                            className="text-[10px] font-semibold text-muted-foreground cursor-help"
+                        >
+                            {`Davies-Bouldin ${predictionData.davies_bouldin}: ${Number(predictionData.davies_bouldin) > 0 && Number(predictionData.davies_bouldin) <= 1 ? "Close and alike routes grouped well" : "Route groupings could be tighter"}`}
                         </span>
-                        <span className="text-[10px] font-semibold text-muted-foreground">
-                            {`Calinski-Harabasz ${Math.round(predictionData.calinski_harabasz)} — ${Number(predictionData.calinski_harabasz) >= 100 ? "✓ Strong grouping for this many routes" : "Few routes to compare so far"}`}
+                        <span
+                            data-tip={`Calinski-Harabasz score: how well the routes split into distinct groups overall. HIGHER is better, and it grows with more routes. At ${Math.round(predictionData.calinski_harabasz)} the split is ${Number(predictionData.calinski_harabasz) >= 100 ? "strong for this many routes." : "based on few routes so far; it improves as you add more."}`}
+                            className="text-[10px] font-semibold text-muted-foreground cursor-help"
+                        >
+                            {`Calinski-Harabasz ${Math.round(predictionData.calinski_harabasz)}: ${Number(predictionData.calinski_harabasz) >= 100 ? "Strong grouping for this many routes" : "Few routes to compare so far"}`}
                         </span>
                     </div>
                 )}

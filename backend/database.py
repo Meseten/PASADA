@@ -65,6 +65,15 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     password_hash = Column(String)
     role = Column(String)
+    # ACCOUNT RECOVERY: three office-friendly security questions answered at
+    # signup or from Settings. Only the bcrypt hash of each answer is stored,
+    # never the text, and the hashes never leave this machine through sync.
+    security_q1 = Column(String, nullable=True)
+    security_q2 = Column(String, nullable=True)
+    security_q3 = Column(String, nullable=True)
+    security_a1_hash = Column(String, nullable=True)
+    security_a2_hash = Column(String, nullable=True)
+    security_a3_hash = Column(String, nullable=True)
 
 class FranchiseRecord(Base):
     __tablename__ = "franchise_records"

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { useParams, usePathname, useRouter } from "next/navigation"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
@@ -163,7 +163,7 @@ export default function TodaClient() {
   const [formData, setFormData] = useState({
     id: "",
     sbn_no: "",
-    // SBN na nakita sa modal nung binuksan — pang-reference ng backend para malaman
+    // SBN na nakita sa modal nung binuksan: pang-reference ng backend para malaman
     // kung talagang bago lang yung SBN (renewal) o display suffix lang ang diperensya.
     original_sbn_no: "",
     operator_name: "",
@@ -311,6 +311,12 @@ export default function TodaClient() {
     return () => window.clearTimeout(resetId);
   }, [search, statusFilter, sortBy])
 
+  // SPOTLIGHT: the record the office is currently working on (opened for
+  // viewing/editing, or just saved) keeps a blue ring in the list, so after
+  // closing a dialog it is obvious which row was touched even among
+  // thousands. Clicking another row's action moves the ring there.
+  const [spotlightId, setSpotlightId] = useState<string | null>(null);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isTyping = document.activeElement?.tagName === 'INPUT' || 
@@ -334,10 +340,16 @@ export default function TodaClient() {
         e.preventDefault();
         setBatchModalOpen(true);
       }
+      if (e.altKey && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        handleExportMasterlist();
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleOpenAdd]);
+    // handleExportMasterlist is recreated each render; re-binding the listener
+    // on render is cheap and keeps its closure fresh.
+  });
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // NOTE: walang .toUpperCase() dito sa onChange. Dati kasi kapag nag-type ka ng
@@ -351,6 +363,7 @@ export default function TodaClient() {
 
   const handleOpenEdit = (member: Member) => {
     setActiveMember(member); 
+    setSpotlightId(member.id);
     
     let safeAddress = member.address || "";
     if (safeAddress.toUpperCase().endsWith(", NAIC, CAVITE")) {
@@ -377,6 +390,7 @@ export default function TodaClient() {
 
   const handleOpenView = (member: Member) => {
     setViewMember(member)
+    setSpotlightId(member.id)
     setIsViewOpen(true)
   }
 
@@ -645,7 +659,7 @@ export default function TodaClient() {
         showToast(`Masterlist exported successfully.`, "success");
         setTimeout(() => setExportSuccess(false), 2000);
       } else {
-        // may case na 404 (walang tugma sa filter) — bigyan ng mas malinaw na mensahe
+        // may case na 404 (walang tugma sa filter): bigyan ng mas malinaw na mensahe
         const err = await response.json().catch(() => ({}))
         showToast(err.detail || "Failed to export masterlist.", "error")
       }
@@ -965,6 +979,7 @@ export default function TodaClient() {
 
   const handleOpenHistory = async (member: Member) => {
     setActiveMember(member)
+    setSpotlightId(member.id)
     try {
       const res = await fetchWithAuth(`${API_URL}/logs/record/${member.id}`)
       if (res.ok) setHistoryLogs(await res.json())
@@ -1033,6 +1048,8 @@ export default function TodaClient() {
         }
         
         const refreshedList = await fetchMembersAndInfo();
+        // Keep the saved record highlighted in the list after the dialogs close.
+        setSpotlightId(formData.id || null);
         
         const returnedIssue = data.issue_date ? data.issue_date.split('T')[0] : "None";
         const returnedValid = data.valid_until ? data.valid_until.split('T')[0] : "None";
@@ -1066,7 +1083,9 @@ export default function TodaClient() {
 
   const currentYear = new Date().getFullYear()
 
-  const filteredMembers = members.filter(m => {
+  // useMemo: with thousands of records, the filter and sort must not rerun on
+  // unrelated state changes like opening a dialog or toggling a checkbox.
+  const filteredMembers = useMemo(() => members.filter(m => {
     const issueYear = m.issue_date ? new Date(m.issue_date).getFullYear() : 0;
     const isVacant = !m.operator_name || m.operator_name.trim() === "";
     
@@ -1092,9 +1111,9 @@ export default function TodaClient() {
       String(m.chassis_no || "").toLowerCase().includes(term) ||
       String(m.make || "").toLowerCase().includes(term)
     )
-  });
+  }), [members, statusFilter, search, currentYear]);
 
-  const sortedMembers = [...filteredMembers].sort((a, b) => {
+  const sortedMembers = useMemo(() => [...filteredMembers].sort((a, b) => {
     if (sortBy === "SBN_ASC") {
       const matchA = a.sbn_no.match(/-(\d+)/);
       const matchB = b.sbn_no.match(/-(\d+)/);
@@ -1125,7 +1144,7 @@ export default function TodaClient() {
       return dateA - dateB;
     }
     return 0;
-  });
+  }), [filteredMembers, sortBy]);
 
   const totalPages = Math.ceil(sortedMembers.length / rowsPerPage);
   const paginatedMembers = sortedMembers.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
@@ -1206,7 +1225,7 @@ export default function TodaClient() {
         <div className="shrink-0">
           <div className="flex items-center gap-4">
             <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
-            <Button variant="outline" size="sm" onClick={handleOpenRename} className="h-8 shadow-sm">
+            <Button variant="outline" size="sm" onClick={handleOpenRename} className="h-8 shadow-sm" data-tip="Change this TODA line's code name, and optionally give every SBN here the same prefix.">
               <Edit3 className="h-3.5 w-3.5 mr-2" /> Rename
             </Button>
           </div>
@@ -1248,7 +1267,7 @@ export default function TodaClient() {
               </select>
             </div>
 
-            <Button variant="outline" onClick={() => { if(window.confirm("This checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" title="Fix Common Record Problems">
+            <Button variant="outline" onClick={() => { if(window.confirm("This checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" data-tip-align-right data-tip="Checks every record on this line and fixes the usual mistakes: wrong dates, misspelled routes, duplicates. Nothing is deleted.">
               {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
               Refresh DB
             </Button>
@@ -1256,16 +1275,16 @@ export default function TodaClient() {
 
           {/* Row 2: Actions */}
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full xl:justify-end">
-            <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
+            <Button variant="outline" onClick={handleExportMasterlist} disabled={isExporting} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600" data-tip="Downloads the current list as an Excel file. Only the records matching the status filter above are included. (Alt+E)">
               {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
               Export Excel
             </Button>
             
-            <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600" title="Alt + P">
+            <Button variant="outline" onClick={() => setBatchModalOpen(true)} className="flex-1 w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-blue-600" data-tip="Print many MTOP certificates at once: pick which TODAs and which dates, and they merge into one print job. (Alt+P)">
               <Printer className="mr-2 h-5 w-5" /> Batch Print
             </Button>
             
-            <Button onClick={handleOpenAdd} className="flex-1 w-full sm:w-auto shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" title="Alt + N">
+            <Button onClick={handleOpenAdd} className="flex-1 w-full sm:w-auto shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" data-tour="tour-add" data-tip="Registers a new operator on this line. Leave the name blank to keep the slot vacant. (Alt+N)">
               <PlusCircle className="mr-2 h-5 w-5" /> Add Operator
             </Button>
           </div>
@@ -1378,13 +1397,17 @@ export default function TodaClient() {
             ) : summaryData ? (
               <div className="space-y-4">
                 <div className="border rounded-xl overflow-hidden shadow-sm">
-                  <Table>
+                  {/* Fixed layout + normal wrapping: the shadcn Table container
+                      is overflow-x-auto with nowrap cells, which made this preview
+                      scroll sideways on narrow windows. Locking column widths and
+                      allowing wraps keeps the whole table visible with no h-scroll. */}
+                  <Table className="[&_[data-slot=table]]:table-fixed [&_th]:whitespace-normal [&_td]:whitespace-normal [&_td]:[overflow-wrap:anywhere]">
                     <TableHeader className="bg-muted/30">
                       <TableRow>
-                        <TableHead className="font-bold w-16">#</TableHead>
-                        <TableHead className="font-bold uppercase">TODA</TableHead>
-                        <TableHead className="font-bold text-center uppercase">MEMBER PER TODA</TableHead>
-                        <TableHead className="font-bold text-center text-emerald-600 uppercase">
+                        <TableHead className="font-bold w-12">#</TableHead>
+                        <TableHead className="font-bold uppercase w-[36%]">TODA</TableHead>
+                        <TableHead className="font-bold text-center uppercase w-[27%]">MEMBER PER TODA</TableHead>
+                        <TableHead className="font-bold text-center text-emerald-600 uppercase w-[27%]">
                           RENEWAL AS OF <br /> {summaryData.as_of_date}
                         </TableHead>
                       </TableRow>
@@ -1879,11 +1902,17 @@ export default function TodaClient() {
       </Dialog>
 
       {/* OPERATOR LIST TABLE */}
-      <Card className="shadow-sm border-border/60 rounded-2xl overflow-hidden bg-card">
+      <Card
+        className="shadow-sm border-border/60 rounded-2xl overflow-hidden bg-card"
+        data-tour="records-tour"
+      >
         <CardHeader className="bg-muted/10 pb-5 border-b border-border/50">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <CardTitle className="text-xl font-bold flex items-center gap-2"><FileSignature className="h-5 w-5 text-blue-600"/> Operator List</CardTitle>
+              <CardTitle
+                className="text-xl font-bold flex items-center gap-2"
+                data-tip="The full list of operators on this line. Use the search box to find one fast."
+              ><FileSignature className="h-5 w-5 text-blue-600"/> Operator List</CardTitle>
               <CardDescription className="mt-1 font-medium">Total of {filteredMembers.length} operator records found.</CardDescription>
             </div>
             
@@ -1959,6 +1988,8 @@ export default function TodaClient() {
                     const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
                     const isVacant = !member.operator_name || member.operator_name.trim() === "";
                     
+                    // Status badges speak for themselves; no hover bubbles here
+                    // (they poked out of the window and cluttered every row).
                     let rowColor = "hover:bg-muted/30 transition-colors duration-200";
                     let statusBadge = <Badge variant="outline" className="bg-green-500/10 text-green-700 border-green-500/20 dark:text-green-400 font-bold tracking-wide shadow-sm"><CheckCircle className="h-3 w-3 mr-1"/> Active</Badge>;
                     
@@ -1973,8 +2004,9 @@ export default function TodaClient() {
                       statusBadge = <Badge variant="outline" className="bg-amber-500/10 text-amber-700 border-amber-500/20 dark:text-amber-400 font-bold tracking-wide shadow-sm"><AlertCircle className="h-3 w-3 mr-1"/> 1-Year Non-Renewal</Badge>;
                     }
 
+                    const isSpotlit = spotlightId === member.id;
                     return (
-                      <TableRow key={member.id} className={`${rowColor} border-b border-border/40 group`}>
+                      <TableRow key={member.id} className={`${rowColor} border-b border-border/40 group ${isSpotlit ? "ring-2 ring-inset ring-blue-500 bg-blue-50/40 dark:bg-blue-950/30" : ""}`}>
                         <TableCell className="pl-6">
                           <input
                             type="checkbox"
@@ -1989,7 +2021,9 @@ export default function TodaClient() {
                           </div>
                         </TableCell>
                         <TableCell className="py-3">
-                          <div className="font-bold text-foreground truncate max-w-[220px]" title={member.operator_name || "VACANT"}>
+                          {/* The name, address, and make show in full on hover
+                              through the browser's own title attribute. */}
+                          <div className="font-bold text-foreground truncate max-w-[220px]" title={member.operator_name || "Vacant slot: no operator assigned"}>
                             {member.operator_name || <span className="text-blue-600 italic">VACANT SLOT</span>}
                           </div>
                           {/* full address ni operator, hindi yung pa-shortcut version */}
@@ -1998,7 +2032,7 @@ export default function TodaClient() {
                               {member.address}
                             </div>
                           )}
-                          <div className={`text-xs truncate max-w-[220px] font-medium ${member.address ? "text-muted-foreground/70" : "text-muted-foreground mt-0.5"}`} title={member.make}>
+                          <div className={`text-xs truncate max-w-[220px] font-medium ${member.address ? "text-muted-foreground/70" : "text-muted-foreground mt-0.5"}`} title={member.make ? `Vehicle: ${member.make}` : "No vehicle info recorded"}>
                             {member.make || "No Vehicle Info"}
                           </div>
                         </TableCell>
@@ -2012,15 +2046,15 @@ export default function TodaClient() {
                           {isVacant ? "None" : formatSafeDate(member.issue_date)}
                         </TableCell>
                         <TableCell>{statusBadge}</TableCell>
-                        <TableCell className="text-center">
+                        <TableCell className="text-center" data-tour="tour-row-actions">
                           <div className="flex items-center justify-center gap-1">
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="View Certificate Preview" onClick={() => handleOpenView(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="View Certificate Preview" data-tip-align-right data-tip="Opens the MTOP certificate preview for this operator, where you can print or download it." onClick={() => handleOpenView(member)}>
                               <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                             </Button>
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Edit Operator" onClick={() => handleOpenEdit(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Edit Operator" data-tip-align-right data-tip="Edit or renew this record. Editing the SBN counts as a renewal and updates the dates." onClick={() => handleOpenEdit(member)}>
                               <Edit className="h-3.5 w-3.5" />
                             </Button>
-                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="Record History" onClick={() => handleOpenHistory(member)}>
+                            <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Record History" data-tip-align-right data-tip="Every change ever recorded for this operator, with dates and who made them." onClick={() => handleOpenHistory(member)}>
                               <History className="h-3.5 w-3.5" />
                             </Button>
                             <Button 
@@ -2028,8 +2062,7 @@ export default function TodaClient() {
                                  size="icon" 
                                  disabled={isDeleting}
                               onClick={() => handleDeleteOne(member)}
-                              className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm" 
-                                 title="Delete Operator"
+                              className="h-8 w-8 bg-background/50 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Delete Operator" data-tip-align-right data-tip="Asks first, and the delete can still be undone right after."
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>

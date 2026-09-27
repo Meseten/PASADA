@@ -119,9 +119,9 @@ def run_kmeans_clustering(db: Session, target_route: str):
         # 25010: Usability — simple words lang sa user-facing labels, walang jargon.
         # Pumo-prefix pa rin ng GREEN/YELLOW/RED para sa color mapping ng dashboard.
         status_map = {
-            0: "GREEN: Not full yet — can accept new operators", 
-            1: "YELLOW: Almost full — keep watch", 
-            2: "RED: Full — stop accepting new operators"
+            0: "GREEN: Not full yet, can accept new operators", 
+            1: "YELLOW: Almost full, keep watch", 
+            2: "RED: Full, stop accepting new operators"
         }
         
         max_fleet = df['fleet_size'].max() or 1

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { History, ArchiveX, CheckCircle2, XCircle, X, Loader2, Filter, Search, ArrowUpDown, Download } from "lucide-react"
@@ -39,7 +39,10 @@ export default function AuditLogsPage() {
   const [deferredSearch, setDeferredSearch] = useState("");
   const [routeFilter, setRouteFilter] = useState("ALL");
   const [actionFilter, setActionFilter] = useState("ALL");
-  const [viewMode, setViewMode] = useState<"ALL" | "CHANGE_MOTOR">("ALL");
+  // Change Motor gets its own table layout (motor fields + new date) whenever
+  // the Actions filter is narrowed to it. Same data, same page, one less
+  // dropdown to understand.
+  const isMotorView = actionFilter.toUpperCase() === "CHANGE_MOTOR";
   
   const [availableRoutes, setAvailableRoutes] = useState<string[]>([]);
   const [availableActions, setAvailableActions] = useState<string[]>([]);
@@ -72,16 +75,15 @@ export default function AuditLogsPage() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [routeFilter, actionFilter, viewMode]);
+  }, [routeFilter, actionFilter]);
 
   const fetchLogs = useCallback(async () => {
     setIsLoading(true);
     try {
-      const endpoint = viewMode === "CHANGE_MOTOR" ? "/logs/change-motor" : "/logs";
-      let url = `${API_URL}${endpoint}?page=${currentPage}&page_size=${rowsPerPage}`;
+      let url = `${API_URL}/logs?page=${currentPage}&page_size=${rowsPerPage}`;
       
       if (routeFilter !== "ALL") url += `&route=${encodeURIComponent(routeFilter)}`;
-      if (actionFilter !== "ALL" && viewMode === "ALL") url += `&action=${encodeURIComponent(actionFilter)}`;
+      if (actionFilter !== "ALL") url += `&action=${encodeURIComponent(actionFilter)}`;
       if (deferredSearch) url += `&search=${encodeURIComponent(deferredSearch)}`;
       
       const response = await fetchWithAuth(url);
@@ -98,7 +100,7 @@ export default function AuditLogsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [currentPage, rowsPerPage, routeFilter, actionFilter, deferredSearch, viewMode, showToast]);
+  }, [currentPage, rowsPerPage, routeFilter, actionFilter, deferredSearch, showToast]);
 
   useEffect(() => {
     fetchLogs();
@@ -107,12 +109,11 @@ export default function AuditLogsPage() {
   const handleExportLogs = async () => {
     setIsExporting(true);
     try {
-        const endpoint = viewMode === "CHANGE_MOTOR" ? "/export/logs/change-motor" : "/export/logs";
-        let url = `${API_URL}${endpoint}?`;
+        let url = `${API_URL}/export/logs?`;
         const params = new URLSearchParams();
         
         if (routeFilter !== "ALL") params.append("route", routeFilter);
-        if (actionFilter !== "ALL" && viewMode === "ALL") params.append("action", actionFilter);
+        if (actionFilter !== "ALL") params.append("action", actionFilter);
         if (deferredSearch) params.append("search", deferredSearch);
         
         const response = await fetchWithAuth(`${url}${params.toString()}`);
@@ -122,7 +123,7 @@ export default function AuditLogsPage() {
             const a = document.createElement('a');
             a.style.display = 'none';
             a.href = objUrl;
-            a.download = viewMode === "CHANGE_MOTOR" 
+            a.download = isMotorView
                 ? `CHANGE MOTOR HISTORY ${new Date().getFullYear()}.xlsx`
                 : `ACTIVITY LOGS ${new Date().getFullYear()}.xlsx`;
             document.body.appendChild(a);
@@ -173,80 +174,73 @@ export default function AuditLogsPage() {
 
   return (
     <div className="space-y-6 p-4 md:p-8 pt-6 animate-in fade-in duration-500 min-h-screen bg-muted/5">
-      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6 mb-8">
+      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4 mb-6">
           <div className="flex items-center gap-3 shrink-0">
               <History className="w-8 h-8 text-blue-600" />
               <div>
                   <h2 className="text-3xl font-black tracking-tight">Activity History</h2>
-                  <p className="text-muted-foreground mt-1 font-medium">System-wide audit log of all clerical actions.</p>
+                  <p className="text-muted-foreground mt-1 font-medium">Every change made in PASADA.</p>
               </div>
           </div>
           
-          <div className="flex flex-wrap items-center xl:justify-end gap-3 w-full xl:w-auto md:ml-auto">
-              <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                  <Filter className="h-4 w-4 text-muted-foreground" />
-                  <select
-                      value={routeFilter}
-                      onChange={(e) => setRouteFilter(e.target.value)}
-                      className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
-                  >
-                      <option value="ALL">All TODA Routes</option>
-                      {availableRoutes.length > 0 ? availableRoutes.map(r => (
-                          <option key={r} value={r}>{r}</option>
-                      )) : (
-                          // Fallback list
-                          ['BATODA', 'BBSTODA', 'CNTODA', 'CO1TODA', 'CO2TODA', 'DOMMSATODA', 'HCTODA', 'HMTODA', 'HVRTODA', 'MALATODA', 'MMGTODA', 'MMTODA', 'NCTODA', 'NPTODA', 'PAL1TODA', 'PAL2TODA', 'SABANGTODA', 'SMSTODA', 'TCTODA', 'VASTODA', 'VISTODA'].map(r => (
-                            <option key={r} value={r}>{r}</option>
-                          ))
-                      )}
-                  </select>
-              </div>
+          {/* Two rows, same layout as the records page: filters on top,
+              export and search under them. */}
+          {/* One flat row, copied from the Inactive page so the controls are
+              the same size and line up the same way instead of staggering
+              across two rows. Wraps naturally on narrow windows. */}
+          <div className="flex flex-wrap items-center xl:justify-end gap-3 w-full xl:w-auto md:ml-auto" data-tour="tour-logs-filters">
+                  {/* FILTER BY TODA ROUTE */}
+                  <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
+                      <Filter className="h-4 w-4 text-muted-foreground" />
+                      <select
+                          value={routeFilter}
+                          onChange={(e) => setRouteFilter(e.target.value)}
+                          className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                      >
+                          <option value="ALL">All TODA Routes</option>
+                          {availableRoutes.length > 0 ? availableRoutes.map(r => (
+                              <option key={r} value={r}>{r}</option>
+                          )) : (
+                              // Fallback list
+                              ['BATODA', 'BBSTODA', 'CNTODA', 'CO1TODA', 'CO2TODA', 'DOMMSATODA', 'HCTODA', 'HMTODA', 'HVRTODA', 'MALATODA', 'MMGTODA', 'MMTODA', 'NCTODA', 'NPTODA', 'PAL1TODA', 'PAL2TODA', 'SABANGTODA', 'SMSTODA', 'TCTODA', 'VASTODA', 'VISTODA'].map(r => (
+                                <option key={r} value={r}>{r}</option>
+                              ))
+                          )}
+                      </select>
+                  </div>
 
-              {viewMode === "ALL" && (
-                <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                    <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
-                    <select
-                        value={actionFilter}
-                        onChange={(e) => setActionFilter(e.target.value)}
-                        className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
-                    >
-                        <option value="ALL">All Actions</option>
-                        {availableActions.map(a => (
-                            <option key={a} value={a}>{a.replace(/_/g, ' ')}</option>
-                        ))}
-                    </select>
-                </div>
-              )}
+                  <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
+                        <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+                        <select
+                            value={actionFilter}
+                            onChange={(e) => setActionFilter(e.target.value)}
+                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                        >
+                            <option value="ALL">All Actions</option>
+                            {availableActions.map(a => (
+                                <option key={a} value={a}>{a.replace(/_/g, ' ')}</option>
+                            ))}
+                        </select>
+                  </div>
 
-              <Button variant="outline" onClick={handleExportLogs} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600">
-                  {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
-                  Export Excel
-              </Button>
+                  <Button variant="outline" onClick={handleExportLogs} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600" data-tip="Downloads every log entry matching the filters above as an Excel file, not just this page.">
+                      {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
+                      Export Excel
+                  </Button>
 
-              <div className="relative w-full md:w-72 group">
-                  <Input
-                      type="search"
-                      placeholder="Search Logs..."
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
-                  />
-              </div>
+                  <div className="relative w-full md:w-72 group">
+                      <Input
+                          type="search"
+                          placeholder="Search logs..."
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                          className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
+                      />
+                  </div>
           </div>
       </div>
              
       <Card className="shadow-sm border-border/60 rounded-2xl overflow-hidden bg-card">
-        <div className="flex border-b border-border/60 bg-muted/10 px-4 pt-4 shadow-sm">
-            <button 
-                onClick={() => { setViewMode("ALL"); setActionFilter("ALL"); setCurrentPage(1); }} 
-                className={`px-4 py-3 font-bold text-sm border-b-2 transition-colors ${viewMode === "ALL" ? "border-blue-600 text-blue-600" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-            >All Activity Logs</button>
-            <button 
-                onClick={() => { setViewMode("CHANGE_MOTOR"); setActionFilter("CHANGE_MOTOR"); setCurrentPage(1); }} 
-                className={`px-4 py-3 font-bold text-sm border-b-2 transition-colors ${viewMode === "CHANGE_MOTOR" ? "border-blue-600 text-blue-600" : "border-transparent text-muted-foreground hover:text-foreground"}`}
-            >Change Motor History</button>
-        </div>
-
         <CardContent className="p-0">
           {renderPagination('top')}
           <div className="overflow-x-auto min-h-[400px]">
@@ -255,9 +249,9 @@ export default function AuditLogsPage() {
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="font-bold text-muted-foreground w-[200px] h-12 pl-6">Timestamp</TableHead>
                   <TableHead className="font-bold text-muted-foreground w-[180px]">User</TableHead>
-                  {viewMode === "ALL" && <TableHead className="font-bold text-muted-foreground w-[180px]">Action</TableHead>}
+                  {!isMotorView && <TableHead className="font-bold text-muted-foreground w-[180px]">Action</TableHead>}
                   <TableHead className="font-bold text-muted-foreground w-[250px]">SBN / Operator</TableHead>
-                  {viewMode === "CHANGE_MOTOR" ? (
+                  {isMotorView ? (
                     <>
                       <TableHead className="font-bold text-muted-foreground">Field(s) Changed</TableHead>
                       <TableHead className="font-bold text-muted-foreground w-[350px]">Detailed Changes</TableHead>
@@ -274,9 +268,9 @@ export default function AuditLogsPage() {
                     <TableRow key={`skeleton-${i}`} className="animate-pulse hover:bg-transparent">
                       <TableCell className="pl-6"><div className="h-4 w-32 bg-muted/60 rounded" /></TableCell>
                       <TableCell><div className="h-4 w-24 bg-muted/60 rounded" /></TableCell>
-                      {viewMode === "ALL" && <TableCell><div className="h-6 w-28 bg-muted/60 rounded-full" /></TableCell>}
+                      {!isMotorView && <TableCell><div className="h-6 w-28 bg-muted/60 rounded-full" /></TableCell>}
                       <TableCell><div className="h-4 w-32 bg-muted/60 rounded" /></TableCell>
-                      {viewMode === "CHANGE_MOTOR" ? (
+                      {isMotorView ? (
                         <>
                           <TableCell><div className="h-4 w-24 bg-muted/60 rounded" /></TableCell>
                           <TableCell><div className="h-4 w-full bg-muted/60 rounded" /></TableCell>
@@ -289,7 +283,7 @@ export default function AuditLogsPage() {
                   ))
                 ) : logs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={viewMode === "CHANGE_MOTOR" ? 7 : 5} className="h-64 text-center text-muted-foreground font-medium">
+                    <TableCell colSpan={isMotorView ? 6 : 5} className="h-64 text-center text-muted-foreground font-medium">
                       <div className="flex flex-col items-center justify-center">
                         <ArchiveX className="h-10 w-10 mb-3 opacity-20" />
                         {deferredSearch ? "No activity logs matched your search." : "No activity logs found."}
@@ -298,7 +292,7 @@ export default function AuditLogsPage() {
                   </TableRow>
                 ) : (
                   logs.map((log) => {
-                    if (viewMode === "CHANGE_MOTOR") {
+                    if (isMotorView) {
                         return (
                             <TableRow key={log.id} className="hover:bg-muted/30 transition-colors border-b border-border/40">
                                 <TableCell className="pl-6 text-sm font-bold text-muted-foreground">
@@ -306,7 +300,7 @@ export default function AuditLogsPage() {
                                 </TableCell>
                                 <TableCell className="font-bold text-slate-800 dark:text-slate-200">{log.user || "SYSTEM ADMIN"}</TableCell>
                                 <TableCell className="font-mono text-sm font-bold opacity-90">
-                                    {log.sbn_no || "Unknown"} <br/><span className="text-xs text-muted-foreground opacity-80">{log.operator_name || "VACANT"}</span>
+                                    {log.sbn_no || log.target_record || "Unknown"} <br/><span className="text-xs text-muted-foreground opacity-80">{log.operator_name || "VACANT"}</span>
                                 </TableCell>
                                 <TableCell className="text-sm font-medium text-foreground/80">{log.field_changed || "-"}</TableCell>
                                 <TableCell className="text-sm font-medium text-foreground/80 leading-relaxed">{log.details || "-"}</TableCell>

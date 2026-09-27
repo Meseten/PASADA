@@ -7,10 +7,37 @@ import subprocess
 import re
 import copy
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Twips
+from docx.oxml.ns import qn
 from docx.table import _Row
 from datetime import datetime
 from database import BASE_DIR
+
+# Times-metric-compatible bold fonts to try for text measurement, best first.
+# Tinos is metrically identical to Times New Roman; Liberation Serif likewise.
+_MEASURE_FONT_FILES = [
+    "/usr/share/fonts/truetype/croscore/Tinos-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "C:/Windows/Fonts/times.ttf",
+    "C:/Windows/Fonts/timesbd.ttf",
+]
+
+def _measure_times_bold_pt(text: str, size_pt: float):
+    """Width of `text` in points when set in Times New Roman Bold at `size_pt`.
+    Returns None when no metric-compatible font file is available (dev boxes).
+    Tinos/Liberation Serif share Times New Roman's advance widths, so the
+    measurement carries over to Word on Windows unchanged."""
+    for path in _MEASURE_FONT_FILES:
+        if not os.path.exists(path):
+            continue
+        try:
+            from PIL import ImageFont
+            font = ImageFont.truetype(path, int(round(size_pt * 64)))
+            width = font.getlength(text) / 64.0
+            return width
+        except Exception as e:
+            log_conversion_error(f"font measure failed for {path}: {e}")
+    return None
 
 def log_conversion_error(msg):
     try:
@@ -120,6 +147,75 @@ def generate_certificate(data: dict, settings: dict, template_path: str = "templ
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     replace_text_in_paragraph(paragraph, replacements)
+
+    # --- Vehicle-table geometry + route fitting -----------------------------
+    # The template's vehicle table (Motor No./Chassis/Make + Plate No./Route)
+    # was widened past the printable column: 9800 twips + 1440 indent vs
+    # 9893 twips of text column. Word renders the overhang by pushing the
+    # table's right border off the paper edge; LibreOffice silently
+    # compresses instead, so the two disagree. Normalize here at generation
+    # time: scale the table to end exactly at the text-area right margin and
+    # shift the reclaimed width into the Route column, then size the route
+    # value with real font metrics (Tinos Bold ≙ Times New Roman Bold) so it
+    # stays on one line inside the printable area.
+    route_value = str(replacements.get("[ROUTE]", ""))
+    sec = doc.sections[0]
+    text_tw = sec.page_width.twips - sec.left_margin.twips - sec.right_margin.twips
+    LABEL_OFFSET_PT = 50.0   # measured: "Route :" label + tab stop before the value
+    PAD_PT = 6.0             # printer-safety pad
+
+    for table in doc.tables:
+        cells_text = " ".join(c.text for r in table.rows for c in r.cells)
+        has_route = "[ROUTE]" in cells_text or "{{ROUTE}}" in cells_text or (route_value and route_value in cells_text)
+        if not has_route:
+            continue
+        grid = table._tbl.tblGrid
+        cols = [int(gc.get(qn("w:w"))) for gc in grid]
+        indent_el = table._tbl.tblPr.find(qn("w:tblInd"))
+        indent_tw = int(indent_el.get(qn("w:w"))) if indent_el is not None else 0
+        budget_tw = text_tw - indent_tw
+        if len(cols) == 2 and sum(cols) > budget_tw:
+            # Two-column vehicle table: fix the left (Motor/Chassis/Make)
+            # column at 190pt — its longest line still fits — and give the
+            # Route column everything up to the right margin.
+            cols = [3800, budget_tw - 3800]
+            for gc, w in zip(grid, cols):
+                gc.set(qn("w:w"), str(w))
+            tbl_w = table._tbl.tblPr.find(qn("w:tblW"))
+            if tbl_w is not None:
+                tbl_w.set(qn("w:w"), str(budget_tw))
+            for row in table.rows:
+                row_cells = row.cells
+                if len(row_cells) == 2:
+                    row_cells[0].width = Twips(cols[0])
+                    row_cells[1].width = Twips(cols[1])
+
+        if route_value:
+            left_cell_pt = cols[0] / 20.0
+            usable_pt = max(text_tw / 20.0 - indent_tw / 20.0 - left_cell_pt - LABEL_OFFSET_PT - PAD_PT, 60.0)
+            for row in table.rows:
+                for cell in row.cells:
+                    if route_value not in cell.text:
+                        continue
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            if run.text != route_value:
+                                continue
+                            w12 = _measure_times_bold_pt(route_value, 12.0)
+                            if w12:
+                                fit = 12.0 * usable_pt / w12
+                                # Floor at 8pt for legibility: anything longer
+                                # wraps to a second line rather than printing
+                                # microscopic text.
+                                size = max(8.0, min(12.0, int(fit * 2) / 2.0))
+                            else:
+                                # No font metrics available: conservative estimate.
+                                size = 8.0
+                                for candidate in (12.0, 11.5, 11.0, 10.5, 10.0, 9.5, 9.0, 8.5, 8.0):
+                                    size = candidate
+                                    if len(route_value) * 0.65 * candidate <= usable_pt:
+                                        break
+                            run.font.size = Pt(size)
 
     raw_name = data.get('operator_name', 'Unknown')
     safe_name = re.sub(r'[^A-Za-z0-9_\-]', '', str(raw_name).replace(' ', '_'))

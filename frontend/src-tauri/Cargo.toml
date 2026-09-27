@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.82.0"
 description = "PASADA Municipal Franchise Registry System"
 authors = ["Ben James J. Duag (B&V Software Solutions,Inc.)"]
 license = "MIT"
@@ -23,4 +23,5 @@ tauri = { version = "2.11.1", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 base64 = "0.22"
