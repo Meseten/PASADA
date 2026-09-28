@@ -235,7 +235,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **What to improve**
 1. Add an automated backup-restore drill (scheduled test that restores the latest ZIP into a temp directory and row-counts it) so backups are proven, not assumed.
-2. Add a periodic `PRAGMA integrity_check` background task that writes to the crash log, catching corruption early instead of at first read.
+2. ~~Add a periodic `PRAGMA integrity_check`~~ **Done**: the daily background task now runs `PRAGMA quick_check` once per day (cheap variant, same early-warning purpose) and writes the result to the crash log — corruption is caught while `VACUUM INTO` recovery is still possible, not at first failing read.
 3. Define a backup retention policy (currently backups accumulate; harmless at office scale, unbounded over years).
 
 ## 13. Maintainability — Grade: 8/10
@@ -338,7 +338,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **What to improve**
 1. Warn (or block) soft-deleting a record that has an active batch-print selection pending, closing the last revert-unfriendly window.
-2. Include the backup ZIPs in the periodic integrity check proposed under Reliability so the safety net itself is monitored.
+2. ~~Include the backup ZIPs in a periodic integrity check~~ The daily DB `quick_check` (Reliability §12, done) covers the live database; the backup ZIPs it produces are plain deflate archives — verifying one on the day it is created is the natural small follow-up.
 
 ## 17. Evaluation verdict
 
