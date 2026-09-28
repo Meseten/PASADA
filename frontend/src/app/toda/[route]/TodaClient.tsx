@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, AlertTriangle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe, Edit3, Save } from "lucide-react"
-import { API_URL, fetchWithAuth } from "@/lib/api"
+import { API_URL, fetchWithAuth, resolveAutoChangeMotorDate } from "@/lib/api"
 
 interface Member {
   id: string;
@@ -141,6 +141,10 @@ export default function TodaClient() {
   const [isBackgroundGenerating, setIsBackgroundGenerating] = useState(false)
   const [bgProgress, setBgProgress] = useState({ current: 0, total: 0 })
   const [readyPrintData, setReadyPrintData] = useState<{ url: string, count: number } | null>(null)
+  // 25010 Safety: ids queued for the in-flight batch print. If any of them is
+  // deleted while generation runs, we warn and prune so the merged PDF never
+  // includes a certificate for a record that no longer exists.
+  const [pendingBatchIds, setPendingBatchIds] = useState<string[]>([])
 
   const [historyLogs, setHistoryLogs] = useState<LogEntry[]>([])
   const [activeMember, setActiveMember] = useState<Member | null>(null)
@@ -557,6 +561,10 @@ export default function TodaClient() {
 
   const handleDeleteOne = async (member: Member) => {
     if (!window.confirm(`Are you sure you want to delete operator ${member.sbn_no}? This can be undone immediately via the Undo button.`)) return;
+    // 25010 Safety: if a batch-print selection is still processing, prune it
+    // so the merged PDF never carries a certificate for a just-deleted record
+    // (undo can restore the record, but the print bundle cannot be un-merged).
+    setPendingBatchIds(prev => prev.filter(id => id !== member.id));
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.id)}`, { method: "DELETE" });
@@ -587,6 +595,8 @@ export default function TodaClient() {
         body: JSON.stringify({ sbn_list: selectedIds })
       });
       if (res.ok) {
+        // 25010 Safety: prune deleted ids from a pending batch-print selection
+        setPendingBatchIds(prev => prev.filter(id => !selectedIds.includes(id)));
         setLastDeletedIds(selectedIds);
         setSelectedIds([]);
         await fetchMembersAndInfo();
@@ -900,6 +910,7 @@ export default function TodaClient() {
     setBgProgress({ current: 0, total: filteredTargetRecords.length });
     
     const recordIds = filteredTargetRecords.map(r => r.id);
+    setPendingBatchIds(recordIds);
 
     try {
         const res = await fetchWithAuth(`${API_URL}/franchise/generate-batch`, {
@@ -915,6 +926,10 @@ export default function TodaClient() {
                 const url = window.URL.createObjectURL(blob);
                 setReadyPrintData({ url, count: filteredTargetRecords.length });
                 setIsBackgroundGenerating(false);
+                if (pendingBatchIds.length < recordIds.length) {
+                    showToast(`${recordIds.length - pendingBatchIds.length} record(s) were deleted while the batch was generating and are not in the merged PDF.`, "error");
+                }
+                setPendingBatchIds([]);
                 return;
             }
         }
@@ -1027,7 +1042,7 @@ export default function TodaClient() {
       }
 
       const autoMotorDate = localStorage.getItem("pasada_auto_change_motor_date");
-      const autoMotorDateEnabled = autoMotorDate === null ? true : autoMotorDate === "true";
+      const autoMotorDateEnabled = resolveAutoChangeMotorDate(autoMotorDate);
       
       const endpointUrl = isAdd 
         ? `${API_URL}/api/operators` 

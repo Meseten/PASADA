@@ -57,10 +57,15 @@ export const fetchWithAuth = async (endpoint: string, options: RequestInit = {})
 export const computeRecordStatus = (member: any, currentYear: number) => {
   if (member.status) return member.status; // B2: Defers to backend as authoritative
   if (!member.operator_name || member.operator_name.trim() === "") return "VACANT";
-
   const issueYear = member.issue_date ? new Date(member.issue_date).getFullYear() : 0;
   if (member.is_active === false || issueYear <= currentYear - 2) return "REVOKED";
   if (issueYear === currentYear - 1) return "FLAGGED";
 
   return "ACTIVE";
 };
+
+// Auto-date toggle (Change Motor): default OFF. A stored value is an explicit
+// user choice made in Settings; only the no-value case (fresh install, or an
+// install that never touched the toggle) resolves to OFF.
+export const resolveAutoChangeMotorDate = (stored: string | null): boolean =>
+  stored === "true";

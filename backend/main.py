@@ -149,6 +149,22 @@ def automated_background_tasks():
                         zipf.write(db_path, os.path.basename(db_path))
                     force_log(f"Automated backup secured: {zip_name}")
                 
+                # ISO 25010 Reliability: backup retention policy. Panatilihin
+                # lang ang huling 30 araw ng backup ZIP; lahat ng mas luma ay
+                # kasama na ng desktop hard drive kung sasapatin, pero ang
+                # unang 30 araw ay sapat para sa anumang makatwirang rollback.
+                try:
+                    cutoff = (now - timedelta(days=30)).strftime('PASADA_Backup_%Y-%m-%d.zip')
+                    for old_name in os.listdir(backup_dir):
+                        if old_name.startswith("PASADA_Backup_") and old_name < cutoff:
+                            try:
+                                os.remove(os.path.join(backup_dir, old_name))
+                                force_log(f"Backup retention: removed old backup {old_name}")
+                            except OSError:
+                                pass
+                except Exception as prune_err:
+                    force_log(f"Backup retention sweep failed: {prune_err}")
+                
                 with open(track_file, "w") as f: 
                     f.write(today_str)
                     
@@ -1721,11 +1737,20 @@ def update_franchise(
 
 # NOTE: Normal re-upload does not reset the system (uses merge-only & year-gates).
 # To reset for testing, download a .db backup first, then use Full Restore.
+MAX_DB_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB — a full registry DB is ~100 MB
+
 @app.post("/upload/database")
 async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     temp_db_path = os.path.join(BASE_DIR, f"temp_import_{uuid.uuid4().hex}.db")
+    written = 0
     with open(temp_db_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := await file.read(1024 * 1024):
+            written += len(chunk)
+            if written > MAX_DB_UPLOAD_BYTES:
+                buffer.close()
+                os.remove(temp_db_path)
+                raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB import limit.")
+            buffer.write(chunk)
     
     temp_db = None
     db = None
@@ -1809,8 +1834,15 @@ def backup_database(current_user: User = Depends(get_current_user), db: Session 
 @app.post("/restore/database")
 async def restore_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     temp_db_path = os.path.join(BASE_DIR, f"temp_restore_{uuid.uuid4().hex}.db")
+    written = 0
     with open(temp_db_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := await file.read(1024 * 1024):
+            written += len(chunk)
+            if written > MAX_DB_UPLOAD_BYTES:
+                buffer.close()
+                os.remove(temp_db_path)
+                raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB restore limit.")
+            buffer.write(chunk)
     
     temp_db = None
     db = None
@@ -1903,12 +1935,19 @@ async def upload_bulk_files(
                             header_idx = r_idx
                             headers = [str(sheet.cell(row=r_idx, column=c).value).strip().upper() if sheet.cell(row=r_idx, column=c).value is not None else f"COL_{c}" for c in range(1, sheet.max_column + 1)]
                             break
-                    if header_idx != -1:
-                        for r_idx in range(header_idx + 1, sheet.max_row + 1):
-                            row_dict = {}
-                            for c_idx in range(1, sheet.max_column + 1):
-                                row_dict[headers[c_idx - 1]] = sheet.cell(row=r_idx, column=c_idx).value
-                            row_dicts.append(row_dict)
+                    if header_idx == -1:
+                        # ISO 25010 Functional Suitability: fail the file loudly
+                        # with the column names we need, instead of importing 0
+                        # rows and answering "success".
+                        raise Exception(
+                            "No header row found: need columns containing NAME and SBN "
+                            f"in the first 20 rows of {file.filename}."
+                        )
+                    for r_idx in range(header_idx + 1, sheet.max_row + 1):
+                        row_dict = {}
+                        for c_idx in range(1, sheet.max_column + 1):
+                            row_dict[headers[c_idx - 1]] = sheet.cell(row=r_idx, column=c_idx).value
+                        row_dicts.append(row_dict)
                 else:
                     df = pd.read_csv(io.BytesIO(contents), header=None)
                     df.fillna("", inplace=True)
@@ -1918,10 +1957,15 @@ async def upload_bulk_files(
                         if any("NAME" in val for val in row_vals) and any("SBN" in val for val in row_vals):
                             header_idx = i
                             break
-                    if header_idx != -1:
-                        df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
-                        df = df.iloc[header_idx+1:].reset_index(drop=True)
-                        row_dicts = df.to_dict(orient="records")
+                    if header_idx == -1:
+                        # Same loud failure for CSV: no NAME+SBN header = no import.
+                        raise Exception(
+                            "No header row found: need columns containing NAME and SBN "
+                            f"in {file.filename}."
+                        )
+                    df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
+                    df = df.iloc[header_idx+1:].reset_index(drop=True)
+                    row_dicts = df.to_dict(orient="records")
 
                 for row_dict in row_dicts:
                     raw_sbn = get_fuzzy_col_dict(row_dict, "SBN")
@@ -2051,9 +2095,12 @@ async def upload_bulk_files(
                         sbn_map[incoming_base_sbn] = record
                         imported_count += 1
         except Exception as e:
-            error_msg = f"Failed extracting {file.filename}: {str(e)}"
+            # ISO 25010 Functional Suitability: per-file error reporting with
+            # the real cause (missing header, corrupt file), so a silent 0-row
+            # import can never masquerade as success. The response surfaces it.
+            error_msg = f"Failed importing {file.filename}: {str(e)}"
             force_log(error_msg)
-            error_log.append(error_msg) 
+            error_log.append(error_msg)
             continue
 
     db.commit()
@@ -2660,6 +2707,10 @@ def get_change_motor_logs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # Vuln hardening: cap pagination so page_size=999999 cannot dump the whole
+    # audit table in one authenticated-but-careless request.
+    page = max(1, min(page, 10_000))
+    page_size = max(1, min(page_size, 500))
     query = db.query(AuditLog).filter(AuditLog.action == "CHANGE_MOTOR")
     if route and route.upper() != "ALL":
         query = query.filter(AuditLog.target_route == alias_route(route))
@@ -2706,6 +2757,9 @@ def get_audit_logs(
     current_user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
+    # Vuln hardening: same pagination cap as /logs/change-motor.
+    page = max(1, min(page, 10_000))
+    page_size = max(1, min(page_size, 500))
     query = db.query(AuditLog)
     
     if route and route.upper() != "ALL":

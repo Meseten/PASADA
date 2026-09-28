@@ -9,8 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
 
-from main import app, get_db
-from database import Base, User
+from datetime import datetime
+
+from main import app, get_db, clear_api_caches
+from database import Base, FranchiseRecord, User
 
 TEST_PERF_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "test_perf.db"))
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{TEST_PERF_DB_PATH}"
@@ -102,3 +104,72 @@ def test_concurrent_write_throughput():
     # reliable na regression signal. Ang 300ms ay hito pa rin sa sentro ng performance
     # na kayang gawin ng SQLite, pero mas stable na sa CI/dev machines.
     assert avg_per_write < 0.300, f"Average write speed exceeded 300ms: {avg_per_write:.4f}s"
+
+
+# --- 50k SYNTHETIC SCALE (ISO 25010 Performance ceiling) ---
+# Nakadokumento sa ISO25010_COMPLIANCE.md §8: 6,137 ang tunay na laki ng
+# registry; dito pinapatunayan na hanggang ~50k records (8x ang totoong
+# laki) ay nananatiling mabilis ang dashboard stats at paginated list.
+# ponytail: bulk insert lang (walang per-row HTTP), kasi ang tinetest dito
+# ay read-side scaling hindi write throughput.
+@pytest.mark.performance
+def test_global_stats_at_50k_scale():
+    from database import FranchiseRecord
+
+    rows = []
+    for i in range(50_000):
+        year = 2020 + (i % 7)
+        rows.append({
+            "id": f"perf-{i:06d}",
+            "sbn_no": f"PS-{i:06d}-{str(year)[2:]}",
+            "operator_name": f"SCALE OPERATOR {i}" if i % 5 else "",
+            "address": "NAIC, CAVITE",
+            "motor_no": f"SM-{i}",
+            "chassis_no": f"SC-{i}",
+            "make": "HONDA",
+            "plate_no": f"{i % 10}00-{i:03d}",
+            "route": f"SCALETODA-{i % 20}",
+            "driving_route": f"SCALETODA-{i % 20}",
+            "issue_date": datetime(year, (i % 12) + 1, (i % 28) + 1),
+            "valid_until": datetime(year, 12, 31),
+            "is_active": True,
+            "is_deleted": False,
+        })
+    with TestingSessionLocal() as bulk_db:
+        bulk_db.execute(FranchiseRecord.__table__.insert(), rows)
+        bulk_db.commit()
+
+    clear_api_caches()  # cold measurement, walang tira sa cache
+    headers = {"Authorization": f"Bearer {get_perf_token()}"}
+
+    t0 = time.time()
+    res = client.get("/stats/global", headers=headers)
+    cold = time.time() - t0
+    assert res.status_code == 200
+    assert res.json()["total_system_capacity"] >= 50_000
+
+    t1 = time.time()
+    res2 = client.get("/stats/global", headers=headers)
+    warm = time.time() - t1
+    assert res2.status_code == 200
+
+    t2 = time.time()
+    list_res = client.get("/franchise/route/BATODA", headers=headers)
+    list_time = time.time() - t2
+    assert list_res.status_code == 200
+
+    # Cold first pass sa 50k: 8–10s ang measured sa dev machine (old laptop,
+    # SQLite cold page cache) — threshold 15s para stable, hindi flaky sa CI.
+    # Warm hit ay 60s RAM cache, kaya praktikal na O(1) ang dashboard polling.
+    assert cold < 15.0, f"50k cold stats took {cold:.2f}s (>15s)"
+    assert warm < 0.5, f"50k warm stats took {warm:.2f}s (>0.5s)"
+    assert list_time < 5.0, f"50k route list took {list_time:.2f}s (>5s)"
+
+    # Iwanang malinis: tanggalin ang synthetic rows para hindi kalat ng
+    # ibang tests ang 50k extras (same physical test DB).
+    with TestingSessionLocal() as cleanup_db:
+        cleanup_db.query(FranchiseRecord).filter(
+            FranchiseRecord.id.like("perf-%")
+        ).delete(synchronize_session=False)
+        cleanup_db.commit()
+    clear_api_caches()
