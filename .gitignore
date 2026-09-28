@@ -24,3 +24,6 @@ frontend/src-tauri/target/
 backend/exports/
 frontend/playwright-report/
 frontend/test-results/
+
+# Coverage artifact
+.coverage

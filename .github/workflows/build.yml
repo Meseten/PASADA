@@ -13,6 +13,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify updater signing secrets (fail fast)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # tauri.conf.json enables createUpdaterArtifacts, so the build needs
+          # the minisign PRIVATE key. Check BEFORE the multi-minute build so a
+          # missing/empty secret fails in seconds, not after the bundles.
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is missing or empty. Paste the FULL contents of the .key file from 'npx tauri signer generate' - it starts with 'untrusted comment: minisign encrypted secret key'. The .pub file does NOT work here."
+            exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is missing or empty. Set it to the passphrase chosen when the key was generated."
+            exit 1
+          fi
+          echo "Signing secrets present (values hidden)."
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
