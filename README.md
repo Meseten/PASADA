@@ -245,13 +245,13 @@ Before handing a build to the office:
 
 1. **Windows-only packaging.** The document pipeline uses Microsoft Word; the Linux environment used for development cannot produce print-ready PDFs. Build installers on Windows (`npm run tauri build`).
 2. **Version lockstep.** `tauri.conf.json`, `Cargo.toml`, and `APP_VERSION` must match (see `RELEASE.md`).
-3. **Updater endpoint.** Releases must be published to the official GitHub releases page with valid minisign signatures, or update checks fail by design.
+3. **Updater endpoint.** Releases must be published to the official GitHub releases page with valid minisign signatures, or update checks fail by design. The tag push does this; verify the release page shows `latest.json` before telling the office to check for updates.
 4. **Office network.** UDP broadcast must be allowed on the office router for discovery; machines find each other only on the same subnet.
 5. **First-run account.** Create the real office account on first launch of the packaged build; signup closes permanently after that.
 
 ## Releasing
 
-Versioning, signing keys, and the release checklist live in [RELEASE.md](RELEASE.md). The version must match in three places: `frontend/src-tauri/tauri.conf.json` (source of truth), `frontend/src-tauri/Cargo.toml`, and `APP_VERSION` in `frontend/src/app/settings/page.tsx`.
+Releases are automatic. Push to `main` and `release.yml` bumps the version in `.github/version.txt`, stamps it into the app, tags the commit, builds the signed installer, and publishes the GitHub Release with the `latest.json` the updater consumes. No version editing, no tag commands. MINOR/MAJOR jumps are a one-line edit to `.github/version.txt`. Full details, the artifact list, and the troubleshooting table live in [RELEASE.md](RELEASE.md).
 
 ## Troubleshooting
 
