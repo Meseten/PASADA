@@ -101,7 +101,7 @@ SBN rules the app enforces automatically:
 
 ## Settings guide
 
-- **General**: MTOP signatory name (printed on certificates and summaries), save-preview behavior, auto-date on Change Motor.
+- **General**: MTOP signatory name (printed on certificates and summaries), save-preview behavior, auto-date on Change Motor (off by default — clerks opt in; renewals always set the date).
 - **Backups**: explicit DB backup action; backups live outside the app folder.
 - **Security**: Quick PIN (hash-only on device), three recovery questions with custom slots.
 - **Connections**: this computer's IP, sync port 43888, connected peers with their names, sharing status, and the network label control.

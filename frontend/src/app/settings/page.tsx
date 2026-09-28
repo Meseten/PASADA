@@ -25,7 +25,7 @@ import {
   Trash2,
   ArrowUpCircle
 } from "lucide-react";
-import { API_URL, fetchWithAuth } from "@/lib/api";
+import { API_URL, fetchWithAuth, resolveAutoChangeMotorDate } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -54,7 +54,7 @@ interface RecoveryConfig {
 
 // Must match the version in src-tauri/tauri.conf.json; the updater compares
 // against it to decide whether a new release exists.
-const APP_VERSION = "0.82.0";
+const APP_VERSION = "0.82.1";
 
 interface Toast {
   id: number;
@@ -68,7 +68,7 @@ export default function Settings() {
   
   // Client-side UI Preferences
   const [showSavePreview, setShowSavePreview] = useState(true);
-  const [autoChangeMotorDate, setAutoChangeMotorDate] = useState(true);
+  const [autoChangeMotorDate, setAutoChangeMotorDate] = useState(false);
   
   const [hasPin, setHasPin] = useState(false);
   const [newPin, setNewPin] = useState("");
@@ -118,7 +118,7 @@ export default function Settings() {
     if (prefPreview !== null) setShowSavePreview(prefPreview === "true");
 
     const prefAutoMotor = localStorage.getItem("pasada_auto_change_motor_date");
-    if (prefAutoMotor !== null) setAutoChangeMotorDate(prefAutoMotor === "true");
+    setAutoChangeMotorDate(resolveAutoChangeMotorDate(prefAutoMotor));
 
     if (localStorage.getItem("pasada_pin")) {
       setHasPin(true);

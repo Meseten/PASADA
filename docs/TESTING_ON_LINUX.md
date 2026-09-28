@@ -58,8 +58,9 @@ Open **http://localhost:3000** in the browser (Firefox is fine).
 - **Dashboard** — cards fill in; the "Route Fullness Check" panel shows plain
   words like "GREEN: Not full yet — can accept new operators".
 - **Records page** — add an operator, edit a name only (dates must not move),
-  change a motor number (dates move only if the auto-date toggle is ON in
-  Settings).
+  change a motor number (dates stay put — the auto-date toggle is OFF by
+  default; only clerks who deliberately turn it ON in Settings get automatic
+  dates).
 - **Settings** — backups download; "Fix Records Now" runs and finishes.
 - **Switch dark/light** from the top bar — colors should stay readable.
 

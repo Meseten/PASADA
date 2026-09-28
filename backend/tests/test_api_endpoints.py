@@ -618,6 +618,70 @@ def test_address_abbreviation_expansion():
     target2 = next(r for r in records2 if r["sbn_no"].startswith("ADR-002"))
     assert target2["address"] == "TIMALAN BALSAHAN, NAIC, CAVITE"
 
+# --- CHANGE MOTOR AUTO-DATE TOGGLE (Settings default OFF) ---
+def test_change_motor_auto_date_off_keeps_date():
+    """Kapag OFF ang auto-date toggle (default), pag papalit ng motor specs
+    ay dapat MANATILI yung lumang Date Issued — walang awtomatikong pag-set
+    ng date today. Manual lang via Set Today / date field."""
+    token = get_auth_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post("/franchise/", json={
+        "sbn_no": "AUT-001", "operator_name": "AUTO DATE OFF TEST",
+        "address": "NAIC, CAVITE", "motor_no": "OLD-AUTO-M1",
+        "chassis_no": "OLD-AUTO-C1", "make": "KAWASAKI",
+        "plate_no": "AUT-111", "route": "AUTODA"
+    }, headers=headers)
+    records = client.get("/franchise/route/AUTODA", headers=headers).json()
+    target = next(r for r in records if r["sbn_no"].startswith("AUT-001"))
+    record_id = target["id"]
+
+    # Set a known manual date first.
+    base_payload = {
+        "sbn_no": target["sbn_no"], "original_sbn_no": target["sbn_no"],
+        "operator_name": "AUTO DATE OFF TEST", "address": "NAIC, CAVITE",
+        "motor_no": "OLD-AUTO-M1", "chassis_no": "OLD-AUTO-C1",
+        "make": "KAWASAKI", "plate_no": "AUT-111", "route": "AUTODA",
+        "issue_date": "2024-03-15", "valid_until": "2024-12-31"
+    }
+    put_res = client.put(f"/franchise/{record_id}", json=base_payload, headers=headers)
+    assert put_res.status_code == 200
+
+    # Change motor WITH auto-date OFF: date must stay 2024-03-15.
+    payload_off = dict(base_payload, motor_no="NEW-AUTO-M2", chassis_no="NEW-AUTO-C2")
+    put_off = client.put(
+        f"/franchise/{record_id}?auto_change_motor_date=false",
+        json=payload_off, headers=headers
+    )
+    assert put_off.status_code == 200
+    records = client.get("/franchise/route/AUTODA", headers=headers).json()
+    after_off = next(r for r in records if r["sbn_no"].startswith("AUT-001"))
+    assert after_off["issue_date"].startswith("2024-03-15"), \
+        f"auto-date OFF must keep the old date, got {after_off['issue_date']}"
+
+    # Same edit WITH auto-date ON: date becomes today.
+    today = datetime.now().strftime("%Y-%m-%d")
+    payload_on = dict(base_payload, motor_no="NEW-AUTO-M3", chassis_no="NEW-AUTO-C3")
+    put_on = client.put(
+        f"/franchise/{record_id}?auto_change_motor_date=true",
+        json=payload_on, headers=headers
+    )
+    assert put_on.status_code == 200
+    records = client.get("/franchise/route/AUTODA", headers=headers).json()
+    after_on = next(r for r in records if r["sbn_no"].startswith("AUT-001"))
+    assert after_on["issue_date"].startswith(today), \
+        f"auto-date ON must set today, got {after_on['issue_date']}"
+
+    # Cleanup: delete para hindi makita ng ibang tests.
+    client.delete(f"/franchise/{record_id}", headers=headers)
+
+
+def test_export_mass_requires_auth():
+    """25010 Security/Maintainability: export endpoint must not respond to
+    unauthenticated callers — it bundles the whole registry into a ZIP."""
+    response = client.get("/export/mass")
+    assert response.status_code in (401, 403)
+
 # --- 4. GLOBAL STATS & ADMIN TESTS ---
 def test_global_stats():
     token = get_auth_token()

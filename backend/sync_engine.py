@@ -55,6 +55,12 @@ else:
 # leaves a wide margin for a machine whose clock drifted.
 BROADCAST_MAX_AGE_SECONDS = 300
 
+# PROTOCOL VERSION (ISO 25010 Compatibility): first field of the discovery
+# body after the magic prefix. A future schema change bumps this number and
+# the receiving side silently drops payloads from a version it does not
+# understand, instead of failing mysteriously on a half-parsed format.
+DISCOVERY_PROTOCOL_VERSION = 1
+
 # REPLAY PROTECTION: a valid broadcast captured on the wire must not be
 # reusable. Each received payload's nonce is remembered for the freshness
 # window; a repeat is dropped as a replay. (The pull endpoint keeps its own
@@ -77,7 +83,7 @@ def _hmac_hex(message: bytes) -> str:
     return hmac.new(CLUSTER_SECRET.encode('utf-8'), message, hashlib.sha256).hexdigest()
 
 def build_discovery_payload(local_ip: str, now: float = None) -> bytes:
-    """PASADA_NODE:<ip>:<timestamp>:<nonce>:<name>:<hmac>, secret never on the wire.
+    """PASADA_NODE:<ver>:<ip>:<timestamp>:<nonce>:<name>:<hmac>, secret never on the wire.
 
     The friendly computer name travels INSIDE the signed body, so a tampered
     name breaks the signature like any other change."""
@@ -85,7 +91,7 @@ def build_discovery_payload(local_ip: str, now: float = None) -> bytes:
         now = time.time()
     timestamp = str(int(now))
     nonce = secrets.token_hex(8)
-    body = f"PASADA_NODE:{local_ip}:{timestamp}:{nonce}:{COMPUTER_NAME}".encode('utf-8')
+    body = f"PASADA_NODE:{DISCOVERY_PROTOCOL_VERSION}:{local_ip}:{timestamp}:{nonce}:{COMPUTER_NAME}".encode('utf-8')
     return body + b":" + _hmac_hex(body).encode('ascii')
 
 def parse_discovery_payload(data: bytes, local_ip: str, now: float = None):
@@ -98,10 +104,15 @@ def parse_discovery_payload(data: bytes, local_ip: str, now: float = None):
         now = time.time()
     try:
         parts = data.decode('utf-8').split(":")
-        if len(parts) != 6 or parts[0] != "PASADA_NODE":
+        if len(parts) != 7 or parts[0] != "PASADA_NODE":
             return None
-        peer_ip, timestamp, nonce, name, signature = parts[1], parts[2], parts[3], parts[4], parts[5]
-        body = f"PASADA_NODE:{peer_ip}:{timestamp}:{nonce}:{name}".encode('utf-8')
+        # Protocol-version gate: an older/newer broadcaster is not an error,
+        # it is a different dialect — drop quietly so mixed offices fail loud
+        # nowhere and the Logs stay clean.
+        if parts[1] != str(DISCOVERY_PROTOCOL_VERSION):
+            return None
+        peer_ip, timestamp, nonce, name, signature = parts[2], parts[3], parts[4], parts[5], parts[6]
+        body = f"PASADA_NODE:{DISCOVERY_PROTOCOL_VERSION}:{peer_ip}:{timestamp}:{nonce}:{name}".encode('utf-8')
         if not hmac.compare_digest(_hmac_hex(body), signature):
             return None
         age = abs(now - float(timestamp))

@@ -3,7 +3,7 @@
 // 25010 Characteristic: Maintainability
 
 import { describe, it, expect, vi } from 'vitest';
-import { computeRecordStatus, fetchWithAuth } from './api';
+import { computeRecordStatus, fetchWithAuth, resolveAutoChangeMotorDate } from './api';
 
 const mockLocation = { href: '' };
 Object.defineProperty(window, 'location', {
@@ -54,6 +54,20 @@ describe('API Library', () => {
 
             const res = await fetchWithAuth('/test');
             expect(res.status).toBe(200);
+        });
+    });
+
+    describe('resolveAutoChangeMotorDate (Settings toggle default OFF)', () => {
+        it('defaults to OFF when never toggled (fresh install, no stored value)', () => {
+            expect(resolveAutoChangeMotorDate(null)).toBe(false);
+        });
+
+        it('resolves OFF for an explicit stored "false" (user turned it off)', () => {
+            expect(resolveAutoChangeMotorDate('false')).toBe(false);
+        });
+
+        it('resolves ON only for an explicit stored "true" (user opted in)', () => {
+            expect(resolveAutoChangeMotorDate('true')).toBe(true);
         });
     });
 });

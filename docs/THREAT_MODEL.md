@@ -46,3 +46,38 @@ An auditor reviewing this codebase will note the absence of the following standa
 *   **Role-Based Access Control (RBAC):** All generated JWT tokens grant "Clerk" access. There are no super-admin dashboards or restricted routes.
 *   **Password Complexity/Rotation Enforcement:** Beyond a basic 8-character limit during signup, there are no cryptographic complexity enforcements (symbols, numbers, uppercase).
 *   **HTTPS / TLS:** The application communicates over unencrypted `http://` internally and across the LAN, as there is no central Certificate Authority available in the offline environment to issue trusted certificates.
+
+## 5. Accepted Risks Register (reviewed Sept 28, 2026)
+
+Three residual risks are **accepted by design**, not deferred work. Each entry records the risk, the compensating control that makes it safe in this deployment, the failure mode if the control fails, and the condition that would reopen the decision.
+
+### Risk 1: No TLS on the LAN (transport confidentiality)
+*   **Exposure:** A device on the office network can read sync traffic between the two PASADA machines.
+*   **Compensating controls:** Every mutation request is individually HMAC-SHA256-signed and replay-cached, so integrity and authenticity never depend on transport encryption. Records are protected by authentication (bcrypt + JWT), not wire secrecy. There is no untrusted party on a closed municipal LAN behind the LGU firewall.
+*   **Failure mode:** If the LAN is ever bridged to the public internet or shared with unmanaged devices (guest Wi-Fi, contractors' laptops), passive sniffing becomes possible. Authentication still blocks *writes*; reads of pull responses become the residual exposure.
+*   **Reopen the decision when:** The office network gains internet egress, a shared Wi-Fi segment, or any non-LGU device.
+*   **Mitigating action now:** None required. Do not add TLS certificates without a CA — self-signed certs on two machines recreate the trust-distribution problem this design avoids.
+
+### Risk 2: Readable discovery broadcast (information disclosure)
+*   **Exposure:** Anyone on the LAN segment can see that PASADA machines exist and read their display names (the signed-in account name).
+*   **Compensating controls:** The broadcast carries an IP, timestamp, nonce, display name, and HMAC — no records, no tokens, no secret material. The name is display-only and excluded from every trust decision (`test_computer_name_never_defaults_to_hostname`); knowing a name grants nothing. Discovery payloads are versioned and unsigned/badly-signed ones are dropped.
+*   **Failure mode:** Effectively none beyond reconnaissance. An attacker still needs the cluster secret to join or read anything.
+*   **Reopen the decision when:** The network becomes shared with an organization that treats the machine inventory itself as sensitive.
+*   **Mitigating action now:** None required.
+
+### Risk 3: Manual cluster-secret copying (key distribution)
+*   **Exposure:** Adding a machine to the sync cluster requires physically copying `cluster_secret.key` from an existing machine; a mistake (wrong file, wrong machine) means the new machine silently never syncs.
+*   **Compensating controls:** Physical transfer is the *strongest* available trust anchor in an air-gapped office — automating distribution would require a network bootstrap an interloper could race. A wrong or missing secret fails loudly: the machine never joins the peer list (unsigned broadcasts are dropped) and pulls are refused; nothing ever half-syncs. The secret never crosses the network.
+*   **Failure mode:** Human error during the copy — copying the wrong file, or emailing the key (which would defeat the whole design).
+*   **Verified first-run ritual (do exactly this, in order):**
+    1.  Install PASADA on the new machine. Sign in with the first-run account.
+    2.  On the admin machine, locate the data directory (per-user app-data folder; see `backend/database.py` `BASE_DIR`) and copy **only** `cluster_secret.key` to a USB drive.
+    3.  Paste the file into the new machine's data directory (same folder the app created).
+    4.  Restart PASADA on the new machine.
+    5.  Open Settings → Connections on the new machine: the admin machine must appear **by its account name** within ~30 seconds (two broadcast cycles).
+    6.  Add a test record on one machine; confirm it appears on the other within ~30 seconds of the sync cycle.
+    7.  If peers never appear: re-check the file landed in the right folder and both machines are on the same subnet. Do **not** disable the firewall beyond the two PASADA ports (54321/udp, 43888/tcp).
+*   **Reopen the decision when:** The cluster grows past a handful of machines or machines are added more than a few times a year — then revisit a documented key-rotation procedure.
+
+### Review cadence
+Re-read this register during the quarterly verification pass (same session as the NVDA screen-reader check on the office machines). Confirm: LAN still air-gapped, no new shared segments, secret files still on exactly the intended machines (`dir` listing, not contents), and the backup retention sweep still running (crash log shows `Backup retention:` lines).
