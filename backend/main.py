@@ -112,6 +112,31 @@ def automated_background_tasks():
             
             today_str = now.strftime('%Y-%m-%d')
             
+            # ISO 25010 Reliability: daily SQLite quick_check. Nakakahuli ng
+            # database corruption MAAGA (habang kaya pa ang VACUUM INTO
+            # recovery) sa halip na sa unang pagkabigo ng query. Isang beses
+            # kada araw lang, resulta ay nakasulat sa crash log; ang
+            # quick_check ay mas mura kaysa full integrity_check.
+            integrity_track = os.path.join(BASE_DIR, "last_integrity_check.txt")
+            last_check = ""
+            if os.path.exists(integrity_track):
+                with open(integrity_track, "r") as f:
+                    last_check = f.read().strip()
+            if last_check != today_str:
+                try:
+                    idb = SessionLocal()
+                    row = idb.execute(text("PRAGMA quick_check")).fetchone()
+                    idb.close()
+                    result = row[0] if row else "unknown"
+                    if result == "ok":
+                        force_log(f"[{now}] Daily DB integrity check: ok")
+                    else:
+                        force_log(f"[{now}] Daily DB integrity check PROBLEM: {result}")
+                    with open(integrity_track, "w") as f:
+                        f.write(today_str)
+                except Exception as e:
+                    force_log(f"Integrity check failed: {e}")
+            
             if (now.hour > 16 or (now.hour == 16 and now.minute >= 45)) and last_backup != today_str:
                 backup_dir = os.path.join(BASE_DIR, "backups")
                 if not os.path.exists(backup_dir):
