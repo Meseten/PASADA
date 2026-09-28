@@ -1,22 +1,21 @@
 name: Release PASADA
 
-# Releasing a new version is a two-file, one-command process:
-#   1. Bump "version" in frontend/src-tauri/tauri.conf.json
-#      (and frontend/src-tauri/Cargo.toml + APP_VERSION in
-#      frontend/src/app/settings/page.tsx to the same number)
-#   2. Push a tag:  git tag v0.2.0 && git push origin v0.2.0
-# The workflow builds the signed installer, signs the update bundle, and
-# publishes a GitHub Release. Installed apps see the update through the
-# updater and can install it from Settings > General (App Updates card),
-# no zip needed.
+# Automatic versioning + release in one workflow.
 #
-# Required repo secrets:
-#   TAURI_SIGNING_PRIVATE_KEY        contents of the .key file from
-#                                    `npx tauri signer generate` (one time)
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  the passphrase for that key
+#   git push origin main    # that's all — every push to main becomes a release
+#
+# The version lives in .github/version.txt (source of truth, currently 0.82.1).
+# On each push to main the workflow bumps its PATCH number, writes the new
+# version into tauri.conf.json + Cargo.toml + APP_VERSION (settings page),
+# commits the bump with [skip ci] so it never re-triggers, tags v<version>,
+# builds the signed installer, and publishes the GitHub Release the updater
+# reads. Pushing a v* tag manually also works: it builds exactly that version
+# without bumping.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch: {}
@@ -25,7 +24,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: windows-latest
 
     steps:
@@ -38,7 +37,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is missing or empty. Paste the FULL contents of the .key file from 'npx tauri signer generate'."
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is missing or empty. Paste the FULL contents of the .key file from 'npx tauri signer generate' - it starts with 'untrusted comment: minisign encrypted secret key'. The .pub file does NOT work here."
             exit 1
           fi
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
@@ -47,13 +46,56 @@ jobs:
           fi
           echo "Signing secrets present (values hidden)."
 
-      - name: Read version from tauri.conf.json
+      - name: Determine version (bump patch on main, tag version on tag push)
         id: version
         shell: bash
         run: |
-          VERSION=$(node -p "require('./frontend/src-tauri/tauri.conf.json').version")
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "mode=tag" >> "$GITHUB_OUTPUT"
+          else
+            BASE=$(cat .github/version.txt)
+            MAJOR=$(echo "$BASE" | cut -d. -f1)
+            MINOR=$(echo "$BASE" | cut -d. -f2)
+            PATCH=$(echo "$BASE" | cut -d. -f3)
+            VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+            echo "mode=bump" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building PASADA v$VERSION"
+          echo "Releasing PASADA v$VERSION"
+
+      - name: Write version into tauri.conf.json, Cargo.toml, APP_VERSION
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e "const fs=require('fs');const p='frontend/src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" frontend/src-tauri/Cargo.toml
+          python - <<'PY'
+          import os, re
+          p = 'frontend/src/app/settings/page.tsx'
+          s = open(p, encoding='utf-8').read()
+          s = re.sub(r'const APP_VERSION = "[^"]*"', f'const APP_VERSION = "{os.environ["VERSION"]}"', s)
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+          echo "Stamped v$VERSION into all three files."
+
+      - name: Commit version bump and tag (main pushes only)
+        if: steps.version.outputs.mode == 'bump'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "$VERSION" > .github/version.txt
+          git add .github/version.txt
+          git commit -m "chore: release v$VERSION [skip ci]"
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"
 
       - uses: actions/setup-node@v4
         with:
@@ -70,7 +112,6 @@ jobs:
         run: |
           cd backend
           pip install -r requirements.txt
-          
           # NOTE: the package was renamed multipart -> python_multipart, and the
           # old "multipart" import name no longer exists in current versions.
           # Both names are listed so the build works on any pip version.
@@ -92,11 +133,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
+          # Tauri v2 createUpdaterArtifacts:true produces NO .zip on Windows:
+          # the updater re-uses the installer itself (x64-setup.exe / .msi)
+          # plus a .sig sidecar. Copy installer + signature pairs.
           cp frontend/src-tauri/target/release/bundle/nsis/*.exe release-assets/ || true
+          cp frontend/src-tauri/target/release/bundle/nsis/*.exe.sig release-assets/ || true
           cp frontend/src-tauri/target/release/bundle/msi/*.msi release-assets/ || true
-          cp frontend/src-tauri/target/release/bundle/nsis/*.zip release-assets/ || true
-          cp frontend/src-tauri/target/release/bundle/msi/*.zip release-assets/ || true
-          ls -la release-assets
+          cp frontend/src-tauri/target/release/bundle/msi/*.msi.sig release-assets/ || true
+          echo "--- release-assets:"; ls -la release-assets
 
       - name: Generate latest.json for the updater
         shell: bash
@@ -104,30 +148,32 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           python - <<'PY'
-          import json, os, glob, hashlib, base64
+          import json, os, glob
 
           version = os.environ["VERSION"]
           assets = {}
-          for path in glob.glob("release-assets/*.zip"):
-              name = os.path.basename(path)
-              with open(path, "rb") as f:
-                  assets[name] = {
-                      "signature": open(path + ".sig", "r").read().strip(),
-                      "url": f"https://github.com/Meseten/PASADA/releases/download/v{version}/{name}",
-                  }
+          # v2 updater artifacts: the installer itself + .sig sidecar
+          for pattern in ("release-assets/*x64-setup.exe", "release-assets/*.msi"):
+              for path in glob.glob(pattern):
+                  name = os.path.basename(path)
+                  if os.path.exists(path + ".sig"):
+                      assets[name] = {
+                          "signature": open(path + ".sig", "r").read().strip(),
+                          "url": f"https://github.com/Meseten/PASADA/releases/download/v{version}/{name}",
+                      }
 
           if not assets:
-              raise SystemExit("No signed .zip updater artifacts found; check createUpdaterArtifacts output")
+              raise SystemExit("No signed updater artifacts found: need x64-setup.exe + .sig or .msi + .sig. Check 'Prepare release assets' listing above.")
 
-          platforms = sorted(
-            ("windows-x86_64", a) for name, a in assets.items() if name.endswith("x64-setup.zip")
-          ) or [("windows-x86_64", list(assets.values())[0])]
+          # Prefer the NSIS setup installer for the updater manifest.
+          setup = next((a for n, a in sorted(assets.items()) if n.endswith("x64-setup.exe")), None) \
+                  or list(assets.values())[0]
 
           manifest = {
               "version": version,
               "notes": f"PASADA v{version}",
               "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "platforms": {p: a for p, a in platforms},
+              "platforms": {"windows-x86_64": setup},
           }
           with open("release-assets/latest.json", "w") as f:
               json.dump(manifest, f, indent=2)

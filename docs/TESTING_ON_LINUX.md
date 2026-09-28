@@ -14,6 +14,15 @@ python main.py
 Leave this window open. The engine listens on port 43888. If it starts fine,
 you will see boot messages and no red errors.
 
+To run a scratch instance that cannot touch the office database:
+
+```bash
+XDG_DATA_HOME=/tmp/pasada-dev PASADA_API_HOST=127.0.0.1 python main.py
+```
+
+The scratch instance auto-migrates its own database on first boot and its
+first account closes signup on that instance only.
+
 ## 2. Start the screens (Terminal 2)
 
 Zorin's built-in Node is too old, so point the terminal at Node 20 first:
@@ -35,7 +44,7 @@ Open **http://localhost:3000** in the browser (Firefox is fine).
 - The screen waits up to ~60 seconds the first time while the engine loads the
   records. After that, everything is fast.
 
-## 4. Try the new login protection
+## 4. Try the login protection
 
 1. Log out.
 2. Type the right username but a WRONG password, 5 times.
@@ -64,7 +73,56 @@ Open **http://localhost:3000** in the browser (Firefox is fine).
 - **Settings** — backups download; "Fix Records Now" runs and finishes.
 - **Switch dark/light** from the top bar — colors should stay readable.
 
-## 6. Stop everything
+## 6. The automated test battery
+
+The full battery is the first check after any change. All three commands
+must pass before code is considered done.
+
+```bash
+# Backend: 63 tests (endpoints, sync security, business logic, uploads,
+# performance incl. 50k scale, backup restore, protocol version, migration)
+cd pasada/backend
+source venv/bin/activate
+pytest                        # full suite
+pytest --cov                  # with statement coverage report
+
+# Frontend: 11 vitest unit tests
+export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
+cd ../frontend
+npx vitest run
+
+# TypeScript: must produce no output
+npx tsc --noEmit
+```
+
+What each backend file pins:
+
+| File | Pins |
+|------|------|
+| `test_api_endpoints.py` | CRUD, renewals, change-motor (incl. auto-date OFF keeps the old date), deletes, exports auth |
+| `test_sync_security.py` | HMAC refusals: replayed, stale, unsigned, wrong-secret, tampered-name pulls |
+| `test_business_logic.py` | DD-MM-YYYY parsing, dedup, address expansion |
+| `test_upload_validation.py` | Excel/CSV without NAME+SBN headers fail loudly with a reason |
+| `test_performance.py` | stats speed, write throughput, 50k-record scale ceilings |
+| `test_backup_restore.py` | backup ZIP restores, quick_check ok, row counts match; 30-day retention sweep |
+| `test_protocol_version.py` | discovery payload version gate (v2 drops unknown/legacy formats) |
+| `test_migration.py` | legacy schema auto-upgrade on boot |
+
+## 7. Manual regression checklist (release candidates)
+
+Run this against a scratch instance before tagging a release:
+
+1. Add operator → appears with auto-SBN, uppercase name.
+2. Edit name only → plain `EDIT_RECORD`, dates untouched.
+3. Genuine SBN edit → `RENEWAL`, date set to today.
+4. Motor swap with toggle OFF → `CHANGE_MOTOR`, old date kept.
+5. Delete → undo banner → restore works.
+6. Export Excel, export ZIP backup, download DB backup → files open.
+7. Batch print single record → merged PDF banner, Print Now works.
+8. Connections tab shows the peer by name on a two-machine setup.
+9. Check for Updates → "Up to date" against the current release.
+
+## 8. Stop everything
 
 Ctrl+C in each terminal.
 
@@ -76,3 +134,6 @@ Ctrl+C in each terminal.
 - Port already in use → another PASADA engine is still open; close it or
   restart the computer.
 - If the browser shows an old screen, hard-refresh (Ctrl+Shift+R).
+- pytest fails on `test_global_stats_at_50k_scale` timing → the machine was
+  under load; re-run alone (`pytest tests/test_performance.py -k 50k`). The
+  15s threshold tolerates a busy laptop but not a regression.
