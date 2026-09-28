@@ -204,7 +204,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **Remarks.** 9, not 10, because three risks remain *accepted and documented* rather than eliminated: no TLS on the LAN (HMAC covers integrity, not wire confidentiality), the discovery broadcast is readable by anyone on the segment (name only, nothing secret), and the cluster secret is shared by copying a file. All three are conscious trade-offs recorded in `docs/THREAT_MODEL.md` — appropriate for the context, but they are the honest distance to a perfect score. The fourth earlier gap (RAM-only lockout reset by a restart) has since been **closed in code**: the active lock is mirrored to SQLite and re-read on boot, pinned by a dedicated regression test.
 
-**Notes.** CI produces a signed, downloadable installer on every commit to `main` (`.github/workflows/build.yml` now passes `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD` to the Tauri build, so the updater `.zip` + `.sig` pairs are produced in the pipeline, not only at release time). Account names broadcast on the LAN are display-only and grant nothing.
+**Notes.** CI produces a signed, downloadable installer on every commit to `main` (`.github/workflows/build.yml` now passes `TAURI_SIGNING_PRIVATE_KEY`/`_PASSWORD` to the Tauri build, so the updater `.zip` + `.sig` pairs are produced in the pipeline, not only at release time). Both build and release workflows fail in seconds — before the multi-minute compile — when the signing secrets are missing or empty, with an error message that says exactly what to paste. Account names broadcast on the LAN are display-only and grant nothing.
 
 **What to improve**
 1. ~~Persist the lockout counter~~ **Done** after this evaluation: `login_lockouts` SQLite mirror, re-read on boot, test-pinned.
@@ -257,12 +257,12 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **Explanation.** The codebase demonstrates maintainability empirically: five consecutive feature/hardening passes each re-verified against the same green battery, which is the strongest possible evidence that modules are separable and the tests catch regressions. The defect-pinning convention (every reported bug becomes a named regression test) means the suite documents the system's history.
 
-**Remarks.** Held at 8 for two reasons: the tracked `backend/venv/` in the git index bloats the repository (a hygiene defect, not a quality one), and statement coverage sits at 50% — now measured and recorded above instead of unknown, with the bulk of the gap in Windows-only document generation and Excel extraction code that cannot execute on the Linux dev machine.
+**Remarks.** Held at 8 for one remaining reason: statement coverage sits at 50% — now measured and recorded above instead of unknown, with the bulk of the gap in Windows-only document generation and Excel extraction code that cannot execute on the Linux dev machine. The other earlier defect (tracked `backend/venv/` — 457 MB / 18,083 files of virtualenv inside the git index, bloating every clone) has since been **removed from the index and gitignored**; files remain on disk, history slimming is a separate optional task.
 
 **Notes.** `main.py` at 2,916 lines is the one file pulling its weight reluctantly; it is well-commented but is the natural next extraction candidate (endpoints vs. sync vs. background tasks). The CI workflow's PyInstaller flags carry an explicit comment about the `multipart`/`python_multipart` rename — exactly the kind of tribal knowledge that belongs in-repo.
 
 **What to improve**
-1. Remove `backend/venv/` from the git index and add it to `.gitignore` (already offered as a follow-up; pure repo hygiene).
+1. ~~Remove `backend/venv/` from the git index~~ **Done**: untracked from the index, `venv/` gitignore now effective, `.coverage` artifact also untracked and ignored. Repo index dropped by ~457 MB / 18k files (history rewrite to shrink old clones is optional and destructive, deliberately not done).
 2. ~~Add coverage reporting (`pytest --cov`)~~ **Done**: 50% statements, recorded in the metrics table; the follow-up is lifting `main.py`'s export/report endpoints, since the other big gaps need a Windows runner.
 3. Extract sync and background-task code from `main.py` into modules as it grows, keeping `main.py` as the wiring layer.
 4. Add a workflow step running the backend pytest suite in CI so the downloadable builds are always built from a green-tested commit.
@@ -350,12 +350,12 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | Interaction Capability | **8** | none | 208+ tooltips measured with zero pokes; 44px standard; screen-reader audit outstanding |
 | Reliability | **9** | none | 49/49 tests; live fault injection stayed graceful |
 | Security | **9** | none open | HMAC + replay caches + lockout, all live-verified; 3 accepted risks in `THREAT_MODEL.md`; restart-persistent lockout added |
-| Maintainability | **8** | none | 5 clean modification passes; CI green per commit; venv bloat + no coverage measurement |
+| Maintainability | **8** | none | 5 clean modification passes; CI green per commit with fail-fast signing check; coverage 50% measured; venv untracked from index |
 | Flexibility | **8** | none | zero-config install + CI-built artifacts; secret sharing manual by design |
 | Safety | **9** | none | reversibility everywhere; idle-gated installs |
 | **Overall** | **8.6 / 10** | — | compliant with ISO/IEC 25010:2023 for its deployment context, zero open blocking issues |
 
-**Interpretation of the overall grade.** The distance to 10 is fully enumerated and none of it is architectural: performance needs one synthetic-scale run (§8), usability needs a screen-reader audit (§10), security's remaining distance is the three accepted LAN risks (§11), maintainability needs venv cleanup and coverage of the export endpoints (§13), and flexibility needs a safer secret-sharing ritual (§14). Two of the originally listed gaps (restart-persistent lockout, signed CI artifacts) were closed the same day; the rest are incremental work on an already-verified foundation.
+**Interpretation of the overall grade.** The distance to 10 is fully enumerated and none of it is architectural: performance needs one synthetic-scale run (§8), usability needs a screen-reader audit (§10), security's remaining distance is the three accepted LAN risks (§11), maintainability needs coverage of the export endpoints (§13), and flexibility needs a safer secret-sharing ritual (§14). Two of the originally listed gaps (restart-persistent lockout, signed CI artifacts) were closed the same day; the rest are incremental work on an already-verified foundation.
 
 **Deployment readiness:** YES, with the conditions documented in `README.md`, section "Packaging and deployment readiness" (Windows-only packaging, version lockstep, signed releases, UDP broadcast allowance, first-run account creation). CI already produces downloadable Windows installers on every commit to `main`; release-signing those artifacts in the pipeline is the highest-leverage next step (§11, item 3).
 
