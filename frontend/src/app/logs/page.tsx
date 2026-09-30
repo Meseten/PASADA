@@ -198,6 +198,7 @@ export default function AuditLogsPage() {
                           className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
                       >
                           <option value="ALL">All TODA Routes</option>
+                          <option value="SYSTEM">System (non-TODA)</option>
                           {availableRoutes.length > 0 ? availableRoutes.map(r => (
                               <option key={r} value={r}>{r}</option>
                           )) : (

@@ -17,9 +17,11 @@ The security posture relies on these realities:
 1. **Closed LAN, no internet egress.** The workstations share a router that
    does not reach the internet. The only machines on the segment are LGU
    property.
-2. **Single trust tier.** Every operator is an authorized municipal clerk.
-   There is no clerk-vs-admin hierarchy inside the app; physical and OS-level
-   controls handle personnel boundaries.
+2. **Two trust tiers inside the app.** Clerks do everyday record work; the
+   Admin account owns accounts, templates, database import/restore, and the
+   approval queue. Heavy actions (route delete/rename, batch restore) are
+   two-key: a clerk files a ticket, the Admin approves before anything
+   changes. Verified by `test_admin_console.py`.
 3. **Physical security over logical security.** Locked office, locked
    workstations, Windows accounts. The app deliberately does not duplicate
    those controls.
@@ -35,7 +37,7 @@ The security posture relies on these realities:
 | Replay | Nonce caches on pull and discovery; 5-minute freshness window | `test_sync_security.py` |
 | Address binding | Signature covers the peer IP the request is addressed to; wrong-address fails closed | `test_sync_security.py` |
 | Brute force | 5 failed logins lock the account 15 minutes; lock persists across backend restart via the `login_lockouts` table | `test_login_lockout_persists_across_restart` |
-| Password storage | bcrypt; hashes never logged, exported, or synced | `sync_pull` strips them |
+| Password storage | bcrypt everywhere; hashes are shared only inside the HMAC-signed cluster so accounts roam between office computers; security-answer hashes never leave the machine that set them | `test_user_management.py` |
 | Browser attacks | CORS allowlist (`tauri://localhost`, localhost dev); no wildcard | middleware in `main.py` |
 | Excel formula injection | `escape_excel()` prefixes `= + - @ \t \r` with `'` on every export | Threat 3 below |
 | Path traversal | Regex scrubber on names before they reach file paths | Threat 4 below |
@@ -43,6 +45,7 @@ The security posture relies on these realities:
 | Audit-table dumping | Log pagination capped (page_size ≤ 500) | `get_audit_logs` |
 | Supply chain (updates) | minisign signature over every installer; updater refuses unsigned/mismatched bundles | `tauri.conf.json` pubkey |
 | Audit trail | Every mutation, login, and lockout logged with actor and timestamp; exportable | Logs page |
+| Insider misuse (big actions) | Route delete/rename and batch restore need Admin approval via the ticket queue; database import and Full Restore are Admin-only endpoints | `test_admin_console.py` |
 
 ## 4. Threat matrix and mitigations
 
@@ -117,7 +120,8 @@ These omissions are deliberate and approved for the single-tier, offline
 deployment:
 
 - **RBAC.** All tokens grant the same clerk-level access; Windows accounts
-  and the locked office handle personnel boundaries.
+  and the locked office handle personnel boundaries. Admin-role gating exists
+  on the user-management endpoints and Settings panel only.
 - **Password complexity/rotation.** Signup enforces an 8-character minimum;
   nothing more. The recovery-question path resets passwords on a single
   machine.

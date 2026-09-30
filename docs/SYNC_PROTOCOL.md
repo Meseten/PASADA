@@ -47,9 +47,24 @@ X-Cluster-Signature: <hmac_hex("PULL:<peer_ip>:<ts>:<nonce>")>
 - Signature covers the IP the request is **addressed to** — replaying it at a
   different peer fails.
 - Freshness window `PULL_MAX_AGE_SECONDS`, nonce cache on the receiving side.
-- Response: JSON `{ records: [...], users: [...] }`; `password_hash` is
-  stripped from every user on the wire. Synced accounts arrive with a
-  `SYNCED_NO_PASSWORD` hash and cannot log in until an admin resets them.
+- Response: JSON `{ records: [...], users: [...] }` (see §Users).
+
+## Users
+
+Password roaming (current behavior): the full user row travels **including
+`password_hash`**, because the pull request itself is HMAC-signed inside the
+trusted cluster and the hash is already a one-way bcrypt digest — sharing it
+lets one office account sign in on every computer. Machines that receive an
+account they lack insert it with its real hash; a machine holding the legacy
+`SYNCED_NO_PASSWORD` stub, or an older hash, adopts the incoming one (the copy
+on the machine where the password was last set is the master). The three
+security-**answer** hashes (`security_a1_hash` … `a3_hash`) are still stripped:
+account recovery stays answerable only on the machine that set the questions.
+Verified by `tests/test_user_management.py::test_password_hash_survives_sync_roundtrip`.
+
+Legacy behavior (kept here so old release notes make sense): synced accounts
+arrived with a `SYNCED_NO_PASSWORD` placeholder and could not log in anywhere
+but their home computer until an admin reset them.
 
 ## Merge semantics
 

@@ -276,7 +276,7 @@ export default function MassImport() {
                    <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} className="mt-0.5" />
                    <div>
                      <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (replaces matching records)</p>
-                     <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup.</p>
+                     <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup. Admin only — a clerk signing in will be asked to ask the Admin.</p>
                    </div>
                  </label>
               </div>

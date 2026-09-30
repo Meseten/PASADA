@@ -69,3 +69,14 @@ export const computeRecordStatus = (member: any, currentYear: number) => {
 // install that never touched the toggle) resolves to OFF.
 export const resolveAutoChangeMotorDate = (stored: string | null): boolean =>
   stored === "true";
+
+// Friendly text for a failed login/register call. The backend detail line is
+// shown when it exists (lockouts, closed registration), and a network failure
+// gets a hint that names the two real causes seen in the office: the backend
+// on this PC is not running, or the clock is wrong.
+export const describeAuthError = (err: unknown, fallback: string): string => {
+  if (err instanceof TypeError) {
+    return "Cannot reach the PASADA server on this computer. Make sure PASADA is open here, and check that this PC's date and time are correct.";
+  }
+  return fallback;
+};

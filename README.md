@@ -173,7 +173,12 @@ PASADA is a desktop app for a government office, so its security assumptions are
 - **Login is rate-limited:** 5 failed attempts locks the account for 15 minutes, and lockouts are written to the audit log.
 - **Registration is first-run only:** the open signup endpoint closes forever once the first account exists; administrators create later accounts.
 - **Passwords** are bcrypt-hashed and never logged; **tokens** are JWT (HS256) with a 30-day expiry and a per-installation random secret.
-- **LAN sync is authenticated:** discovery broadcasts and pull requests are HMAC-signed; password and security-answer hashes never leave a machine; synced accounts arrive without a usable password until an admin resets them.
+- **LAN sync is authenticated:** discovery broadcasts and pull requests are HMAC-signed; security-answer hashes never leave the machine that set them. Password hashes DO travel inside the signed cluster, so an account created on one computer signs in on every computer.
+- **Account management:** after first-run registration closes, an Admin creates accounts and resets forgotten passwords in Settings > Security > Manage Office Accounts. A reset also clears any login lockout on that account. Changes sync to the other computers.
+- **Two-key rule for big actions:** deleting a whole TODA line, renaming a line, and batch-restoring deleted records are Admin-approved. A clerk's click files an approval ticket (nothing changes); the Admin approves or rejects it in Admin Console > Approvals. Filing, approval, and rejection all land in the audit log. An Admin's own click on the same buttons executes directly — their click is the approval.
+- **Promotion keeps every clerk power:** when a Clerk becomes the Admin through the one-time bootstrap, the same account keeps creating, editing, renewing, printing, and exporting exactly as before; the admin doors simply open on top. Verified by `test_admin_console.py`.
+- **Database import and Full Restore are Admin only:** both the merge import and the Full Restore of a `.db` backup file refuse non-Admin accounts. (The full-restore gate was added after a full endpoint audit; previously any signed-in account could replace the registry.)
+- **Wrong-password lockout:** 5 failed attempts lock the account for 15 minutes, and the lock survives a restart. If the office "tried everything," the lockout is usually what they are hitting — wait it out or have the Admin reset the password.
 - **The Quick PIN** is stored only as a SHA-256 hash on the device, and the audit log records who changed what, when.
 - **Updates are signed:** the Tauri updater verifies the release signature before installing anything.
 
