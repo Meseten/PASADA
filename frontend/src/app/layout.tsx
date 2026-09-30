@@ -63,7 +63,7 @@ function ThemeToggle() {
 }
 
 // HOISTED ROUTE ITEM: Prevents React from trashing the component instance and resetting scroll
-const RouteItem = ({ route, isPinned, pathname, togglePin, deleteRoute }: { route: string, isPinned: boolean, pathname: string, togglePin: (e: React.MouseEvent, r: string) => void, deleteRoute: (e: React.MouseEvent, r: string) => void }) => {
+const RouteItem = ({ route, isPinned, pathname, togglePin, deleteRoute, showDelete }: { route: string, isPinned: boolean, pathname: string, togglePin: (e: React.MouseEvent, r: string) => void, deleteRoute: (e: React.MouseEvent, r: string) => void, showDelete: boolean }) => {
   // Trailing-slash-proof comparison so the current route lights up the same
   // way in dev and in the packaged app.
   const norm = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
@@ -80,7 +80,9 @@ const RouteItem = ({ route, isPinned, pathname, togglePin, deleteRoute }: { rout
       </Link>
       {/* PIN/DELETE: aria-labels only, no tooltip bubbles. The nav is the
           sidebar's own scroll container, so any bubble poking sideways here
-          reappears as a sideways scrollbar on the TODA Lines list itself. */}
+          reappears as a sideways scrollbar on the TODA Lines list itself.
+          DELETE shows for the Admin only: wiping a whole line is an office
+          decision, and the API refuses it for clerks anyway. */}
       <div className="absolute right-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-card px-1 rounded">
           <button
             onClick={(e) => togglePin(e, route)}
@@ -90,14 +92,16 @@ const RouteItem = ({ route, isPinned, pathname, togglePin, deleteRoute }: { rout
           >
               <Pin className={`h-3.5 w-3.5 ${isPinned ? 'fill-current text-blue-600' : 'text-slate-400'}`} />
           </button>
-          <button
-            onClick={(e) => deleteRoute(e, route)}
-            aria-label="Delete Entire Route"
-            title={`Delete the ${route} line and every record on it. Asks first.`}
-            className="p-1 hover:text-red-600 transition-colors"
-          >
-              <Trash2 className="h-3.5 w-3.5 text-slate-400 hover:text-red-500" />
-          </button>
+          {showDelete && (
+            <button
+              onClick={(e) => deleteRoute(e, route)}
+              aria-label="Delete Entire Route"
+              title={`Delete the ${route} line and every record on it. Asks first. Admin only.`}
+              className="p-1 hover:text-red-600 transition-colors"
+            >
+                <Trash2 className="h-3.5 w-3.5 text-slate-400 hover:text-red-500" />
+            </button>
+          )}
       </div>
   </div>
   );
@@ -176,42 +180,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // (records pages focus their own search instead), Alt+1..5 jump between
   // pages. Skipped while typing or when a dialog is open, and on the sign-in
   // screen. Plain browser shortcuts like Ctrl+C / Ctrl+V keep working.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (pathname === "/" || pathname === "/signup") return
-      const ae = document.activeElement as HTMLElement | null
-      const isTyping = !!ae && (
-        ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable
-      )
-      const hasOpenModal = document.querySelector('[role="dialog"]') !== null
-      if (isTyping || hasOpenModal) return
-      if (e.key === "/" && !e.altKey && !e.ctrlKey && !e.metaKey && !pathname.startsWith("/toda/")) {
-        e.preventDefault()
-        globalSearchRef.current?.focus()
-        return
-      }
-      if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const idx = ["1", "2", "3", "4", "5"].indexOf(e.key)
-        if (idx >= 0) {
-          e.preventDefault()
-          router.push(["/dashboard", "/logs", "/import", "/inactive", "/settings"][idx])
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [pathname, router])
+  // Alt+1..5 live in the onGlobalKey handler further down, next to "/".
 
   // COMPUTER NAME = ACCOUNT NAME: after sign-in (and whenever it changes),
   // announce the signed-in user's name on the LAN instead of a PC name. The
   // request is authenticated, so a name can only ever be set by someone who
   // is signed in on this machine.
-  // COMPUTER NAME = ACCOUNT NAME: after sign-in (and whenever it changes),
-  // announce the signed-in user's name on the LAN instead of a PC name. The
-  // request is authenticated, so a name can only ever be set by someone who
-  // is signed in on this machine.
   useEffect(() => {
-    if (pathname === "/" || pathname === "/signup") return
+    if (normAuthPath === "/" || normAuthPath === "/signup") return
     const token = localStorage.getItem("token") || localStorage.getItem("pasada_token")
     if (!token || !userName || userName === "System User") return
     if (nameSyncedForUser === userName) return
@@ -269,7 +245,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     if (storedRole) setUserRole(storedRole)
     if (storedPinned) setPinnedRoutes(JSON.parse(storedPinned))
     
-    if (pathname !== "/" && pathname !== "/signup") {
+    if (normAuthPath !== "/" && normAuthPath !== "/signup") {
       fetchRoutes()
     }
     
@@ -362,7 +338,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             const res = await fetchWithAuth(`${API_URL}/api/routes/${route}`, {
                 method: "DELETE"
             });
+            const body = await res.json().catch(() => ({}));
             if (res.ok) {
+                if (body.status === "ticket_filed") {
+                    // Clerk path: nothing was deleted; the Admin must approve.
+                    alert(body.message || "Request sent to the Admin for approval.");
+                    return;
+                }
                 if (pinnedRoutes.includes(route)) {
                     const updatedPins = pinnedRoutes.filter(r => r !== route);
                     setPinnedRoutes(updatedPins);
@@ -375,8 +357,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     router.push('/dashboard');
                 }
             } else {
-                const err = await res.json();
-                alert(err.detail || `Failed to delete route ${route}.`);
+                alert(body.detail || `Failed to delete route ${route}.`);
             }
         } catch (error) {
             alert("Network error while deleting route.");
@@ -384,7 +365,38 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
   };
 
-  const isAuthPage = pathname === "/" || pathname === "/signup"
+  // Trailing-slash-proof: the static export serves "/signup/" (trailingSlash
+  // in next.config), so the raw compare flipped false mid-navigation and the
+  // sidebar flashed around the login/register card (the reported "jumping").
+  // Declared BEFORE the effects that read it.
+  const normAuthPath = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname
+  const isAuthPage = normAuthPath === "/" || normAuthPath === "/signup"
+
+  // Restore keyboard shortcuts the earlier edit removed.
+  const onGlobalKey = (e: KeyboardEvent) => {
+    if (isAuthPage) return
+    const ae = document.activeElement as HTMLElement | null
+    const isTyping = !!ae && (
+      ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable
+    )
+    if (isTyping || document.querySelector('[role="dialog"]')) return
+    if (e.key === "/" && !e.altKey && !e.ctrlKey && !e.metaKey && !pathname.startsWith("/toda/")) {
+      e.preventDefault()
+      globalSearchRef.current?.focus()
+      return
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      const idx = ["1", "2", "3", "4", "5"].indexOf(e.key)
+      if (idx >= 0) {
+        e.preventDefault()
+        router.push(["/dashboard", "/logs", "/import", "/inactive", "/settings"][idx])
+      }
+    }
+  }
+  useEffect(() => {
+    window.addEventListener("keydown", onGlobalKey)
+    return () => window.removeEventListener("keydown", onGlobalKey)
+  }, [isAuthPage, router])
 
   // First-run tutorial: runs once per device, right after login, and can be
   // replayed from Settings. Only starts when a token already exists, so the
@@ -427,7 +439,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
              appear on hover and keyboard focus after a short delay, and
              disappear INSTANTLY when the pointer leaves (fade-out has no
              delay, which is what made them feel stuck before). */
-          [data-tip] { position: relative; }
+          /* LAYERED on purpose: this rule must never beat Tailwind utilities.
+             Unlayered CSS wins the cascade over @layer utilities, and when it
+             was unlayered it silently stripped the absolute position from every
+             data-tip element that also carried the class, so the login theme
+             toggle and the password eye button fell out of place on every OS
+             (looked like a Windows/WebView2 bug; it was not). Inside
+             the base layer, utilities like .absolute always win, while static
+             elements still get the relative anchor their tooltip needs. */
+          @layer base { [data-tip] { position: relative; } }
           [data-tip]::after {
             content: attr(data-tip);
             position: absolute;
@@ -574,6 +594,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     <Settings className="mr-2 h-4 w-4" /> Settings
                   </Link>
 
+                  {/* ADMIN CONSOLE: only the office Admin sees this entry. A
+                      clerk who guesses the URL still gets a refusal screen,
+                      and the API enforces the same rule server-side. */}
+                  {userRole === "Admin" && (
+                    <Link prefetch={false} href="/admin" aria-current={normPath === '/admin' ? 'page' : undefined} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${normPath === '/admin' ? 'bg-blue-100/70 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-l-4 border-blue-600 shadow-sm' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                      <ShieldCheck className="mr-2 h-4 w-4" /> Admin Console
+                    </Link>
+                  )}
+
                   {/* GLOBAL SEARCH */}
                   <form onSubmit={handleGlobalSearch} className="px-1 pb-1" data-tour="global-search">
                     <Input
@@ -614,12 +643,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     {pinnedList.length > 0 && (
                         <div className="mb-2">
                             <p className="px-3 text-[10px] font-black text-blue-600/70 uppercase tracking-widest mb-1 mt-2 flex items-center gap-1"><Pin size={10} className="fill-current"/> Pinned Routes</p>
-                            {pinnedList.map(route => <RouteItem key={`pinned-${route}`} route={route} isPinned={true} pathname={pathname} togglePin={togglePin} deleteRoute={deleteRoute} />)}
+                            {pinnedList.map(route => <RouteItem key={`pinned-${route}`} route={route} isPinned={true} pathname={pathname} togglePin={togglePin} deleteRoute={deleteRoute} showDelete={userRole === "Admin"} />)}
                         </div>
                     )}
                     <div className="mb-2">
                         {pinnedList.length > 0 && unpinnedList.length > 0 && <p className="px-3 text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-1 mt-2">All Routes</p>}
-                        {unpinnedList.map(route => <RouteItem key={`unpinned-${route}`} route={route} isPinned={false} pathname={pathname} togglePin={togglePin} deleteRoute={deleteRoute} />)}
+                        {unpinnedList.map(route => <RouteItem key={`unpinned-${route}`} route={route} isPinned={false} pathname={pathname} togglePin={togglePin} deleteRoute={deleteRoute} showDelete={userRole === "Admin"} />)}
                     </div>
                     {activeRoutes.length > 0 && filteredRoutes.length === 0 && (
                       <div className="px-3 py-2 text-xs text-muted-foreground font-semibold italic">No routes found.</div>
@@ -690,7 +719,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 className="w-full flex items-center gap-2.5 px-3.5 py-2 text-sm font-semibold hover:bg-accent hover:text-accent-foreground text-left"
                 onClick={() => {
                   setCtxMenu(null)
-                  if (pathname === "/" || pathname === "/signup") {
+                  if (normAuthPath === "/" || normAuthPath === "/signup") {
                     router.replace("/")
                   } else {
                     setReloadTick(t => t + 1)

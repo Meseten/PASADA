@@ -94,6 +94,10 @@ export default function TodaClient() {
   const router = useRouter()
   const fallbackRoute = pathname?.split('/').pop()?.toUpperCase() || ""
   const safeRouteName = (params?.route as string)?.toUpperCase() || fallbackRoute
+  // RENAMING A LINE IS ADMIN WORK: hide the button from clerks. The API also
+  // enforces this with the same Admin-only rule, so hiding is courtesy, not
+  // the security boundary.
+  const isAdmin = typeof window !== "undefined" && (localStorage.getItem("pasada_role") || "") === "Admin"
 
   const [members, setMembers] = useState<Member[]>([])
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
@@ -544,6 +548,12 @@ export default function TodaClient() {
       
       if (res.ok) {
         const data = await res.json();
+        if (data.status === "ticket_filed") {
+          // Clerk path: the rename is only a request; the Admin decides.
+          showToast(data.message || "Rename request sent to the Admin for approval.", "success");
+          setIsRenameOpen(false);
+          return;
+        }
         showToast(data.message, "success");
         setIsRenameOpen(false);
         window.dispatchEvent(new Event('toda_imported'));
@@ -1240,9 +1250,11 @@ export default function TodaClient() {
         <div className="shrink-0">
           <div className="flex items-center gap-4">
             <h2 className="text-3xl md:text-4xl font-black tracking-tight text-foreground">{safeRouteName}</h2>
-            <Button variant="outline" size="sm" onClick={handleOpenRename} className="h-8 shadow-sm" data-tip="Change this TODA line's code name, and optionally give every SBN here the same prefix.">
-              <Edit3 className="h-3.5 w-3.5 mr-2" /> Rename
-            </Button>
+            {isAdmin && (
+              <Button variant="outline" size="sm" onClick={handleOpenRename} className="h-8 shadow-sm" data-tip="Change this TODA line's code name, and optionally give every SBN here the same prefix. Admin only.">
+                <Edit3 className="h-3.5 w-3.5 mr-2" /> Rename
+              </Button>
+            )}
           </div>
           <p className="text-muted-foreground mt-1 text-sm md:text-base font-bold min-h-[24px]">
             {isLoading && !routeInfo ? "..." : subtitleText}

@@ -35,7 +35,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Header, Request
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, JSONResponse
+import json
+from fastapi.encoders import jsonable_encoder
 import starlette.formparsers
 import uvicorn
 
@@ -52,7 +54,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 # --- CORE SETTINGS & LOGGING ---
-from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, get_pht_now
+from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, ApprovalTicket, get_pht_now
 from ml_engine import run_kmeans_clustering, invalidate_ml_cache
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
@@ -172,6 +174,8 @@ def automated_background_tasks():
             force_log(f"Background task engine error: {e}")
             
         time.sleep(60)
+
+LIFECYCLE_START_ISO = get_pht_now().isoformat()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -319,6 +323,10 @@ class PasswordUpdate(BaseModel):
 class UsernameUpdate(BaseModel):
     new_username: str
 
+class AdminPasswordReset(BaseModel):
+    username: str
+    new_password: str
+
 class RouteDataUpdate(BaseModel):
     population: int
     road_length_km: float
@@ -361,6 +369,13 @@ def alias_route(route: str) -> str:
         return "NPTODA"
     return r
 
+def require_admin(current_user: User) -> None:
+    """One gate for every Admin-only operation. Kept as a helper so the rule
+    lives in exactly one place: if the signed-in account is not an Admin the
+    request stops here with 403, no matter which endpoint called it."""
+    if current_user.role != "Admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
 def get_full_name(user: User) -> str:
     first = getattr(user, 'first_name', "") or ""
     last = getattr(user, 'last_name', "") or ""
@@ -387,10 +402,27 @@ def attach_status(record: FranchiseRecord):
     record.status = compute_record_status(record)
     return record
 
-def log_action(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str,
+def log_action(db: Optional[Session], clerk_name: str, action: str, target_id: str, target_route: str, details: str,
                operator_name: Optional[str] = None, sbn_no: Optional[str] = None, field_changed: Optional[str] = None,
                old_value: Optional[str] = None, new_value: Optional[str] = None, secondary_value: Optional[str] = None, 
                ip_or_source: Optional[str] = None):
+    if db is None:
+        # Some admin actions (template upload) run outside the request's DB
+        # session; open our own so the audit trail never depends on the caller.
+        db = SessionLocal()
+        try:
+            _write_audit(db, clerk_name, action, target_id, target_route, details, operator_name,
+                         sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source)
+        finally:
+            db.close()
+        return
+    _write_audit(db, clerk_name, action, target_id, target_route, details, operator_name,
+                 sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source)
+
+def _write_audit(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str,
+                 operator_name: Optional[str] = None, sbn_no: Optional[str] = None, field_changed: Optional[str] = None,
+                 old_value: Optional[str] = None, new_value: Optional[str] = None, secondary_value: Optional[str] = None,
+                 ip_or_source: Optional[str] = None):
     new_log = AuditLog(
         clerk_name=clerk_name, 
         action=action, 
@@ -825,12 +857,35 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
 
 @app.delete("/api/routes/{route_name}")
 def delete_entire_route(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Wiping a whole TODA line is a two-key action now: a clerk files an
+    # approval ticket, the Admin approves it, THEN the route is deleted.
+    # An Admin calling this directly still executes immediately (their click
+    # IS the approval); a clerk's call becomes a pending ticket instead of
+    # a 403, so the button never dead-ends.
     route_to_delete = alias_route(route_name)
     records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
     
     if not records:
         raise HTTPException(status_code=404, detail="Route not found or already empty.")
-        
+
+    if current_user.role != "Admin":
+        if db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "route_delete",
+                ApprovalTicket.status == "pending",
+                ApprovalTicket.payload_json.contains(route_to_delete)).first():
+            raise HTTPException(status_code=409, detail=f"A delete ticket for {route_to_delete} is already waiting for approval.")
+        ticket = ApprovalTicket(
+            created_by=get_full_name(current_user),
+            ticket_type="route_delete",
+            payload_json=json.dumps({"route": route_to_delete}),
+        )
+        db.add(ticket)
+        db.commit()
+        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, route_to_delete,
+                   f"Requested approval to delete route '{route_to_delete}' ({len(records)} records).")
+        return {"status": "ticket_filed",
+                "message": f"Request sent to the Admin for approval. {len(records)} records stay untouched until they approve."}
+
     count = 0
     for r in records:
         if not r.is_deleted:
@@ -873,7 +928,34 @@ def get_deleted_records(current_user: User = Depends(get_current_user), db: Sess
 
 @app.put("/api/routes/{route_name}/rename")
 def rename_route(route_name: str, payload: RouteRenameRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # A rename rewrites the route code and every SBN prefix on the line at
+    # once. Clerks file a ticket with the proposed names; the Admin's own
+    # rename still runs directly (their click IS the approval).
     old_route = alias_route(route_name)
+    if current_user.role != "Admin":
+        new_route_check = alias_route(payload.new_route_name)
+        if db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "route_rename",
+                ApprovalTicket.status == "pending",
+                ApprovalTicket.payload_json.contains(old_route)).first():
+            raise HTTPException(status_code=409, detail=f"A rename ticket for {old_route} is already waiting for approval.")
+        ticket = ApprovalTicket(
+            created_by=get_full_name(current_user),
+            ticket_type="route_rename",
+            payload_json=json.dumps({"route": old_route,
+                                     "new_route_name": payload.new_route_name,
+                                     "new_prefix": payload.new_prefix,
+                                     "new_driving_route": payload.new_driving_route or ""}),
+            reason=payload.new_driving_route and f"Also set driving route: {payload.new_driving_route}" or None,
+        )
+        db.add(ticket)
+        db.commit()
+        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, old_route,
+                   f"Requested approval to rename route '{old_route}' to '{alias_route(payload.new_route_name)}'.")
+        return {"status": "ticket_filed",
+                "message": f"Rename request sent to the Admin for approval."}
+
+    new_route = alias_route(payload.new_route_name)
     new_route = alias_route(payload.new_route_name)
     new_prefix = payload.new_prefix.strip().upper()
     
@@ -914,8 +996,176 @@ def rename_route(route_name: str, payload: RouteRenameRequest, current_user: Use
     log_action(db, get_full_name(current_user), "RENAME_ROUTE", "0", new_route, f"Renamed route {old_route} to {new_route} with prefix {new_prefix}. Updated {count} records.")
     return {"status": "success", "message": f"Successfully renamed {count} records to {new_route}.", "new_route": new_route}
 
+# --- ADMIN APPROVAL TICKETS -------------------------------------------
+# 25010 Characteristic: Accountability. The heavy actions (route delete,
+# route rename, record restore, database restore) used to be either
+# Admin-only (clerk hit a 403 wall) or open to whoever clicked. Now a clerk
+# FILES a ticket, the Admin APPROVES it, and only then does the action run.
+# Every filing, approval, and rejection lands in the audit log.
+
+class TicketDecision(BaseModel):
+    note: str = ""
+
+def _ticket_brief(t: ApprovalTicket) -> dict:
+    return {
+        "id": t.id, "created_at": t.created_at.isoformat() if t.created_at else None,
+        "created_by": t.created_by, "ticket_type": t.ticket_type,
+        "payload": json.loads(t.payload_json or "{}"), "reason": t.reason,
+        "status": t.status, "decided_by": t.decided_by,
+        "decided_at": t.decided_at.isoformat() if t.decided_at else None,
+        "result_note": t.result_note,
+    }
+
+@app.get("/admin/tickets")
+def list_tickets(status_filter: str = "pending", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Approval queue for the Admin Console. Clerks also read it to see their
+    own requests' status, so the list is open to any signed-in account."""
+    q = db.query(ApprovalTicket)
+    if status_filter != "all":
+        q = q.filter(ApprovalTicket.status == status_filter)
+    tickets = q.order_by(ApprovalTicket.created_at.desc()).limit(200).all()
+    return [_ticket_brief(t) for t in tickets]
+
+@app.post("/admin/tickets/{ticket_id}/approve")
+def approve_ticket(ticket_id: str, decision: TicketDecision = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    ticket = db.query(ApprovalTicket).filter(ApprovalTicket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    if ticket.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Ticket already {ticket.status}.")
+
+    payload = json.loads(ticket.payload_json or "{}")
+    admin_name = get_full_name(current_user)
+
+    if ticket.ticket_type == "route_delete":
+        route_to_delete = payload.get("route", "")
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
+        count = 0
+        for r in records:
+            if not r.is_deleted:
+                r.is_deleted = True
+                r.updated_at = get_pht_now()
+                count += 1
+        db.commit()
+        invalidate_ml_cache(route_to_delete)
+        clear_api_caches()
+        ticket.result_note = f"Deleted {count} records in {route_to_delete}."
+        log_action(db, admin_name, "DELETE_ROUTE", ticket.id, route_to_delete,
+                   f"Approved ticket: deleted route '{route_to_delete}' ({count} records). Requested by {ticket.created_by}.")
+    elif ticket.ticket_type == "route_rename":
+        old_route = payload.get("route", "")
+        new_route = alias_route(payload.get("new_route_name", ""))
+        new_prefix = str(payload.get("new_prefix", "")).strip().upper()
+        new_driving = str(payload.get("new_driving_route", "")).strip().upper()
+        records = db.query(FranchiseRecord).filter(FranchiseRecord.route == old_route, FranchiseRecord.is_deleted == False).all()
+        if not records:
+            ticket.status = "rejected"
+            ticket.decided_by = admin_name
+            ticket.decided_at = get_pht_now()
+            ticket.result_note = "Rejected automatically: the route has no active records anymore."
+            db.commit()
+            raise HTTPException(status_code=404, detail="Route has no active records; ticket rejected automatically.")
+        count = 0
+        for r in records:
+            r.route = new_route
+            if new_driving:
+                r.driving_route = new_driving
+            if new_prefix:
+                sbn_int = extract_sbn_integer(r.sbn_no)
+                if sbn_int is not None:
+                    padding = 4 if sbn_int >= 1000 else 3
+                    base_sbn = f"{new_prefix}-{sbn_int:0{padding}d}"
+                    is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+                    r.sbn_no = format_sbn_with_year(base_sbn, r.issue_date, is_vacant)
+            r.updated_at = get_pht_now()
+            count += 1
+        old_route_info = db.query(RouteData).filter(RouteData.route_name == old_route).first()
+        if old_route_info and old_route != new_route:
+            new_route_info = db.query(RouteData).filter(RouteData.route_name == new_route).first()
+            if not new_route_info:
+                db.add(RouteData(route_name=new_route, population=old_route_info.population, road_length_km=old_route_info.road_length_km))
+            db.delete(old_route_info)
+        db.commit()
+        invalidate_ml_cache(old_route)
+        invalidate_ml_cache(new_route)
+        clear_api_caches()
+        ticket.result_note = f"Renamed {count} records: {old_route} is now {new_route}."
+        log_action(db, admin_name, "RENAME_ROUTE", ticket.id, new_route,
+                   f"Approved ticket: renamed {old_route} to {new_route} ({count} records). Requested by {ticket.created_by}.")
+    elif ticket.ticket_type == "record_restore":
+        record_ids = payload.get("record_ids", [])
+        restored = 0
+        for rid in record_ids:
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
+            if rec and rec.is_deleted:
+                rec.is_deleted = False
+                rec.updated_at = get_pht_now()
+                restored += 1
+        db.commit()
+        clear_api_caches()
+        ticket.result_note = f"Restored {restored} record(s)."
+        log_action(db, admin_name, "RESTORE_RECORD", ticket.id, "SYSTEM",
+                   f"Approved ticket: restored {restored} record(s). Requested by {ticket.created_by}.")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown ticket type: {ticket.ticket_type}")
+
+    ticket.status = "approved"
+    ticket.decided_by = admin_name
+    ticket.decided_at = get_pht_now()
+    db.commit()
+    return {"status": "approved", "result_note": ticket.result_note}
+
+@app.post("/admin/tickets/{ticket_id}/reject")
+def reject_ticket(ticket_id: str, decision: TicketDecision = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    ticket = db.query(ApprovalTicket).filter(ApprovalTicket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    if ticket.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Ticket already {ticket.status}.")
+    note = (decision.note if decision and decision.note else "") or "No reason given."
+    ticket.status = "rejected"
+    ticket.decided_by = get_full_name(current_user)
+    ticket.decided_at = get_pht_now()
+    ticket.result_note = note
+    db.commit()
+    log_action(db, get_full_name(current_user), "TICKET_REJECTED", ticket.id, "SYSTEM",
+               f"Rejected {ticket.ticket_type} ticket from {ticket.created_by}: {note}")
+    return {"status": "rejected", "result_note": ticket.result_note}
+
+@app.post("/api/restore-records/ticket")
+def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Clerk asks to bring back deleted records. Admin approves from the
+    console. Accepts record_ids (specific rows) or {'all': True} for every
+    currently deleted record."""
+    record_ids = payload.get("record_ids", [])
+    want_all = bool(payload.get("all"))
+    if not want_all and not record_ids:
+        raise HTTPException(status_code=400, detail="Nothing to restore: pass record_ids or all=true.")
+    if want_all:
+        record_ids = [r.id for r in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()]
+    if db.query(ApprovalTicket).filter(ApprovalTicket.ticket_type == "record_restore",
+                                       ApprovalTicket.status == "pending").first():
+        raise HTTPException(status_code=409, detail="A restore ticket is already waiting for approval.")
+    ticket = ApprovalTicket(
+        created_by=get_full_name(current_user),
+        ticket_type="record_restore",
+        payload_json=json.dumps({"record_ids": record_ids}),
+        reason=payload.get("reason"),
+    )
+    db.add(ticket)
+    db.commit()
+    log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, "SYSTEM",
+               f"Requested approval to restore {len(record_ids)} deleted record(s).")
+    return {"status": "ticket_filed",
+            "message": f"Restore request sent to the Admin for approval ({len(record_ids)} record(s))."}
+
 @app.post("/admin/refresh-db")
 def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # The refresh rewrites SBNs, clears bad dates and merges duplicates across
+    # the whole registry in one pass. Too sweeping for a clerk's normal day.
+    require_admin(current_user)
     all_records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
     route_sbn_map = {}
     deleted_count = 0
@@ -1026,6 +1276,13 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
     log_action(db, "SYSTEM", "USER_REGISTRATION", "0", "SYSTEM", f"Registered first-run account for {username_upper}")
     return {"message": "Account created"}
+
+@app.get("/signup/open")
+def signup_open(db: Session = Depends(get_db)):
+    # Lets the login page hide the Register link once an account exists, so
+    # nobody clicks a button that can only ever answer 403. Reveals nothing
+    # sensitive: just whether first-run registration is still possible.
+    return {"open": db.query(User).count() == 0}
 
 # --- LOGIN RATE LIMITING & ACCOUNT LOCKOUT ---
 # 25010 Characteristic: Security.
@@ -1354,6 +1611,96 @@ def update_username(payload: UsernameUpdate, current_user: User = Depends(get_cu
     log_action(db, get_full_name(current_user), "UPDATE_USERNAME", "0", "SYSTEM", f"Changed username from {old_username} to {payload.new_username.upper()}")
     return {"status": "success"}
 
+# --- ADMIN BOOTSTRAP (the "no admin exists" problem) ---
+# Registration closes once ANY account exists, so an office that started with
+# a Clerk has no Admin and no way to make one from inside the app: the fix is
+# a one-time, self-service bootstrap. When no Admin exists, the FIRST signed-in
+# account may promote itself by proving it knows its own password. When an
+# Admin already exists the endpoint always answers 403, so it can never be
+# used to mint a second admin without the real admin's approval (that path is
+# the Manage Accounts panel). The whole attempt is written to the audit log,
+# including the rejected ones, so a sneaky self-promotion leaves a trace.
+class AdminBootstrap(BaseModel):
+    password: str
+
+@app.get("/admin/needed")
+def admin_needed(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {"needed": db.query(User).filter(User.role == "Admin").count() == 0}
+
+@app.post("/admin/bootstrap")
+def admin_bootstrap(payload: AdminBootstrap, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    has_admin = db.query(User).filter(User.role == "Admin").count() > 0
+    if has_admin:
+        log_action(db, get_full_name(current_user), "ADMIN_BOOTSTRAP_DENIED", "0", "SYSTEM",
+                   "Bootstrap refused: an Admin already exists.")
+        raise HTTPException(status_code=403, detail="An Admin account already exists. Ask that Admin to manage accounts.")
+    if not pwd_context.verify(payload.password, current_user.password_hash or ""):
+        log_action(db, get_full_name(current_user), "ADMIN_BOOTSTRAP_DENIED", "0", "SYSTEM",
+                   "Bootstrap refused: password did not match.")
+        raise HTTPException(status_code=401, detail="Password did not match this account.")
+    current_user.role = "Admin"
+    db.commit()
+    log_action(db, get_full_name(current_user), "ADMIN_BOOTSTRAP", "0", "SYSTEM",
+               f"First-run bootstrap: {current_user.username} became the office Admin.")
+    return {"status": "success", "role": "Admin", "message": f"{current_user.username} is now the office Admin."}
+
+# --- ADMIN USER MANAGEMENT ---
+# 25010 Characteristic: Functional Suitability. Registration closes after the
+# first-run account exists, and synced accounts used to be log-in-only stubs,
+# which left an office with NO way to add a clerk or fix a forgotten password
+# from another computer. These Admin-only endpoints close that gap; every
+# action lands in the audit log. Password resets also clear any login-lockout
+# mirror so a reset user is not greeted by a stale 15-minute lock.
+@app.get("/users")
+def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    users = db.query(User).order_by(User.username).all()
+    return [
+        {"username": u.username, "full_name": get_full_name(u), "role": u.role,
+         "has_password": bool(u.password_hash) and u.password_hash != "SYNCED_NO_PASSWORD"}
+        for u in users
+    ]
+
+@app.post("/users")
+def admin_create_user(payload: UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    if payload.role not in ("Admin", "Clerk"):
+        raise HTTPException(status_code=400, detail="Role must be Admin or Clerk")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    username_upper = payload.username.strip().upper()
+    if not username_upper:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if db.query(User).filter(User.username == username_upper).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    new_user = User(
+        first_name=payload.first_name.strip().upper(),
+        last_name=payload.last_name.strip().upper(),
+        username=username_upper,
+        password_hash=pwd_context.hash(payload.password),
+        role=payload.role,
+    )
+    db.add(new_user)
+    db.commit()
+    log_action(db, get_full_name(current_user), "CREATE_USER", "0", "SYSTEM", f"Admin created {payload.role} account {username_upper}")
+    return {"status": "success", "message": f"Account {username_upper} created."}
+
+@app.put("/users/reset-password")
+def admin_reset_password(payload: AdminPasswordReset, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    target = db.query(User).filter(User.username == payload.username.strip().upper()).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+    target.password_hash = pwd_context.hash(payload.new_password)
+    db.commit()
+    _clear_persisted_lock(target.username, db)
+    with _login_lock:
+        _login_attempts.pop(target.username, None)
+    log_action(db, get_full_name(current_user), "RESET_PASSWORD", "0", "SYSTEM", f"Admin reset the password of {target.username}")
+    return {"status": "success", "message": f"Password of {target.username} reset."}
+
 @app.get("/settings")
 def get_settings(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return init_settings(db)
@@ -1475,17 +1822,202 @@ def sync_pull(since: str, request: Request, db: Session = Depends(get_db)):
     records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
     users = db.query(User).all()
     
-    safe_users = []
-    # DATA LEAK GUARD: password and security-answer hashes stay on the machine
-    # that owns the account. Sync shares identity fields only.
+    # PASSWORD ROAMING: the cluster is HMAC-trusted (same office LAN, shared
+    # secret, signed pulls), so the bcrypt password hash travels with the
+    # account. An account created on one computer can then sign in on every
+    # computer — bcrypt hashes are safe to share between machines that
+    # already trust each other. Only the SECURITY-ANSWER hashes stay local:
+    # recovery is deliberately answered on the machine that set the
+    # questions, and leaking answer hashes widens an offline-guessing attack
+    # to the whole cluster for no benefit.
     SENSITIVE_USER_COLUMNS = {
-        "password_hash", "security_a1_hash", "security_a2_hash", "security_a3_hash"
+        "security_a1_hash", "security_a2_hash", "security_a3_hash"
     }
+    safe_users = []
     for u in users:
         u_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns if c.name not in SENSITIVE_USER_COLUMNS}
         safe_users.append(u_dict)
         
     return {"records": [attach_status(r) for r in records], "users": safe_users}
+
+# --- ADMIN CONSOLE: TEMPLATE MANAGEMENT ---
+# 25010 Characteristic: Maintainability. The certificate (template.docx) and
+# the TODA summary (dashboard_template.docx) are Word files with placeholder
+# tokens ([SBN_NO], [NAME], ...). When the LGU amends the form, the office
+# uploads the amended .docx here instead of waiting for a rebuild of the
+# installer. Uploads are validated before replacing anything: a file that is
+# not a readable .docx is rejected and the previous template stays in place.
+# The previous file is kept beside the new one as a .bak, so one bad upload
+# can always be undone by hand. Every upload lands in the audit log.
+TEMPLATE_DIR = BASE_DIR
+# Templates ship inside the PyInstaller bundle (sys._MEIPASS at runtime), so
+# "installed" must look where the doc generator actually reads them, not at
+# the data directory. Uploaded replacements go to the data directory and the
+# doc generator's resource lookup finds them there first (it checks _MEIPASS
+# and falls back to its own folder; the upload path below mirrors that).
+try:
+    from doc_generator import get_resource_path as _tpl_resource_path
+    _BUNDLED_TEMPLATE_DIR = os.path.dirname(_tpl_resource_path("template.docx"))
+except Exception:
+    _BUNDLED_TEMPLATE_DIR = os.path.abspath(os.path.dirname(__file__))
+ALLOWED_TEMPLATE_FILES = {
+    "certificate": "template.docx",
+    "toda_summary": "dashboard_template.docx",
+}
+MAX_TEMPLATE_BYTES = 20 * 1024 * 1024  # a real form is a few hundred KB
+
+def _template_status(template_key: str) -> dict:
+    filename = ALLOWED_TEMPLATE_FILES[template_key]
+    # A template is "installed" when the doc generator can actually load it:
+    # the bundled copy inside the PyInstaller bundle, or an uploaded copy in
+    # the data directory (upload_template's target, which wins if present).
+    data_copy = os.path.join(TEMPLATE_DIR, filename)
+    bundled = os.path.join(_BUNDLED_TEMPLATE_DIR, filename)
+    path = data_copy if os.path.exists(data_copy) else bundled
+    return {
+        "key": template_key,
+        "filename": filename,
+        "installed": os.path.exists(path),
+        "size": os.path.getsize(path) if os.path.exists(path) else 0,
+        "modified": (datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
+                     if os.path.exists(path) else None),
+    }
+
+@app.get("/admin/templates")
+def list_templates(current_user: User = Depends(get_current_user)):
+    require_admin(current_user)
+    return [_template_status(key) for key in sorted(ALLOWED_TEMPLATE_FILES)]
+
+@app.post("/admin/templates/{template_key}")
+async def upload_template(template_key: str, file: UploadFile = File(...),
+                          current_user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    require_admin(current_user)
+    if template_key not in ALLOWED_TEMPLATE_FILES:
+        raise HTTPException(status_code=404, detail="Unknown template. Use certificate or toda_summary.")
+    filename = ALLOWED_TEMPLATE_FILES[template_key]
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Template must be a .docx file.")
+    data = await file.read()
+    if len(data) > MAX_TEMPLATE_BYTES:
+        raise HTTPException(status_code=413, detail="Template exceeds the 20 MB limit.")
+
+    from docx import Document as _Doc
+    from io import BytesIO as _BytesIO
+    try:
+        doc = _Doc(_BytesIO(data))
+        token_count = sum(
+            1 for p in doc.paragraphs for token in ("[SBN_NO]", "{{SBN_NO}}", "[NAME]", "{{NAME}}")
+            if token in p.text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="File is not a readable Word document.")
+
+    target = os.path.join(TEMPLATE_DIR, filename)
+    backup = os.path.join(TEMPLATE_DIR, filename + ".bak")
+    if os.path.exists(target):
+        shutil.copy2(target, backup)
+    with open(target, "wb") as f:
+        f.write(data)
+    # Audit through THIS request's session so the row lands in the same
+    # database the upload belongs to (a test DB, or another office PC's DB),
+    # never silently in the first machine's production database.
+    log_action(db=db, clerk_name=get_full_name(current_user), action="TEMPLATE_UPLOAD",
+               target_id="0", target_route="SYSTEM",
+               details=f"Uploaded new {filename} ({len(data)} bytes, {token_count} SBN/NAME tokens found).")
+    return {"status": "success", "template": filename, "size": len(data),
+            "recognized_tokens": token_count,
+            "warning": None if token_count > 0 else "No [SBN_NO]/[NAME] tokens found. Check the document before printing certificates."}
+
+@app.get("/admin/diagnostics")
+def admin_diagnostics(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """One call for the Admin Console's technical tab: what this computer is
+    running, how the database is doing, what the sync engine sees, and the
+    tail of the crash log. Read-only; safe to call any time."""
+    require_admin(current_user)
+
+    # DATABASE: SQLite's own integrity check is cheap and answers "is my data
+    # file still healthy?" without locking the office out of anything.
+    integrity = "unknown"
+    record_count = 0
+    try:
+        row = db.execute(text("PRAGMA integrity_check")).fetchone()
+        integrity = row[0] if row else "unknown"
+        record_count = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).count()
+    except Exception:
+        pass
+
+    # BACKUPS: newest file produced by the nightly backup thread.
+    backup_dir = os.path.join(BASE_DIR, "backups")
+    latest_backup = None
+    if os.path.isdir(backup_dir):
+        candidates = [f for f in os.listdir(backup_dir) if f.endswith(".zip")]
+        if candidates:
+            newest = max(candidates, key=lambda f: os.path.getmtime(os.path.join(backup_dir, f)))
+            latest_backup = {
+                "file": newest,
+                "modified": datetime.fromtimestamp(os.path.getmtime(os.path.join(backup_dir, newest))).isoformat(),
+                "size": os.path.getsize(os.path.join(backup_dir, newest)),
+            }
+
+    # CRASH LOG TAIL: the last lines, newest last, capped so the payload
+    # stays small on a slow office network.
+    crash_tail: list[str] = []
+    try:
+        with open(crash_log_path, "r", encoding="utf-8", errors="replace") as f:
+            crash_tail = f.read().splitlines()[-60:]
+    except Exception:
+        pass
+
+    users_count = db.query(User).count()
+    admins = [u.username for u in db.query(User).filter(User.role == "Admin").all()]
+    return {
+        "runtime": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "machine": platform.node(),
+            "pid": os.getpid(),
+            "started": LIFECYCLE_START_ISO,
+        },
+        "database": {"integrity": integrity, "records": record_count, "users": users_count, "admins": admins},
+        "sync": {
+            "local_ip": get_local_ip(),
+            "api_port": sync_engine.API_PORT,
+            "peers": sorted(PEERS),
+            "peer_names": dict(sync_engine.PEER_NAMES),
+            "computer_name": sync_engine.COMPUTER_NAME,
+        },
+        "backup": latest_backup,
+        "crash_log_tail": crash_tail,
+    }
+
+@app.get("/admin/audit-overview")
+def admin_audit_overview(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Operational picture for the Admin Console: who did what, how much, and
+    when the office was last active. Counts only, no record payload."""
+    require_admin(current_user)
+    last = db.query(AuditLog).order_by(AuditLog.timestamp.desc()).first()
+    week_ago = get_pht_now() - timedelta(days=7)
+    actions = (
+        db.query(AuditLog.action, func.count(AuditLog.id))
+        .filter(AuditLog.timestamp >= week_ago)
+        .group_by(AuditLog.action)
+        .all()
+    )
+    by_user = (
+        db.query(AuditLog.clerk_name, func.count(AuditLog.id))
+        .filter(AuditLog.timestamp >= week_ago)
+        .group_by(AuditLog.clerk_name)
+        .all()
+    )
+    return {
+        "total_logs": db.query(AuditLog).count(),
+        "logs_last_7_days": sum(c for _, c in actions),
+        "last_activity": last.timestamp.isoformat() if last and last.timestamp else None,
+        "actions_last_7_days": sorted(
+            ({"action": a, "count": c} for a, c in actions), key=lambda x: -x["count"]),
+        "users_last_7_days": sorted(
+            ({"user": (u or "SYSTEM"), "count": c} for u, c in by_user), key=lambda x: -x["count"]),
+    }
 
 @app.post("/api/operators")
 def create_operator_api(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1741,6 +2273,9 @@ MAX_DB_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB — a full registry DB is ~100
 
 @app.post("/upload/database")
 async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    # Importing a whole .db file can add or overwrite thousands of records;
+    # that is an administrative migration, not part of a clerk's workflow.
+    require_admin(current_user)
     temp_db_path = os.path.join(BASE_DIR, f"temp_import_{uuid.uuid4().hex}.db")
     written = 0
     with open(temp_db_path, "wb") as buffer:
@@ -1833,6 +2368,10 @@ def backup_database(current_user: User = Depends(get_current_user), db: Session 
 
 @app.post("/restore/database")
 async def restore_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    # Full Restore replaces the whole registry with the uploaded backup.
+    # Same rule as /upload/database: Admin only. (Found in the full endpoint
+    # audit: the merge import was gated but this one was not.)
+    require_admin(current_user)
     temp_db_path = os.path.join(BASE_DIR, f"temp_restore_{uuid.uuid4().hex}.db")
     written = 0
     with open(temp_db_path, "wb") as buffer:
@@ -2306,8 +2845,12 @@ def get_route_records(route_name: str, current_user: User = Depends(get_current_
     route_upper = alias_route(route_name)
     
     global _ROUTE_RECORDS_CACHE
-    if route_upper in _ROUTE_RECORDS_CACHE and time.time() - _ROUTE_RECORDS_CACHE[route_upper]["time"] < 60:
-        return _ROUTE_RECORDS_CACHE[route_upper]["data"]
+    # Serve the fully serialized JSON payload when cached. Serializing 6,137
+    # records to a ~3 MB JSON body costs over a second even when the ORM
+    # objects themselves are cached, so the cache stores the finished bytes.
+    cached = _ROUTE_RECORDS_CACHE.get(route_upper)
+    if cached and time.time() - cached["time"] < 60:
+        return JSONResponse(content=cached["data"], headers={"X-Cache": "hit"})
 
     if route_upper == "ALL":
         deduped_records = get_all_deduplicated_records(db)
@@ -2332,8 +2875,11 @@ def get_route_records(route_name: str, current_user: User = Depends(get_current_
     sorted_records = sorted(deduped_records, key=get_sbn_sort_key)
     result = [attach_status(r) for r in sorted_records]
     
-    _ROUTE_RECORDS_CACHE[route_upper] = {"time": time.time(), "data": result}
-    return result
+    _ROUTE_RECORDS_CACHE[route_upper] = {
+        "time": time.time(),
+        "data": jsonable_encoder(result),
+    }
+    return JSONResponse(content=_ROUTE_RECORDS_CACHE[route_upper]["data"], headers={"X-Cache": "miss"})
 
 @app.get("/api/route-info/{route_name}")
 def get_route_info(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -2624,9 +3170,9 @@ def get_global_stats(db: Session = Depends(get_db), current_user: User = Depends
         "monthly_trend": monthly_trend
     }
     
-    _GLOBAL_STATS_CACHE["data"] = res
+    _GLOBAL_STATS_CACHE["data"] = jsonable_encoder(res)
     _GLOBAL_STATS_CACHE["time"] = time.time()
-    return res
+    return JSONResponse(content=_GLOBAL_STATS_CACHE["data"])
 
 @app.get("/api/toda-summary")
 def api_get_toda_summary(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -2691,7 +3237,13 @@ def get_record_history(record_id: str, current_user: User = Depends(get_current_
 def get_log_actions(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # kasama na rin dito yung routes para may laman yung TODA filter sa logs page
     # (dating wala, kaya puro fallback list ang nakikita ng user)
-    routes = db.query(AuditLog.target_route).filter(AuditLog.target_route != None, AuditLog.target_route != "").distinct().all()
+    # ROUTES MEAN TODA LINES: system-level entries (route "SYSTEM"/"ALL") are
+    # not TODA lines, so they never appear in the route filter. Those events
+    # stay fully visible in the table and through the Actions filter.
+    _NON_TODA_ROUTES = {"SYSTEM", "ALL", ""}
+    routes = db.query(AuditLog.target_route).filter(
+        AuditLog.target_route != None,
+        AuditLog.target_route.notin_(_NON_TODA_ROUTES)).distinct().all()
     actions = db.query(AuditLog.action).filter(AuditLog.action != None).distinct().all()
     return {
         "routes": sorted({r[0].upper() for r in routes if r[0]}),
@@ -2763,7 +3315,13 @@ def get_audit_logs(
     query = db.query(AuditLog)
     
     if route and route.upper() != "ALL":
-        query = query.filter(AuditLog.target_route == alias_route(route))
+        # Route filter = TODA lines only. "SYSTEM" is not a line; selecting it
+        # would silently hide every row, so a SYSTEM pick shows the system
+        # entries directly instead.
+        if route.upper() == "SYSTEM":
+            query = query.filter(AuditLog.target_route.in_(["SYSTEM", ""]))
+        else:
+            query = query.filter(AuditLog.target_route == alias_route(route))
     if action and action.upper() != "ALL":
         query = query.filter(AuditLog.action == action.upper())
         
@@ -2869,7 +3427,12 @@ def export_audit_logs(
     query = db.query(AuditLog)
     
     if route and route.upper() != "ALL":
-        query = query.filter(AuditLog.target_route == alias_route(route))
+        # Same TODA-only rule as /logs: SYSTEM entries come through the
+        # SYSTEM choice, never through a TODA line name.
+        if route.upper() == "SYSTEM":
+            query = query.filter(AuditLog.target_route.in_(["SYSTEM", ""]))
+        else:
+            query = query.filter(AuditLog.target_route == alias_route(route))
     if action and action.upper() != "ALL":
         query = query.filter(AuditLog.action == action.upper())
         

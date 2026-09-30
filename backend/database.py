@@ -126,6 +126,29 @@ class RouteData(Base):
     population = Column(Integer, default=5000)      
     road_length_km = Column(Float, default=5.0)     
 
+class ApprovalTicket(Base):
+    """ADMIN APPROVAL TICKETS.
+
+    A clerk can ASK for the big, hard-to-undo actions (delete a whole route,
+    rename a route, restore deleted records, restore the database from a
+    backup) without ever being able to DO them alone. The request lands here
+    as a ticket; the Admin approves or rejects it; the action runs only on
+    approval. One row = one proposed action, with the payload it needs stored
+    as JSON text. Rejected tickets stay for the record (AUDIT-ability) and are
+    never re-run.
+    """
+    __tablename__ = "approval_tickets"
+    id = Column(String, primary_key=True, default=generate_uuid, index=True)
+    created_at = Column(DateTime, default=get_pht_now)
+    created_by = Column(String, index=True)          # full name of requester
+    ticket_type = Column(String, index=True)         # route_delete | route_rename | record_restore | db_restore
+    payload_json = Column(String)                    # arguments the action needs
+    reason = Column(String, nullable=True)           # clerk's why, shown to admin
+    status = Column(String, default="pending", index=True)  # pending | approved | rejected
+    decided_by = Column(String, nullable=True)       # admin who decided
+    decided_at = Column(DateTime, nullable=True)
+    result_note = Column(String, nullable=True)      # what happened on execution
+
 Base.metadata.create_all(bind=engine)
 
 # --- UNIVERSAL DB MIGRATION HEALING ---
@@ -139,7 +162,8 @@ def ensure_schema_upgrades(engine):
             ("franchise_records", FranchiseRecord),
             ("audit_logs", AuditLog),
             ("system_settings", SystemSettings),
-            ("route_data", RouteData)
+            ("route_data", RouteData),
+            ("approval_tickets", ApprovalTicket)
         ]:
             if table_name in existing_tables:
                 db_columns = [col['name'] for col in inspector.get_columns(table_name)]

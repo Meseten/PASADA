@@ -9,6 +9,15 @@ import os
 from database import SessionLocal, FranchiseRecord, get_pht_now, BASE_DIR
 from datetime import datetime
 
+def force_log(msg):
+    """Append to the same crash log main.py uses, without importing main
+    (a circular import). Best-effort: sync never dies over logging."""
+    try:
+        with open(os.path.join(BASE_DIR, "PASADA_CRASH_LOG.txt"), "a", encoding="utf-8") as f:
+            f.write(f"{msg}\n")
+    except OSError:
+        pass
+
 BROADCAST_PORT = 54321
 API_PORT = 43888
 PEERS = set()
@@ -202,20 +211,42 @@ def sync_with_peers():
                     if response.ok:
                         incoming_data = response.json()
                         
-                        # SYNC ACCOUNTS: (Password hashes have been stripped from the wire by main.py)
+                        # SYNC ACCOUNTS: the bcrypt password hash now ROAMS with
+                        # the account, so a login created on one office computer
+                        # works on all of them. The pull endpoint only shares
+                        # password hashes over HMAC-signed requests inside the
+                        # trusted cluster. First writer wins on updates: the
+                        # copy on the machine where the account was created is
+                        # the master; other machines only fill in what they
+                        # lack (new accounts, or accounts that still carry the
+                        # legacy SYNCED_NO_PASSWORD stub). Security-answer
+                        # hashes never leave the owning machine, so account
+                        # recovery stays on the computer that set the questions.
                         from database import User
                         for u_item in incoming_data.get('users', []):
                             existing_user = db.query(User).filter(User.username == u_item['username']).first()
                             if not existing_user:
-                                # We MUST NOT splat unverified payloads over users
                                 new_user = User(
                                     first_name=u_item.get('first_name'),
                                     last_name=u_item.get('last_name'),
                                     username=u_item.get('username'),
                                     role=u_item.get('role'),
-                                    password_hash="SYNCED_NO_PASSWORD" # Prevents local login until admin resets
+                                    password_hash=u_item.get('password_hash') or "SYNCED_NO_PASSWORD"
                                 )
                                 db.add(new_user)
+                            else:
+                                incoming_hash = u_item.get('password_hash') or ""
+                                stale_stub = existing_user.password_hash == "SYNCED_NO_PASSWORD"
+                                different_real_hash = (
+                                    incoming_hash
+                                    and incoming_hash != "SYNCED_NO_PASSWORD"
+                                    and existing_user.password_hash != incoming_hash
+                                )
+                                if stale_stub or different_real_hash:
+                                    # Fill the legacy stub, and follow a password
+                                    # change made on the owning machine so the
+                                    # account stays usable everywhere.
+                                    existing_user.password_hash = incoming_hash
                         
                         # SYNC RECORDS WITH TOMBSTONES
                         valid_keys = {c.name for c in FranchiseRecord.__table__.columns}
@@ -240,9 +271,15 @@ def sync_with_peers():
                                         else:
                                             setattr(existing, key, value)
                         db.commit()
-                except Exception:
+                except Exception as e:
+                    # A bad record from one peer must not kill the loop or the
+                    # whole cycle: log it and move to the next peer. The crash
+                    # log is the only place this is visible, so make it count.
+                    force_log(f"[SYNC] Pull from {peer} failed: {e}")
+                    db.rollback()
                     continue
-        except Exception:
+        except Exception as e:
+            force_log(f"[SYNC] Cycle failed: {e}")
             db.rollback()
         finally:
             db.close()

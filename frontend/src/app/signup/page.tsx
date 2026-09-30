@@ -4,13 +4,30 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
-import { API_URL } from "@/lib/api";
+import { API_URL, describeAuthError } from "@/lib/api";
 
 function ThemeToggle() {
     const { theme, setTheme } = useTheme();
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => setMounted(true), []);
+    if (!mounted) return <div className="absolute top-6 right-6 w-10 h-10" />;
+    // Same position and status semantics as the login page's toggle: an
+    // absolutely-positioned 40px circle. WebView2 on older Windows 10 builds
+    // mis-renders flex-centered icon pairs, so the plain variant here keeps
+    // one icon per state, exactly like the login page.
+    const isDark = theme === "dark";
+    const tooltip = isDark
+        ? "Dark Mode is ON. Click to switch to Light Mode."
+        : "Light Mode is ON. Click to switch to Dark Mode.";
     return (
-        <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="absolute top-6 right-6 p-2 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors">
-            {theme === "dark" ? <Sun size={20} className="text-slate-200" /> : <Moon size={20} className="text-slate-700" />}
+        <button
+            onClick={() => setTheme(isDark ? "light" : "dark")}
+            data-tip={tooltip}
+            aria-label={tooltip}
+            title={tooltip}
+            className="absolute top-6 right-6 flex items-center justify-center w-10 h-10 rounded-full bg-card border shadow-sm hover:bg-accent transition-colors z-50"
+        >
+            {isDark ? <Sun size={20} className="text-amber-500" /> : <Moon size={20} className="text-slate-700" />}
         </button>
     );
 }
@@ -87,11 +104,11 @@ export default function Signup() {
             if (res.ok) {
                 router.push("/");
             } else {
-                const errData = await res.json();
+                const errData = await res.json().catch(() => ({}));
                 setError(errData.detail || "Registration failed. Username may already be taken.");
             }
         } catch (err) {
-            setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");
+            setError(describeAuthError(err, "Cannot connect to PASADA. Open the PASADA program on this computer first, then try again."));
         } finally {
             setLoading(false);
         }
@@ -176,6 +193,8 @@ export default function Signup() {
                                 <button
                                     type="button"
                                     onClick={() => setShowPassword(!showPassword)}
+                                    aria-label={showPassword ? "Hide password" : "Show password"}
+                                    data-tip={showPassword ? "Hide the password" : "Show the password"}
                                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-900 dark:hover:text-white p-1 transition-colors"
                                 >
                                     {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

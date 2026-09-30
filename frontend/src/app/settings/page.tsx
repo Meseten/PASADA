@@ -62,6 +62,13 @@ interface Toast {
   type: 'success' | 'error';
 }
 
+interface ManagedUser {
+  username: string;
+  full_name: string;
+  role: string;
+  has_password: boolean;
+}
+
 export default function Settings() {
   const [activeTab, setActiveTab] = useState("general");
   const [chairName, setChairName] = useState("");
@@ -97,6 +104,14 @@ export default function Settings() {
   const [exportLoading, setExportLoading] = useState(false);
   const [isCleaningDb, setIsCleaningDb] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // ADMIN USER MANAGEMENT (Security tab): only rendered for Admin accounts.
+  const role = typeof window !== "undefined" ? localStorage.getItem("pasada_role") || "Clerk" : "Clerk";
+  const isAdmin = role === "Admin";
+  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
+  const [newUser, setNewUser] = useState({ first_name: "", last_name: "", password: "", role: "Clerk" });
+  const [resetTarget, setResetTarget] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [usersLoading, setUsersLoading] = useState(false);
 
   const currentYear = new Date().getFullYear();
   
@@ -405,9 +420,7 @@ export default function Settings() {
       showToast("Network error. Could not change username.", "error");
       setLoading(false);
     }
-  };
-
-  const handlePasswordUpdate = async (e: React.FormEvent) => {
+  };  const handlePasswordUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPassword.length < 8) {
       showToast("Password must be at least 8 characters long.", "error");
@@ -427,10 +440,95 @@ export default function Settings() {
         const err = await res.json();
         showToast(err.detail || "Failed to change password.", "error");
       }
+
     } catch (err) {
       showToast("Network error. Could not change password.", "error");
     }
     setLoading(false);
+  };
+
+  // ADMIN USER MANAGEMENT handlers. The backend rejects non-Admin callers
+  // with 403, so the UI below is the only entry point for clerks.
+  const loadManagedUsers = async () => {
+    setUsersLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/users`);
+      if (res.ok) {
+        setManagedUsers(await res.json());
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Could not load accounts.", "error");
+      }
+    } catch (err) {
+      showToast("Network error. Could not load accounts.", "error");
+    }
+    setUsersLoading(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === "security" && isAdmin) loadManagedUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newUser.password.length < 8) {
+      showToast("Password must be at least 8 characters long.", "error");
+      return;
+    }
+    setUsersLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          first_name: newUser.first_name.trim().toUpperCase(),
+          last_name: newUser.last_name.trim().toUpperCase(),
+          username: `${newUser.first_name.trim()} ${newUser.last_name.trim()}`.toUpperCase(),
+          password: newUser.password,
+          role: newUser.role,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showToast(data.message || "Account created. It syncs to the other computers.", "success");
+        setNewUser({ first_name: "", last_name: "", password: "", role: "Clerk" });
+        loadManagedUsers();
+      } else {
+        showToast(data.detail || "Could not create the account.", "error");
+      }
+    } catch (err) {
+      showToast("Network error. Could not create the account.", "error");
+    }
+    setUsersLoading(false);
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (resetPassword.length < 8) {
+      showToast("Password must be at least 8 characters long.", "error");
+      return;
+    }
+    setUsersLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/users/reset-password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: resetTarget, new_password: resetPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showToast(data.message || "Password reset. The account can sign in on every computer.", "success");
+        setResetTarget("");
+        setResetPassword("");
+        loadManagedUsers();
+      } else {
+        showToast(data.detail || "Could not reset the password.", "error");
+      }
+    } catch (err) {
+      showToast("Network error. Could not reset the password.", "error");
+    }
+    setUsersLoading(false);
   };
 
   return (
@@ -759,6 +857,168 @@ export default function Settings() {
                   </form>
                 </div>
               </div>
+
+              {/* ADMIN ONLY: manage every office account. Registration closes
+                  after the first account exists, and synced accounts previously
+                  could not be given a password from another computer — this
+                  panel is the fix for both. */}
+              {isAdmin && (
+                <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
+                    <div>
+                      <h3 className="text-base font-bold flex items-center gap-2">
+                        <User className="text-blue-600" size={18} /> Manage Office Accounts
+                      </h3>
+                      <p className="text-xs text-muted-foreground font-medium mt-0.5">
+                        Create accounts for new clerks and reset forgotten passwords. Accounts made here sign in on every connected computer.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={loadManagedUsers}
+                      className="w-max flex items-center gap-1.5 px-3 py-1.5 bg-background border border-border rounded-lg text-xs font-bold hover:bg-muted/50 transition-colors"
+                    >
+                      <RefreshCw size={13} className={usersLoading ? "animate-spin" : ""} /> Refresh list
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+                    {/* Create account */}
+                    <form onSubmit={handleCreateUser} className="bg-background border border-border rounded-xl p-5 space-y-4">
+                      <p className="text-sm font-bold">Create a new account</p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">First Name</label>
+                          <input
+                            type="text"
+                            value={newUser.first_name}
+                            onChange={(e) => setNewUser({ ...newUser, first_name: e.target.value })}
+                            className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            required
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Last Name</label>
+                          <input
+                            type="text"
+                            value={newUser.last_name}
+                            onChange={(e) => setNewUser({ ...newUser, last_name: e.target.value })}
+                            className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            required
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Password (8+ Chars)</label>
+                          <input
+                            type="password"
+                            value={newUser.password}
+                            onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                            className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            required
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Role</label>
+                          <select
+                            value={newUser.role}
+                            onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+                            className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          >
+                            <option value="Clerk">Clerk</option>
+                            <option value="Admin">Admin</option>
+                          </select>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground font-medium">
+                        Username is built from the full name, same as self-registration.
+                      </p>
+                      <button
+                        type="submit"
+                        disabled={usersLoading}
+                        className="w-full bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold py-3 rounded-lg shadow-md hover:bg-slate-800 dark:hover:bg-slate-200 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+                      >
+                        {usersLoading ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                        Create Account
+                      </button>
+                    </form>
+
+                    {/* Reset password */}
+                    <form onSubmit={handleResetPassword} className="bg-background border border-border rounded-xl p-5 space-y-4">
+                      <p className="text-sm font-bold">Reset a forgotten password</p>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Account</label>
+                        <select
+                          value={resetTarget}
+                          onChange={(e) => setResetTarget(e.target.value)}
+                          className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          required
+                        >
+                          <option value="" disabled>Choose an account…</option>
+                          {managedUsers.map(u => (
+                            <option key={u.username} value={u.username}>
+                              {u.full_name} ({u.role}){u.has_password ? "" : " — no password yet"}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">New Password (8+ Chars)</label>
+                        <input
+                          type="password"
+                          value={resetPassword}
+                          onChange={(e) => setResetPassword(e.target.value)}
+                          className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          required
+                        />
+                      </div>
+                      <p className="text-[11px] text-muted-foreground font-medium">
+                        Resetting also clears any login lockout on that account.
+                      </p>
+                      <button
+                        type="submit"
+                        disabled={usersLoading || !resetTarget}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+                      >
+                        {usersLoading ? <Loader2 size={16} className="animate-spin" /> : <KeyRound size={16} />}
+                        Reset Password
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Account list */}
+                  <div className="border border-border rounded-xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/30">
+                        <tr>
+                          <th className="text-left px-4 py-2.5 text-[11px] font-black uppercase tracking-wider text-muted-foreground">Account</th>
+                          <th className="text-left px-4 py-2.5 text-[11px] font-black uppercase tracking-wider text-muted-foreground">Role</th>
+                          <th className="text-left px-4 py-2.5 text-[11px] font-black uppercase tracking-wider text-muted-foreground">Password</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {managedUsers.map(u => (
+                          <tr key={u.username} className="border-t border-border">
+                            <td className="px-4 py-2.5 font-bold">{u.full_name}</td>
+                            <td className="px-4 py-2.5">{u.role}</td>
+                            <td className="px-4 py-2.5">
+                              {u.has_password ? (
+                                <span className="text-emerald-600 dark:text-emerald-400 font-bold">Set</span>
+                              ) : (
+                                <span className="text-amber-600 dark:text-amber-400 font-bold">Not set — reset it above</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {managedUsers.length === 0 && (
+                          <tr><td colSpan={3} className="px-4 py-4 text-center text-muted-foreground">No accounts loaded yet.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {/* Bottom: Dedicated Quick PIN Panel */}
               <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">

@@ -5,7 +5,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";  
 import { Eye, EyeOff, Loader2, Moon, Sun, ShieldQuestion, ArrowLeft, KeyRound, Lock } from "lucide-react";  
 import { useTheme } from "next-themes";  
-import { API_URL } from "@/lib/api";  
+import { API_URL, describeAuthError } from "@/lib/api";  
 
 function ThemeToggle() {  
   const { theme, setTheme } = useTheme();  
@@ -58,6 +58,11 @@ export default function Login() {
   const [recUsername, setRecUsername] = useState("");
   const [recNewPassword, setRecNewPassword] = useState("");
   const [recSuccess, setRecSuccess] = useState("");
+  // Registration is first-run-only on the backend (403 once any account
+  // exists). The backend answer arrives as errData.detail, and the button is
+  // hidden as soon as the health probe reports a server that already has an
+  // account — probed once here so stale installs stop showing a dead button.
+  const [registrationOpen, setRegistrationOpen] = useState(true);
 
   useEffect(() => {  
     if (typeof window !== "undefined" && (localStorage.getItem("token") || localStorage.getItem("pasada_token"))) {  
@@ -79,6 +84,15 @@ export default function Login() {
           if (interval) clearInterval(interval);  
         } else {
           setConnError(`Server returned status: ${res.status}`);
+        }
+        // Ask the server whether registration can still happen. 403 = an
+        // account already exists somewhere in the office, so the Register
+        // link would only produce an error banner.
+        try {
+          const probe = await fetch(`${API_URL}/signup/open?_t=${Date.now()}`, { cache: "no-store" });
+          if (probe.ok) setRegistrationOpen((await probe.json()).open === true);
+        } catch {
+          /* probe failure keeps the default; the server answer still guards */
         }
       } catch (e: any) {  
         setServerReady(false);  
@@ -124,11 +138,11 @@ export default function Login() {
   
         router.replace("/dashboard");  
       } else {  
-        const errData = await res.json();  
-        setError(errData.detail || "Invalid login credentials.");  
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.detail || "Invalid login credentials."); 
       }  
     } catch (err) {  
-      setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");  
+      setError(describeAuthError(err, "Cannot connect to PASADA. Open the PASADA program on this computer first, then try again."));
     } finally {  
       setLoading(false);  
     }  
@@ -159,10 +173,11 @@ export default function Login() {
         setRecQuestions({ q1: data.q1, q2: data.q2, q3: data.q3 });
         setRecoverStep("questions");
       } else {
-        setError(data.detail || "Could not find recovery questions for that account.");
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.detail || "Could not find recovery questions for that account.");
       }
     } catch (err) {
-      setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");
+      setError(describeAuthError(err, "Cannot connect to PASADA. Open the PASADA program on this computer first, then try again."));
     } finally {
       setLoading(false);
     }
@@ -198,10 +213,11 @@ export default function Login() {
           setUsername(recUsername.trim().toUpperCase());
         }, 2500);
       } else {
-        setError(data.detail || "Recovery did not go through. Check your answers and try again.");
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.detail || "Recovery did not go through. Check your answers and try again.");
       }
     } catch (err) {
-      setError("Cannot connect to PASADA. Open the PASADA program on this computer first, then try again.");
+      setError(describeAuthError(err, "Cannot connect to PASADA. Open the PASADA program on this computer first, then try again."));
     } finally {
       setLoading(false);
     }
@@ -214,13 +230,19 @@ export default function Login() {
     setRecQuestions(null);
   };
   
-  if (isCheckingSession) return null;  
-  
-  return (  
-    <div className="min-h-screen flex items-center justify-center bg-muted/20 text-foreground p-4 relative">  
+  if (isCheckingSession) return null;
+
+  // FIXED-HEIGHT CARD: the connecting panel and the form panel live in the
+  // same min-height container, so the swap between them cannot jump the
+  // layout. The register banner rides in its own always-reserved slot.
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted/20 text-foreground p-4 relative">
+
+
+
       <ThemeToggle />  
   
-      <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl">  
+      <div className="max-w-md w-full bg-card border border-border p-8 rounded-2xl shadow-xl min-h-[560px] flex flex-col">
         <div className="flex flex-col items-center mb-8">  
           <img src="/TFRU.png" alt="TFRU Logo" className="w-20 h-20 object-contain mb-2 rounded-full shadow-md border border-border" />  
           <h1 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">PASADA</h1>  
@@ -230,7 +252,7 @@ export default function Login() {
         </div>  
   
         {!serverReady ? (  
-          <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">  
+          <div className="flex-1 flex flex-col items-center justify-center space-y-4 bg-muted/30 rounded-xl border border-border">  
             <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />  
             <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>  
             
@@ -275,13 +297,13 @@ export default function Login() {
                   data-tip="Your PASADA password. Forgot it? Use Forgot Password below."
                   className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"   
                   required   
-                />  
-                <button   
-                  type="button"   
-                  onClick={() => setShowPassword(!showPassword)}   
+                />                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
                   aria-label={showPassword ? "Hide password" : "Show password"}
                   data-tip={showPassword ? "Hide the password" : "Show the password"}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-900 dark:hover:text-white p-1 transition-colors"   
+                  title={showPassword ? "Hide the password" : "Show the password"}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-900 dark:hover:text-white p-1 transition-colors z-10"
                 >  
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}  
                 </button>  
@@ -398,17 +420,26 @@ export default function Login() {
           </div>
         )}  
   
-        {mode === "login" && (
-          <div className="mt-8 text-center border-t border-border pt-6">  
-            <p className="text-sm text-muted-foreground font-medium">  
-              No account yet?{" "}  
-              <button onClick={() => router.push("/signup")} data-tip="Create the first account on this computer" className="text-slate-900 dark:text-white hover:underline font-bold">  
-                Register Account  
-              </button>  
-            </p>  
-          </div>  
-        )}
-      </div>  
-    </div>  
-  );  
-}  
+        {/* Always-reserved footer slot: same height whether the register link,
+            the closed-registration note, or (in recovery mode) nothing renders,
+            so the mode swap never shifts the card. */}
+        <div className="mt-8 text-center border-t border-border pt-6 min-h-[52px] flex items-center justify-center">
+          {mode === "login" && registrationOpen && (
+            <p className="text-sm text-muted-foreground font-medium">
+              No account yet?{" "}
+              <button onClick={() => router.push("/signup")} data-tip="Create the first account on this computer" className="text-slate-900 dark:text-white hover:underline font-bold">
+                Register Account
+              </button>
+            </p>
+          )}
+          {mode === "login" && !registrationOpen && (
+            <p className="text-xs text-muted-foreground font-medium">
+              Registration is closed. Ask an administrator to create your account in Settings &gt; Security.
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
