@@ -4,7 +4,7 @@ name: Release PASADA
 #
 #   git push origin main    # that's all — every push to main becomes a release
 #
-# The version lives in .github/version.txt (source of truth, currently 0.82.1).
+# The version lives in .github/version.txt (source of truth, currently 0.82.3).
 # On each push to main the workflow bumps its PATCH number, writes the new
 # version into tauri.conf.json + Cargo.toml + APP_VERSION (settings page),
 # commits the bump with [skip ci] so it never re-triggers, tags v<version>,
@@ -193,8 +193,11 @@ jobs:
             Already have PASADA? No download needed: open PASADA, go to
             Settings > General, find the App Updates card, and click
             Check for Updates.
+          # ONE glob only. Listing latest.json here AND relying on the
+          # wildcard made the action upload it twice; the second upload
+          # goes down the update-asset path and dies with
+          # "Error: Not Found ... update-a-release-asset" (v0.82.3).
           files: |
-            release-assets/latest.json
             release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
