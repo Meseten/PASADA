@@ -1,7 +1,7 @@
 # 25010 Characteristic: Reliability
 
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, event
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import inspect, text
 from datetime import datetime
@@ -17,20 +17,31 @@ OLD_BASE_DIR = os.path.join(old_app_data, "PASADA_DATA")
 old_db_path = os.path.join(OLD_BASE_DIR, 'pasada_production.db')
 old_jwt_path = os.path.join(OLD_BASE_DIR, 'jwt_secret.key')
 
-# New cross-platform secure directory
-NEW_BASE_DIR = platformdirs.user_data_dir("PASADA", "LGU")
+# New cross-platform secure directory.
+# PASADA_DATA_DIR override: point the whole app (db, jwt, backups, exports,
+# templates) at a scratch folder. Used by the end-to-end test harness and for
+# running a second, isolated instance on one machine without touching real
+# office data. When unset, behaviour is exactly as before.
+_data_dir_override = os.environ.get('PASADA_DATA_DIR', '').strip()
+if _data_dir_override:
+    NEW_BASE_DIR = os.path.abspath(_data_dir_override)
+else:
+    NEW_BASE_DIR = platformdirs.user_data_dir("PASADA", "LGU")
 new_db_path = os.path.join(NEW_BASE_DIR, 'pasada_production.db')
 new_jwt_path = os.path.join(NEW_BASE_DIR, 'jwt_secret.key')
 
 if not os.path.exists(NEW_BASE_DIR):
     os.makedirs(NEW_BASE_DIR)
 
-# 2. AUTO-MIGRATION: Rescues the old database and JWT secrets so no data or session is lost
-if os.path.exists(old_db_path) and not os.path.exists(new_db_path):
-    shutil.copy2(old_db_path, new_db_path)
+# 2. AUTO-MIGRATION: Rescues the old database and JWT secrets so no data or session is lost.
+# Skipped when PASADA_DATA_DIR is set: an explicit scratch/test dir must stay
+# hermetic (a test run must never inherit a real office database).
+if not _data_dir_override:
+    if os.path.exists(old_db_path) and not os.path.exists(new_db_path):
+        shutil.copy2(old_db_path, new_db_path)
 
-if os.path.exists(old_jwt_path) and not os.path.exists(new_jwt_path):
-    shutil.copy2(old_jwt_path, new_jwt_path)
+    if os.path.exists(old_jwt_path) and not os.path.exists(new_jwt_path):
+        shutil.copy2(old_jwt_path, new_jwt_path)
 
 # INCREASED TIMEOUT to 30 seconds (Restored from non-ISO) to allow queries to queue
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{new_db_path}"
@@ -65,6 +76,11 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     password_hash = Column(String)
     role = Column(String)
+    # DEACTIVATION (not deletion): an Admin can switch an account off when its
+    # person leaves the office. History, records, and audit entries stay; only
+    # sign-in is blocked. Default 0 (active) so the schema upgrade leaves every
+    # existing account exactly as it was.
+    is_deactivated = Column(Boolean, default=False, nullable=True)
     # ACCOUNT RECOVERY: three office-friendly security questions answered at
     # signup or from Settings. Only the bcrypt hash of each answer is stored,
     # never the text, and the hashes never leave this machine through sync.

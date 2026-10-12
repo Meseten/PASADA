@@ -26,7 +26,11 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX OFF: per-launch decompression of the ~106 MB onefile bundle was a
+    # measured, large share of the minutes-long first boot on the office's
+    # 5400-rpm disk (bind dropped to ~11s with this off on Linux; the same
+    # cost exists on Windows). Raw bundle rides the page cache instead.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

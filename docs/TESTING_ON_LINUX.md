@@ -122,6 +122,39 @@ Run this against a scratch instance before tagging a release:
 8. Connections tab shows the peer by name on a two-machine setup.
 9. Check for Updates → "Up to date" against the current release.
 
+## 7b. If the Tauri window is black (desktop build only)
+
+`npm run tauri dev` opens a real desktop window. On some Linux graphics
+stacks (notably Wayland sessions and NVIDIA + WebKitGTK 4.1) that window
+comes up **solid black** even though the app is running fine behind it. The
+black screen is a WebKit compositing problem, not a PASADA bug: the backend
+is serving, the frontend is loaded, the webview just is not painting.
+
+Two fixes, in this order:
+
+1. Disable WebKit compositing for that run:
+   ```bash
+   WEBKIT_DISABLE_COMPOSITING_MODE=1 npm run tauri dev
+   ```
+2. If it is still black, also force the software renderer:
+   ```bash
+   WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev
+   ```
+
+The supported way to exercise PASADA on Linux is the **browser flow in
+section 1**, not the Tauri window. Use the Tauri window only when you are
+specifically testing the desktop shell (updater, sidecar lifecycle,
+right-click menu); for records, sync, and business logic the browser flow is
+equivalent and avoids the WebKit rendering issue entirely.
+
+The backend no longer prints a line per HTTP request (access logging is off
+by default), so a quiet terminal while you use the app is normal. To bring
+the per-request log back for wire-level debugging, run with:
+
+```bash
+PASADA_HTTP_ACCESS_LOG=1 XDG_DATA_HOME=/tmp/pasada-dev python main.py
+```
+
 ## 8. Stop everything
 
 Ctrl+C in each terminal.

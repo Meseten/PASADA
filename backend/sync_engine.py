@@ -137,6 +137,94 @@ def parse_discovery_payload(data: bytes, local_ip: str, now: float = None):
     except Exception:
         return None
 
+# INSTANT SYNC HEARTBEAT: the pull loop alone would leave other office
+# computers waiting up to one whole cycle before they see a deactivation or
+# a password reset. Whenever a user-mutating action commits, the machine that
+# made the change fires ONE signed datagram (PASADA_NUDGE) on the same
+# discovery channel. Every listening computer verifies the HMAC, then wakes
+# its pull loop for an immediate cycle. The 10-second tick stays as the
+# safety net for anything the nudge misses (a packet dropped while a machine
+# was busy, a peer discovered late). Like the discovery broadcast, the nudge
+# carries no secret, is time-boxed, and never repeats a nonce.
+_wake_pull_loop = threading.Event()
+
+def request_sync_cycle():
+    """Wake the pull loop NOW instead of at its next periodic tick."""
+    _wake_pull_loop.set()
+
+# LAST SYNC CHECK: the office should be able to SEE that sharing is alive,
+# not just trust a green light. Every finished pull cycle (nudge woken or
+# the periodic 10-second tick) stamps this moment; Settings > Connections
+# and the Admin's Technical tab display it. Stamped even when the cycle
+# found nothing to pull: the stamp means "we checked", not "data moved".
+_last_sync_check = None
+_last_sync_check_lock = threading.Lock()
+
+def get_last_sync_check():
+    with _last_sync_check_lock:
+        return _last_sync_check
+
+def build_nudge_payload(local_ip: str, now: float = None) -> bytes:
+    """PASADA_NUDGE:<ver>:<ip>:<timestamp>:<nonce>:<hmac>, no secret on the wire.
+
+    Same trust model as the discovery broadcast: the signature proves cluster
+    membership, the timestamp bounds replay, the nonce makes each datagram
+    single-use."""
+    if now is None:
+        now = time.time()
+    timestamp = str(int(now))
+    nonce = secrets.token_hex(8)
+    body = f"PASADA_NUDGE:{DISCOVERY_PROTOCOL_VERSION}:{local_ip}:{timestamp}:{nonce}".encode('utf-8')
+    return body + b":" + _hmac_hex(body).encode('ascii')
+
+def parse_nudge_payload(data: bytes, local_ip: str, now: float = None):
+    """Return the sender's IP when the nudge signature is fresh and valid, else None.
+
+    Any failure (garbage, wrong version, bad signature, stale timestamp,
+    replayed nonce, own datagram) drops the packet quietly."""
+    if now is None:
+        now = time.time()
+    try:
+        parts = data.decode('utf-8').split(":")
+        if len(parts) != 6 or parts[0] != "PASADA_NUDGE":
+            return None
+        if parts[1] != str(DISCOVERY_PROTOCOL_VERSION):
+            return None
+        peer_ip, timestamp, nonce, signature = parts[2], parts[3], parts[4], parts[5]
+        body = f"PASADA_NUDGE:{DISCOVERY_PROTOCOL_VERSION}:{peer_ip}:{timestamp}:{nonce}".encode('utf-8')
+        if not hmac.compare_digest(_hmac_hex(body), signature):
+            return None
+        age = abs(now - float(timestamp))
+        if age > BROADCAST_MAX_AGE_SECONDS:
+            return None
+        if not _broadcast_nonce_seen(nonce, now):
+            return None
+        if peer_ip == local_ip:
+            return None
+        return peer_ip
+    except Exception:
+        return None
+
+def broadcast_nudge():
+    """Send one signed wake-up datagram. Best effort: a failed broadcast only
+    costs seconds, the next pull cycle catches up anyway."""
+    udp_socket = None
+    try:
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.sendto(build_nudge_payload(get_local_ip()), ('<broadcast>', BROADCAST_PORT))
+    except OSError:
+        pass
+    finally:
+        if udp_socket is not None:
+            udp_socket.close()
+
+def notify_users_changed():
+    """Called by main.py after any user-mutating action commits (create,
+    password reset, deactivate, reactivate, bootstrap, recovery promote).
+    Other machines pull within seconds instead of waiting for the cycle."""
+    broadcast_nudge()
+
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -170,6 +258,15 @@ def listen_for_peers():
     while True:
         try:
             data, addr = udp_socket.recvfrom(1024)
+            # NUDGE FIRST: it shares the port with discovery and a nudge from
+            # a peer we have not heard from yet must still wake the pull loop
+            # (and register the sender, exactly as a discovery would).
+            nudge_ip = parse_nudge_payload(data, local_ip)
+            if nudge_ip is not None:
+                if nudge_ip not in PEERS:
+                    PEERS.add(nudge_ip)
+                request_sync_cycle()
+                continue
             result = parse_discovery_payload(data, local_ip)
             if result:
                 peer_ip, name = result
@@ -180,9 +277,62 @@ def listen_for_peers():
         except Exception:
             pass
 
+def _merge_incoming_users(db, incoming_users):
+    """Merge accounts pulled from a peer into this machine's database.
+
+    The copy on the machine where the account was created is the master;
+    other machines fill in what they lack (new accounts, the legacy
+    SYNCED_NO_PASSWORD stub, later password changes) and follow role and
+    deactivation changes so every computer agrees on who can sign in.
+    Security-answer hashes are never part of the payload, so recovery stays
+    on the machine that set the questions.
+    """
+    from database import User
+    for u_item in incoming_users:
+        existing_user = db.query(User).filter(User.username == u_item['username']).first()
+        if not existing_user:
+            new_user = User(
+                first_name=u_item.get('first_name'),
+                last_name=u_item.get('last_name'),
+                username=u_item.get('username'),
+                role=u_item.get('role'),
+                password_hash=u_item.get('password_hash') or "SYNCED_NO_PASSWORD",
+                is_deactivated=bool(u_item.get('is_deactivated'))
+            )
+            db.add(new_user)
+        else:
+            incoming_hash = u_item.get('password_hash') or ""
+            stale_stub = existing_user.password_hash == "SYNCED_NO_PASSWORD"
+            different_real_hash = (
+                incoming_hash
+                and incoming_hash != "SYNCED_NO_PASSWORD"
+                and existing_user.password_hash != incoming_hash
+            )
+            if stale_stub or different_real_hash:
+                # Fill the legacy stub, and follow a password change made on
+                # the owning machine so the account stays usable everywhere.
+                existing_user.password_hash = incoming_hash
+            incoming_role = u_item.get('role')
+            if incoming_role in ('Admin', 'Clerk') and existing_user.role != incoming_role:
+                # Follow a role change made on the owning machine (admin
+                # bootstrap or an admin promoting an account) so every
+                # computer agrees on who the admins are.
+                existing_user.role = incoming_role
+            incoming_flag = bool(u_item.get('is_deactivated'))
+            if bool(existing_user.is_deactivated) != incoming_flag:
+                # Deactivation travels with the account so a deactivated
+                # clerk cannot dodge it by signing in on another computer.
+                existing_user.is_deactivated = incoming_flag
+
+
 def sync_with_peers():
     while True:
-        time.sleep(10) 
+        # HEARTBEAT-AWARE WAIT: sleep up to 10 seconds, but a signed nudge
+        # from any peer wakes this loop at once for an immediate pull. Clear
+        # BEFORE the cycle so a nudge that arrives while we are pulling still
+        # wins one more quick pass after it.
+        _wake_pull_loop.wait(timeout=10)
+        _wake_pull_loop.clear()
         db = SessionLocal()
         try:
             latest_record = db.query(FranchiseRecord).order_by(FranchiseRecord.updated_at.desc()).first()
@@ -222,31 +372,8 @@ def sync_with_peers():
                         # legacy SYNCED_NO_PASSWORD stub). Security-answer
                         # hashes never leave the owning machine, so account
                         # recovery stays on the computer that set the questions.
-                        from database import User
-                        for u_item in incoming_data.get('users', []):
-                            existing_user = db.query(User).filter(User.username == u_item['username']).first()
-                            if not existing_user:
-                                new_user = User(
-                                    first_name=u_item.get('first_name'),
-                                    last_name=u_item.get('last_name'),
-                                    username=u_item.get('username'),
-                                    role=u_item.get('role'),
-                                    password_hash=u_item.get('password_hash') or "SYNCED_NO_PASSWORD"
-                                )
-                                db.add(new_user)
-                            else:
-                                incoming_hash = u_item.get('password_hash') or ""
-                                stale_stub = existing_user.password_hash == "SYNCED_NO_PASSWORD"
-                                different_real_hash = (
-                                    incoming_hash
-                                    and incoming_hash != "SYNCED_NO_PASSWORD"
-                                    and existing_user.password_hash != incoming_hash
-                                )
-                                if stale_stub or different_real_hash:
-                                    # Fill the legacy stub, and follow a password
-                                    # change made on the owning machine so the
-                                    # account stays usable everywhere.
-                                    existing_user.password_hash = incoming_hash
+                        _merge_incoming_users(db, incoming_data.get('users', []))
+
                         
                         # SYNC RECORDS WITH TOMBSTONES
                         valid_keys = {c.name for c in FranchiseRecord.__table__.columns}
@@ -282,7 +409,16 @@ def sync_with_peers():
             force_log(f"[SYNC] Cycle failed: {e}")
             db.rollback()
         finally:
+            # A finished pass counts as a check even when no peer answered:
+            # the Connections card shows this stamp so the office can tell
+            # "sharing is alive" from "stalled hours ago".
+            _mark_sync_cycle_finished()
             db.close()
+
+def _mark_sync_cycle_finished():
+    global _last_sync_check
+    with _last_sync_check_lock:
+        _last_sync_check = get_pht_now().isoformat()
 
 def start_lan_sync():
     threading.Thread(target=broadcast_presence, daemon=True).start()

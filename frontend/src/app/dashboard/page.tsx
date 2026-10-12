@@ -31,7 +31,17 @@ interface Toast {
     type: 'success' | 'error';
 }
 
+// Recharts measures its container on mount; before hydration the wrapper can
+// momentarily have width -1, which floods the console with warnings. Charts
+// render only after mount, when real layout exists.
+function useMounted() {
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => setMounted(true), []);
+    return mounted;
+}
+
 export default function Dashboard() {
+    const chartsReady = useMounted();
     const [stats, setStats] = useState<GlobalStats | null>(null);
     const [activePrediction, setActivePrediction] = useState("");
     const [predictionData, setPredictionData] = useState<any>(null);
@@ -557,6 +567,7 @@ export default function Dashboard() {
                     <div className="flex items-end justify-between">
                         <h3 className="text-3xl font-black">{stats.daily_apps}</h3>
                         <div className="w-24 h-10">
+                            {chartsReady && (
                             <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={stats.daily_trend}>
                                     <XAxis dataKey="name" hide />
@@ -571,6 +582,7 @@ export default function Dashboard() {
                                     <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
                                 </LineChart>
                             </ResponsiveContainer>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -582,6 +594,7 @@ export default function Dashboard() {
                     <div className="flex items-end justify-between">
                         <h3 className="text-3xl font-black">{stats.weekly_apps}</h3>
                         <div className="w-24 h-10">
+                            {chartsReady && (
                             <ResponsiveContainer width="100%" height="100%">
                                 <LineChart data={stats.weekly_trend}>
                                     <XAxis dataKey="name" hide />
@@ -596,6 +609,7 @@ export default function Dashboard() {
                                     <Line type="monotone" dataKey="val" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2, fill: "#3b82f6" }} />
                                 </LineChart>
                             </ResponsiveContainer>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -607,6 +621,7 @@ export default function Dashboard() {
                     <div className="flex items-end justify-between">
                         <h3 className="text-3xl font-black">{stats.monthly_apps}</h3>
                         <div className="w-24 h-10">
+                            {chartsReady && (
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={stats.monthly_trend}>
                                     <XAxis dataKey="name" hide />
@@ -621,6 +636,7 @@ export default function Dashboard() {
                                     <Bar dataKey="val" fill="#3b82f6" radius={[2, 2, 0, 0]} />
                                 </BarChart>
                             </ResponsiveContainer>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -634,6 +650,7 @@ export default function Dashboard() {
                         <p className="text-[10px] text-muted-foreground mt-0.5">Share of active, pending, and revoked operators.</p>
                     </div>
                     <div className="flex-1 min-h-[140px] flex items-center justify-center">
+                        {chartsReady && (
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie data={pieData} cx="50%" cy="50%" innerRadius={45} outerRadius={65} paddingAngle={4} dataKey="value">
@@ -649,6 +666,7 @@ export default function Dashboard() {
                                 />
                             </PieChart>
                         </ResponsiveContainer>
+                        )}
                     </div>
                     <div className="flex justify-center gap-3 text-[9px] font-bold text-slate-700 dark:text-slate-200">
                         <div className="flex items-center gap-1"><div className="w-2 h-2 bg-emerald-500 rounded-sm"></div> Active</div>
@@ -675,6 +693,7 @@ export default function Dashboard() {
                         </Button>
                     </div>
                     <div className="flex-1 min-h-[280px] w-full mt-2">
+                        {chartsReady && (
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={stats.route_breakdown.map(r => ({...r, remaining: r.total - r.active}))}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
@@ -714,6 +733,7 @@ export default function Dashboard() {
                                 <Bar dataKey="remaining" stackId="a" fill="#64748b" radius={[3, 3, 0, 0]} />
                             </BarChart>
                         </ResponsiveContainer>
+                        )}
                     </div>
                 </div>
             </div>

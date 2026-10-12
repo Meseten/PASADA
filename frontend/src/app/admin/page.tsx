@@ -6,16 +6,18 @@ import {
   KeyRound, Loader2, MonitorCog, RefreshCw, Server, ShieldCheck, Users, X, XCircle,
 } from "lucide-react";
 import { API_URL, fetchWithAuth } from "@/lib/api";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
+import OfficeAccounts from "@/components/office-accounts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 interface Toast { id: number; message: string; type: "success" | "error"; }
-
-interface ManagedUser { username: string; full_name: string; role: string; has_password: boolean; }
+interface ManagedUser { username: string; full_name: string; role: string; has_password: boolean; is_deactivated: boolean; last_login: string | null; }
 interface TemplateInfo { key: string; filename: string; installed: boolean; size: number; modified: string | null; }
 interface Diagnostics {
   runtime: { python: string; platform: string; machine: string; pid: number; started: string };
   database: { integrity: string; records: number; users: number; admins: string[] };
-  sync: { local_ip: string; api_port: number; peers: string[]; peer_names: Record<string, string>; computer_name: string };
+  sync: { local_ip: string; api_port: number; peers: string[]; peer_names: Record<string, string>; computer_name: string; last_sync_check?: string | null };
   backup: { file: string; modified: string; size: number } | null;
   crash_log_tail: string[];
 }
@@ -25,6 +27,7 @@ interface AuditOverview {
   last_activity: string | null;
   actions_last_7_days: { action: string; count: number }[];
   users_last_7_days: { user: string; count: number }[];
+  daily_last_7_days: { day: string; count: number }[];
 }
 
 const TABS = [
@@ -44,7 +47,7 @@ const TICKET_LABELS: Record<string, string> = {
   route_delete: "Delete route",
   route_rename: "Rename route",
   record_restore: "Restore records",
-  db_restore: "Restore database",
+  user_deactivate: "Deactivate account",
 };
 
 export default function AdminConsole() {
@@ -55,14 +58,9 @@ export default function AdminConsole() {
 
   // Bootstrap: first account promotes itself when no admin exists yet.
   const [bootstrapPassword, setBootstrapPassword] = useState("");
+  const [bootstrapConfirm, setBootstrapConfirm] = useState("");
   const [bootstrapping, setBootstrapping] = useState(false);
-
-  // Managed accounts (shared with Settings > Security).
-  const [users, setUsers] = useState<ManagedUser[]>([]);
-  const [usersLoading, setUsersLoading] = useState(false);
-  const [newUser, setNewUser] = useState({ first_name: "", last_name: "", password: "", role: "Clerk" });
-  const [resetTarget, setResetTarget] = useState("");
-  const [resetPassword, setResetPassword] = useState("");
+  const [myUsername] = useState(() => typeof window !== "undefined" ? (localStorage.getItem("pasada_full_name") || "").trim().toUpperCase() : "");
 
   // Templates.
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
@@ -73,6 +71,7 @@ export default function AdminConsole() {
   // Data.
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [syncNowLoading, setSyncNowLoading] = useState(false);
   const [overview, setOverview] = useState<AuditOverview | null>(null);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
@@ -100,9 +99,6 @@ export default function AdminConsole() {
       fetchWithAuth(`${API_URL}/admin/templates`).then(async res => {
         if (res.ok) setTemplates(await res.json());
       }).catch(() => {});
-      fetchWithAuth(`${API_URL}/users`).then(async res => {
-        if (res.ok) setUsers(await res.json());
-      }).catch(() => {});
       fetchWithAuth(`${API_URL}/admin/tickets?status_filter=pending`).then(async res => {
         if (res.ok) setTickets(await res.json());
       }).catch(() => {});
@@ -120,6 +116,10 @@ export default function AdminConsole() {
 
   const handleBootstrap = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (bootstrapPassword !== bootstrapConfirm) {
+      showToast("Passwords do not match.", "error");
+      return;
+    }
     setBootstrapping(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/admin/bootstrap`, {
@@ -141,58 +141,28 @@ export default function AdminConsole() {
     } finally {
       setBootstrapping(false);
       setBootstrapPassword("");
+      setBootstrapConfirm("");
     }
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setUsersLoading(true);
+  const handleSyncNow = async () => {
+    setSyncNowLoading(true);
     try {
-      const username = `${newUser.first_name.trim()} ${newUser.last_name.trim()}`.toUpperCase();
-      const res = await fetchWithAuth(`${API_URL}/users`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...newUser, username }),
-      });
-      const data = await res.json().catch(() => ({}));
+      const res = await fetchWithAuth(`${API_URL}/system/sync-now`, { method: "POST" });
       if (res.ok) {
-        showToast(data.message || "Account created.", "success");
-        setNewUser({ first_name: "", last_name: "", password: "", role: "Clerk" });
-        const list = await fetchWithAuth(`${API_URL}/users`);
-        if (list.ok) setUsers(await list.json());
+        showToast("Sync cycle requested. Records refresh in a moment.", "success");
       } else {
-        showToast(data.detail || "Could not create the account.", "error");
+        showToast("Could not request a sync cycle. Try again.", "error");
       }
     } catch {
-      showToast("Network error while creating the account.", "error");
+      showToast("Could not request a sync cycle. Try again.", "error");
     } finally {
-      setUsersLoading(false);
-    }
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setUsersLoading(true);
-    try {
-      const res = await fetchWithAuth(`${API_URL}/users/reset-password`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: resetTarget, new_password: resetPassword }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        showToast(data.message || "Password reset.", "success");
-        setResetTarget("");
-        setResetPassword("");
-        const list = await fetchWithAuth(`${API_URL}/users`);
-        if (list.ok) setUsers(await list.json());
-      } else {
-        showToast(data.detail || "Could not reset the password.", "error");
-      }
-    } catch {
-      showToast("Network error while resetting the password.", "error");
-    } finally {
-      setUsersLoading(false);
+      setSyncNowLoading(false);
+      setDiagnosticsLoading(true);
+      fetchWithAuth(`${API_URL}/admin/diagnostics`)
+        .then(async r => { if (r.ok) setDiagnostics(await r.json()); })
+        .catch(() => {})
+        .finally(() => setDiagnosticsLoading(false));
     }
   };
 
@@ -210,8 +180,18 @@ export default function AdminConsole() {
     try {
       let note = "";
       if (!approve) {
-        note = window.prompt("Reason for rejecting (shown to the requester):") || "No reason given.";
-        if (note === "No reason given." && !window.confirm("Reject without typing a reason?")) { setDecidingId(null); return; }
+        // A rejection now requires a reason: it is shown to the requester and
+        // written to the audit log, so an empty rejection is worse than none.
+        const typed = await confirmDialog({
+          mode: "prompt",
+          title: "Reject this request",
+          message: "The reason is shown to the person who filed the request, and saved with the decision.",
+          fieldNote: "Shown to the requester.",
+          confirmLabel: "Reject",
+          destructive: true,
+        });
+        if (typeof typed !== "string") { setDecidingId(null); return; }
+        note = typed;
       }
       const res = await fetchWithAuth(`${API_URL}/admin/tickets/${id}/${approve ? "approve" : "reject"}`, {
         method: "POST",
@@ -285,6 +265,14 @@ export default function AdminConsole() {
               className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </label>
+          <label className="block space-y-1.5">
+            <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Confirm your password</span>
+            <input
+              type="password" value={bootstrapConfirm} required
+              onChange={(e) => setBootstrapConfirm(e.target.value)}
+              className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
           <Button type="submit" disabled={bootstrapping} className="w-full h-11 font-bold bg-blue-600 hover:bg-blue-700 text-white">
             {bootstrapping ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <ShieldCheck className="w-4 h-4 mr-2" />}
             Make this account the Admin
@@ -307,12 +295,24 @@ export default function AdminConsole() {
             <p className="text-muted-foreground mt-1 font-medium text-sm">Everything only the office Admin should touch, in one place.</p>
           </div>
         </div>
-        <div className="flex items-center gap-1 bg-card border border-border rounded-xl p-1 shadow-sm w-max" role="tablist" aria-label="Admin sections">
+        <div className="flex items-center gap-1 bg-card border border-border rounded-xl p-1 shadow-sm w-max" role="tablist" aria-label="Admin sections"
+          onKeyDown={(e) => {
+            // ARIA tabs pattern: Left/Right arrows move between the four
+            // sections, and only the active tab is in the Tab order.
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            e.preventDefault();
+            const idx = TABS.findIndex(t => t.id === activeTab);
+            const next = e.key === "ArrowRight" ? (idx + 1) % TABS.length : (idx - 1 + TABS.length) % TABS.length;
+            setActiveTab(TABS[next].id);
+            const buttons = (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>("[role=tab]");
+            buttons[next]?.focus();
+          }}>
           {TABS.map(tab => (
             <button
-              key={tab.id} role="tab" aria-selected={activeTab === tab.id}
+              key={tab.id} role="tab" id={`admin-tab-${tab.id}`} aria-controls={`admin-panel-${tab.id}`}
+              aria-selected={activeTab === tab.id} tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === tab.id ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 dark:text-slate-300 hover:bg-muted/60"}`}
+              className={`flex items-center gap-2 px-4 h-11 rounded-lg text-sm font-bold transition-colors ${activeTab === tab.id ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 dark:text-slate-300 hover:bg-muted/60"}`}
             >
               <tab.icon className="w-4 h-4" /> {tab.label}
             </button>
@@ -322,20 +322,41 @@ export default function AdminConsole() {
 
       {/* OPERATIONAL: what the office has been doing */}
       {activeTab === "operational" && (
-        <div className="space-y-6">
+        <div className="space-y-6" id="admin-panel-operational" role="tabpanel" aria-labelledby="admin-tab-operational">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-card border border-border rounded-2xl p-5 shadow-sm">
               <p className="text-xs font-black uppercase tracking-wider text-muted-foreground">Activity entries (all time)</p>
-              <p className="text-3xl font-black mt-1">{overview ? overview.total_logs : "..."}</p>
+              <div className="text-3xl font-black mt-1">{overview ? overview.total_logs : <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" aria-label="Loading" />}</div>
             </div>
             <div className="bg-card border border-border rounded-2xl p-5 shadow-sm">
               <p className="text-xs font-black uppercase tracking-wider text-muted-foreground">Last 7 days</p>
-              <p className="text-3xl font-black mt-1">{overview ? overview.logs_last_7_days : "..."}</p>
+              <div className="text-3xl font-black mt-1">{overview ? overview.logs_last_7_days : <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" aria-label="Loading" />}</div>
             </div>
             <div className="bg-card border border-border rounded-2xl p-5 shadow-sm">
               <p className="text-xs font-black uppercase tracking-wider text-muted-foreground">Most recent activity</p>
-              <p className="text-base font-black mt-2 truncate">{overview ? fmtWhen(overview.last_activity) : "..."}</p>
+              <div className="text-base font-black mt-2 truncate">{overview ? fmtWhen(overview.last_activity) : <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" aria-label="Loading" />}</div>
             </div>
+          </div>
+          <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
+            <h3 className="text-base font-bold flex items-center gap-2 mb-4"><Activity className="text-blue-600" size={18} /> Activity per day (last 7 days)</h3>
+            {overview && overview.daily_last_7_days ? (
+              <div className="h-44 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={overview.daily_last_7_days}>
+                    <XAxis dataKey="day" fontSize={11} tickLine={false} axisLine={false} tick={{ fill: "currentColor", fontWeight: "bold" }} />
+                    <YAxis allowDecimals={false} fontSize={11} tickLine={false} axisLine={false} tick={{ fill: "currentColor", fontWeight: "bold" }} width={30} />
+                    <Tooltip
+                      cursor={{ fill: "rgba(59,130,246,0.08)" }}
+                      contentStyle={{ fontSize: "11px", borderRadius: "6px", border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--card-foreground)" }}
+                      formatter={(value: any) => [value, "actions"]}
+                    />
+                    <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground font-medium">Loading the week's activity…</p>
+            )}
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
@@ -374,7 +395,7 @@ export default function AdminConsole() {
 
       {/* APPROVALS: the two-key queue */}
       {activeTab === "approvals" && (
-        <div className="space-y-6">
+        <div className="space-y-6" id="admin-panel-approvals" role="tabpanel" aria-labelledby="admin-tab-approvals">
           <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
@@ -385,13 +406,13 @@ export default function AdminConsole() {
               </div>
               <div className="flex items-center gap-2">
                 <select value={ticketFilter} onChange={(e) => { setTicketFilter(e.target.value); refreshTickets(e.target.value); }}
-                  className="bg-background border border-border rounded-lg px-3 py-2 text-xs font-bold">
+                  className="h-11 bg-background border border-border rounded-lg px-3 text-xs font-bold">
                   <option value="pending">Waiting</option>
                   <option value="approved">Approved</option>
                   <option value="rejected">Rejected</option>
                   <option value="all">All</option>
                 </select>
-                <button type="button" onClick={() => refreshTickets()} className="flex items-center gap-1.5 px-3 py-2 bg-background border border-border rounded-lg text-xs font-bold hover:bg-muted/50">
+                <button type="button" onClick={() => refreshTickets()} className="flex items-center gap-1.5 h-11 px-3 bg-background border border-border rounded-lg text-xs font-bold hover:bg-muted/50">
                   <RefreshCw size={13} className={ticketsLoading ? "animate-spin" : ""} /> Refresh
                 </button>
               </div>
@@ -409,9 +430,9 @@ export default function AdminConsole() {
                         <p className="text-sm font-black">
                           {TICKET_LABELS[t.ticket_type] || t.ticket_type}
                           <span className={`ml-2 text-[10px] uppercase font-black px-2 py-0.5 rounded border ${
-                            t.status === "pending" ? "bg-amber-50 text-amber-700 border-amber-200" :
-                            t.status === "approved" ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                            "bg-red-50 text-red-700 border-red-200"}`}>
+                            t.status === "pending" ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900" :
+                            t.status === "approved" ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900" :
+                            "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900"}`}>
                             {t.status}
                           </span>
                         </p>
@@ -437,11 +458,14 @@ export default function AdminConsole() {
                       {t.ticket_type === "route_delete" && <>Delete the whole <span className="text-red-600">{String(t.payload.route)}</span> line and all its records.</>}
                       {t.ticket_type === "route_rename" && <>Rename <span className="font-black">{String(t.payload.route)}</span> to <span className="text-blue-600">{String(t.payload.new_route_name)}</span>{t.payload.new_prefix ? <> with SBN prefix <span className="font-black">{String(t.payload.new_prefix)}</span></> : null}.</>}
                       {t.ticket_type === "record_restore" && <>Bring back {Array.isArray(t.payload.record_ids) ? (t.payload.record_ids as string[]).length : 0} deleted record(s).</>}
+                      {t.ticket_type === "user_deactivate" && (t.payload.is_active === true
+                        ? <>Reactivate the account of <span className="font-black">{String(t.payload.username)}</span>, so sign-in works again.</>
+                        : <>Deactivate the account of <span className="text-red-600">{String(t.payload.username)}</span>. Sign-in is refused until an Admin reactivates it.</>)}
                     </p>
                     {t.reason && <p className="text-xs text-muted-foreground font-medium italic">Reason: {t.reason}</p>}
                     {t.status !== "pending" && (
                       <p className="text-xs text-muted-foreground font-medium">
-                        {t.status === "approved" ? "Approved" : "Rejected"} by {t.decided_by || "—"}{t.decided_at ? ` · ${new Date(t.decided_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}
+                        {t.status === "approved" ? "Approved" : "Rejected"} by                        {t.decided_by || "(unknown)"}{t.decided_at ? ` · ${new Date(t.decided_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : ""}
                         {t.result_note ? ` · ${t.result_note}` : ""}
                       </p>
                     )}
@@ -455,7 +479,7 @@ export default function AdminConsole() {
 
       {/* TECHNICAL: health of the machine, database, sync and backups */}
       {activeTab === "technical" && (
-        <div className="space-y-6">
+        <div className="space-y-6" id="admin-panel-technical" role="tabpanel" aria-labelledby="admin-tab-technical">
           <div className="flex items-center justify-between">
             <h3 className="text-base font-bold flex items-center gap-2"><Server className="text-blue-600" size={18} /> This computer &amp; service</h3>
             <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={() => {
@@ -491,6 +515,13 @@ export default function AdminConsole() {
                   <h4 className="font-black mb-2">Sharing between computers</h4>
                   <p><span className="text-muted-foreground font-bold">This computer:</span> {diagnostics.sync.computer_name || "unnamed"} ({diagnostics.sync.local_ip})</p>
                   <p><span className="text-muted-foreground font-bold">Connected computers:</span> {diagnostics.sync.peers.length === 0 ? "none yet" : diagnostics.sync.peers.map(p => diagnostics.sync.peer_names[p] ? `${diagnostics.sync.peer_names[p]} (${p})` : p).join(", ")}</p>
+                  <p><span className="text-muted-foreground font-bold">Last sync check:</span> {diagnostics.sync.last_sync_check ? fmtWhen(diagnostics.sync.last_sync_check) : "not yet"}</p>
+                  <div className="pt-2">
+                    <Button variant="outline" size="sm" className="font-bold shadow-sm border-border/60" onClick={handleSyncNow} disabled={syncNowLoading}>
+                      <RefreshCw size={14} className={syncNowLoading ? "animate-spin mr-1.5" : "mr-1.5"} /> Sync now
+                    </Button>
+                    <p className="text-xs text-muted-foreground font-medium mt-2">Pulls new records from the other computers right away. New and changed accounts already arrive on their own within seconds.</p>
+                  </div>
                 </div>
                 <div className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-2 text-sm">
                   <h4 className="font-black mb-2">Latest backup</h4>
@@ -519,78 +550,8 @@ export default function AdminConsole() {
 
       {/* ADMINISTRATIVE: accounts and templates */}
       {activeTab === "administrative" && (
-        <div className="space-y-6">
-          <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
-              <div>
-                <h3 className="text-base font-bold flex items-center gap-2"><Users className="text-blue-600" size={18} /> Office accounts</h3>
-                <p className="text-xs text-muted-foreground font-medium mt-0.5">Create accounts for new clerks and reset forgotten passwords. Accounts made here sign in on every connected computer.</p>
-              </div>
-              <button type="button" onClick={() => {
-                setUsersLoading(true);
-                fetchWithAuth(`${API_URL}/users`).then(async res => { if (res.ok) setUsers(await res.json()); }).finally(() => setUsersLoading(false));
-              }} className="w-max flex items-center gap-1.5 px-3 py-1.5 bg-background border border-border rounded-lg text-xs font-bold hover:bg-muted/50 transition-colors">
-                <RefreshCw size={13} className={usersLoading ? "animate-spin" : ""} /> Refresh list
-              </button>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-              <form onSubmit={handleCreateUser} className="bg-background border border-border rounded-xl p-5 space-y-4">
-                <p className="text-sm font-bold">Create a new account</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1.5 block">
-                    <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">First Name</span>
-                    <input type="text" value={newUser.first_name} required onChange={(e) => setNewUser({ ...newUser, first_name: e.target.value })}
-                      className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </label>
-                  <label className="space-y-1.5 block">
-                    <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Last Name</span>
-                    <input type="text" value={newUser.last_name} required onChange={(e) => setNewUser({ ...newUser, last_name: e.target.value })}
-                      className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold uppercase focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </label>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1.5 block">
-                    <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Password (8+ chars)</span>
-                    <input type="password" value={newUser.password} required onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                      className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </label>
-                  <label className="space-y-1.5 block">
-                    <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Role</span>
-                    <select value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
-                      className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="Clerk">Clerk</option>
-                      <option value="Admin">Admin</option>
-                    </select>
-                  </label>
-                </div>
-                <p className="text-[11px] text-muted-foreground font-medium">Username is built from the full name, same as self-registration.</p>
-                <Button type="submit" disabled={usersLoading} className="w-full h-11 font-bold bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200">
-                  {usersLoading ? <Loader2 size={16} className="animate-spin" /> : "Create Account"}
-                </Button>
-              </form>
-              <form onSubmit={handleResetPassword} className="bg-background border border-border rounded-xl p-5 space-y-4">
-                <p className="text-sm font-bold">Reset a forgotten password</p>
-                <label className="space-y-1.5 block">
-                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Account</span>
-                  <select value={resetTarget} required onChange={(e) => setResetTarget(e.target.value)}
-                    className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    <option value="" disabled>Choose an account…</option>
-                    {users.map(u => (
-                      <option key={u.username} value={u.username}>{u.full_name} ({u.role}){u.has_password ? "" : " — no password yet"}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="space-y-1.5 block">
-                  <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">New Password (8+ chars)</span>
-                  <input type="password" value={resetPassword} required onChange={(e) => setResetPassword(e.target.value)}
-                    className="w-full bg-muted/40 border border-border rounded-lg px-3 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                </label>
-                <Button type="submit" disabled={usersLoading} className="w-full h-11 font-bold bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200">
-                  {usersLoading ? <Loader2 size={16} className="animate-spin" /> : "Reset Password"}
-                </Button>
-              </form>
-            </div>
-          </div>
+        <div className="space-y-6" id="admin-panel-administrative" role="tabpanel" aria-labelledby="admin-tab-administrative">
+          <OfficeAccounts notify={showToast} />
 
           <div className="bg-card border border-border rounded-2xl p-6 md:p-8 shadow-sm space-y-5">
             <div>
@@ -630,8 +591,8 @@ export default function AdminConsole() {
       {/* TOASTS */}
       <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 pointer-events-none">
         {toasts.map(toast => (
-          <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === "success" ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-red-50 text-red-800 border-red-200"}`}>
-            {toast.type === "success" ? <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
+          <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === "success" ? "bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-200 dark:border-emerald-900" : "bg-red-50 text-red-800 border-red-200 dark:bg-red-950/60 dark:text-red-200 dark:border-red-900"}`}>
+            {toast.type === "success" ? <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" /> : <XCircle className="h-5 w-5 text-red-600 dark:text-red-400 shrink-0" />}
             <span className="flex-1">{toast.message}</span>
             <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="ml-4 opacity-50 hover:opacity-100 transition-opacity shrink-0"><X className="h-4 w-4" /></button>
           </div>

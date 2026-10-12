@@ -27,6 +27,14 @@ const IDLE_INSTALL_MS = 5 * 60 * 1000
 // office, so each known cause gets one friendly line instead.
 function explainError(raw: string): string {
   const r = raw.toLowerCase()
+  // NON-WINDOWS BUILD, NO PUBLISHED PACKAGE: the releases manifest
+  // (latest.json) currently only carries a windows-x86_64 entry. On Linux the
+  // updater loads the manifest fine but finds no package for this OS and
+  // fails with a "platform ... not found" style error. Say that plainly
+  // instead of blaming the connection, which sent people in circles.
+  if (r.includes("platform") || r.includes("not supported on this operating")) {
+    return "No update package has been published for this operating system yet, so PASADA cannot update itself here. Download the newest installer from the official GitHub releases page instead."
+  }
   if (r.includes("network") || r.includes("fetch") || r.includes("connection") || r.includes("timed out") || r.includes("timeout")) {
     return "PASADA could not reach the update page. Press Check again when the internet is connected. If the connection is fine, there may be no published update to compare with yet."
   }

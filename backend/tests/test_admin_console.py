@@ -165,7 +165,29 @@ def test_route_delete_rename_refresh_and_db_upload_refuse_clerk(client):
     # The admin passes the same gates.
     admin = _token(client)
     assert client.get("/admin/diagnostics", headers=admin).status_code == 200
-    assert client.get("/admin/audit-overview", headers=admin).status_code == 200
+    overview_res = client.get("/admin/audit-overview", headers=admin)
+    assert overview_res.status_code == 200
+    # The 7-day chart series must always have exactly 7 bars, one per day,
+    # even when the office was quiet: a gap must read as zero, not missing.
+    daily = overview_res.json()["daily_last_7_days"]
+    assert len(daily) == 7
+    assert all("day" in d and "count" in d and d["count"] >= 0 for d in daily)
+
+
+def test_users_list_reports_last_sign_in(client):
+    admin = _token(client)
+    # The admin signs in, so their row must carry a timestamp; a freshly
+    # created account that never signed in shows None.
+    res = client.post("/users", headers=admin, json={
+        "first_name": "NEVER", "last_name": "LOGGED",
+        "username": "NEVER LOGGED", "password": "neverpass1",
+        "password_confirm": "neverpass1", "role": "Clerk",
+    })
+    assert res.status_code == 200, res.text
+    users = {u["username"]: u for u in client.get("/users", headers=admin).json()}
+    assert users["NEVER LOGGED"]["last_login"] is None
+    # The signed-in admin (FIRST CLERK, promoted by bootstrap) has logged in.
+    assert users["FIRST CLERK"]["last_login"] is not None
 
 
 def test_template_upload_roundtrip_and_rejection(client):
@@ -264,6 +286,8 @@ def test_approval_ticket_full_flow(client):
     db.close()
 
     # 2. Admin sees the pending ticket and approves it. NOW it runs.
+    # (The filing clerk is a different person, so the second-key rule passes;
+    # the admin alone in this module's office executes the approved action.)
     queue = client.get("/admin/tickets", headers=admin).json()
     pending = [t for t in queue if t["status"] == "pending" and t["ticket_type"] == "route_delete"
                and t["payload"].get("route") == "TICKETLINE"]
