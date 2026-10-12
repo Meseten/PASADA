@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react"; 
 import { UploadCloud, Loader2, FileText, AlertTriangle, Database, CheckCircle2, XCircle, X } from "lucide-react"; 
 import { API_URL, fetchWithAuth } from "@/lib/api"; 
+import { confirmDialog } from "@/components/ui/confirm-dialog"; 
 
 interface Toast {   
   id: number;   
@@ -80,7 +81,13 @@ export default function MassImport() {
     try {       
       if (isDatabaseFile) {         
         if (dbImportMode === 'restore') {
-            const confirmed = window.confirm("This replaces the current records with the ones from the backup. Records with the same entry number will be overwritten. Continue?");
+            const confirmed = await confirmDialog({
+              mode: "confirm",
+              title: "Restore records from this backup",
+              message: "The current records are replaced with the ones in this backup file. Records with the same entry number are overwritten.",
+              destructive: true,
+              confirmLabel: "Restore",
+            });
             if (!confirmed) {
                 setUploading(false);
                 return;
@@ -276,7 +283,7 @@ export default function MassImport() {
                    <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} className="mt-0.5" />
                    <div>
                      <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (replaces matching records)</p>
-                     <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup. Admin only — a clerk signing in will be asked to ask the Admin.</p>
+                     <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup. Admin only: a clerk signing in will be asked to ask the Admin.</p>
                    </div>
                  </label>
               </div>

@@ -223,17 +223,8 @@ def _run_one_cycle(sessions_b):
             )
             response.raise_for_status()
             incoming = response.json()
-            for u_item in incoming.get("users", []):
-                existing = db.query(User).filter(
-                    User.username == u_item["username"]).first()
-                if not existing:
-                    db.add(User(
-                        first_name=u_item.get("first_name"),
-                        last_name=u_item.get("last_name"),
-                        username=u_item.get("username"),
-                        role=u_item.get("role"),
-                        password_hash=u_item.get("password_hash") or "SYNCED_NO_PASSWORD",
-                    ))
+            # Same merge code the production sync loop runs.
+            sync_engine._merge_incoming_users(db, incoming.get("users", []))
             db.commit()
     finally:
         db.close()

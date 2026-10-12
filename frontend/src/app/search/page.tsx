@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Search, ArchiveX, Loader2, CheckCircle, XCircle, AlertCircle, Globe, Edit, Printer, History, Eye, Trash2, Shield, FileText, CheckCircle2, X, Download } from "lucide-react"
 import { API_URL, fetchWithAuth } from "@/lib/api"
+import { confirmDialog } from "@/components/ui/confirm-dialog"
 
 interface Member {
   id: string;
@@ -208,7 +209,14 @@ function GlobalSearchClient() {
   };
 
   const handleDeleteOne = async (member: Member) => {
-    if (!window.confirm(`Are you sure you want to delete SBN ${member.sbn_no}?`)) return;
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `Delete SBN ${member.sbn_no}`,
+      message: "The record moves to the Inactive list and can be restored there.",
+      destructive: true,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });

@@ -31,6 +31,7 @@ import {
   Printer 
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
+import { ConfirmDialogHost, confirmDialog } from "@/components/ui/confirm-dialog"
 import { API_URL, fetchWithAuth, clearAuthAndRedirect } from "@/lib/api"
 import { startTour, stopTour } from "@/lib/tutorial"
 
@@ -117,6 +118,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const [globalSearch, setGlobalSearch] = useState("")
   const [userName, setUserName] = useState("System User")
   const [userRole, setUserRole] = useState("Clerk")
+  // ADMIN SETUP LINK: a clerk in an office with NO Admin at all still needs a
+  // visible way into /admin, which then shows the one-time setup panel. The
+  // server decides (see the effect below); it turns off once an Admin exists.
+  const [adminSetupNeeded, setAdminSetupNeeded] = useState(false)
   const [isNetworkOnline, setIsNetworkOnline] = useState(true)
   // Set once the account name is known: the LAN broadcast name IS the
   // account name, so other computers show WHO uses this machine, not a
@@ -258,6 +263,35 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     }
   }, [pathname, fetchRoutes])
 
+  // ADMIN SETUP LINK: ask the SERVER (not localStorage) whether the office
+  // still lacks an Admin, because a stored role can be stale after accounts
+  // sync over the LAN. While no Admin exists, every signed-in account gets
+  // the Admin Console entry, since /admin then offers the one-time setup
+  // panel instead of the refusal screen. Skipped on the sign-in screen and
+  // for stored Admins; re-asked on navigation so the link disappears as soon
+  // as an Admin exists.
+  useEffect(() => {
+    // Trailing-slash-proof auth-page check (same rule as isAuthPage below;
+    // inlined here because that const is declared further down).
+    const norm = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname
+    if (norm === "/" || norm === "/signup") return
+    const token = localStorage.getItem("token") || localStorage.getItem("pasada_token")
+    if (!token) {
+      setAdminSetupNeeded(false)
+      return
+    }
+    if (localStorage.getItem("pasada_role") === "Admin") {
+      setAdminSetupNeeded(false)
+      return
+    }
+    let cancelled = false
+    fetchWithAuth(`${API_URL}/admin/needed`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (!cancelled && data) setAdminSetupNeeded(!!data.needed) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [pathname, userRole])
+
   // PERSIST SIDEBAR SCROLL POSITION
   useEffect(() => {
     // Only restore if the user isn't actively scrolling to prevent fighting the manual scroll
@@ -333,35 +367,64 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const deleteRoute = async (e: React.MouseEvent, route: string) => {
     e.preventDefault();
     e.stopPropagation();
-    if (window.confirm(`Are you sure you want to delete the entire ${route} line and all its records? This action cannot be undone.`)) {
-        try {
-            const res = await fetchWithAuth(`${API_URL}/api/routes/${route}`, {
+    // In-app dialog instead of window.confirm: native JS dialogs do not
+    // render in every webview PASADA ships (WebKit resolves confirm() to
+    // undefined with nothing on screen), which left this delete dead there.
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `Delete the ${route} line`,
+      message: "The whole line and every record on it will be deleted. This cannot be undone.",
+      destructive: true,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
+    try {
+        // Two-key rule: with another active Admin the delete always lands
+        // as a ticket for a DIFFERENT Admin. In a one-admin office the
+        // backend asks for a written reason (400); we prompt and retry.
+        let res = await fetchWithAuth(`${API_URL}/api/routes/${route}`, {
+            method: "DELETE"
+        });
+        let body = await res.json().catch(() => ({}));
+        if (res.status === 400 && typeof body.detail === "string" && body.detail.includes("only active Admin")) {
+            const typed = await confirmDialog({
+              mode: "prompt",
+              title: "You are the only active Admin",
+              message: "This deletion runs right away, and the reason is written into the audit log.",
+              fieldNote: "Shown in Activity History as a single-admin override.",
+              confirmLabel: "Delete",
+            });
+            if (typeof typed !== "string" || !typed.trim()) {
+                await confirmDialog({ mode: "alert", title: "Not deleted", message: "A reason is required, so the route was not deleted." });
+                return;
+            }
+            res = await fetchWithAuth(`${API_URL}/api/routes/${route}?override_reason=${encodeURIComponent(typed.trim())}`, {
                 method: "DELETE"
             });
-            const body = await res.json().catch(() => ({}));
-            if (res.ok) {
-                if (body.status === "ticket_filed") {
-                    // Clerk path: nothing was deleted; the Admin must approve.
-                    alert(body.message || "Request sent to the Admin for approval.");
-                    return;
-                }
-                if (pinnedRoutes.includes(route)) {
-                    const updatedPins = pinnedRoutes.filter(r => r !== route);
-                    setPinnedRoutes(updatedPins);
-                    localStorage.setItem("pasada_pinned_routes", JSON.stringify(updatedPins));
-                }
-                alert(`Route ${route} deleted successfully.`);
-                fetchRoutes();
-                
-                if (pathname === `/toda/${route}`) {
-                    router.push('/dashboard');
-                }
-            } else {
-                alert(body.detail || `Failed to delete route ${route}.`);
-            }
-        } catch (error) {
-            alert("Network error while deleting route.");
+            body = await res.json().catch(() => ({}));
         }
+        if (res.ok) {
+            if (body.status === "ticket_filed") {
+                // Two-key path: nothing was deleted; a different Admin must approve.
+                await confirmDialog({ mode: "alert", title: "Approval requested", message: typeof body.message === "string" && body.message ? body.message : "The deletion request was sent to another Admin for approval." });
+                return;
+            }
+            if (pinnedRoutes.includes(route)) {
+                const updatedPins = pinnedRoutes.filter(r => r !== route);
+                setPinnedRoutes(updatedPins);
+                localStorage.setItem("pasada_pinned_routes", JSON.stringify(updatedPins));
+            }
+            await confirmDialog({ mode: "alert", title: "Line deleted", message: `Route ${route} and every record on it were deleted.` });
+            fetchRoutes();
+            
+            if (pathname === `/toda/${route}`) {
+                router.push('/dashboard');
+            }
+        } else {
+            await confirmDialog({ mode: "alert", title: "Delete failed", message: typeof body.detail === "string" && body.detail ? body.detail : `Route ${route} could not be deleted.` });
+        }
+    } catch (error) {
+        await confirmDialog({ mode: "alert", title: "Network error", message: "The PASADA service did not answer, so the route was not deleted." });
     }
   };
 
@@ -499,6 +562,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="antialiased text-foreground bg-background">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+          {/* Single app-wide instance of the in-app confirm/prompt dialog.
+              All confirmDialog() calls in any page render through this one. */}
+          <ConfirmDialogHost />
           
           {/* ========================================================= */}
           {/* REDESIGNED PIN LOCK OVERLAY                               */}
@@ -594,10 +660,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     <Settings className="mr-2 h-4 w-4" /> Settings
                   </Link>
 
-                  {/* ADMIN CONSOLE: only the office Admin sees this entry. A
-                      clerk who guesses the URL still gets a refusal screen,
-                      and the API enforces the same rule server-side. */}
-                  {userRole === "Admin" && (
+                  {/* ADMIN CONSOLE: the Admin always sees this entry, and so
+                      does every signed-in account while the office has NO
+                      Admin at all (then /admin shows the one-time setup
+                      panel). A clerk who guesses the URL in an office that
+                      already has an Admin still gets a refusal screen, and
+                      the API enforces the same rule server-side. */}
+                  {(userRole === "Admin" || adminSetupNeeded) && (
                     <Link prefetch={false} href="/admin" aria-current={normPath === '/admin' ? 'page' : undefined} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${normPath === '/admin' ? 'bg-blue-100/70 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-l-4 border-blue-600 shadow-sm' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                       <ShieldCheck className="mr-2 h-4 w-4" /> Admin Console
                     </Link>

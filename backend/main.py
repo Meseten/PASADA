@@ -42,7 +42,7 @@ import starlette.formparsers
 import uvicorn
 
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy import func, extract, create_engine, inspect, text
+from sqlalchemy import func, extract, create_engine, inspect, or_, text
 from sqlalchemy.exc import IntegrityError
 
 from jose import JWTError, jwt
@@ -61,6 +61,20 @@ from extractor import extract_docx_data
 import sync_engine
 from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
 from pydantic import BaseModel, Field
+
+# BOOT TELEMETRY: captured after the heavy imports (fastapi, sqlalchemy,
+# pandas, pyinstaller's onefile defrost) but before anything network-related
+# starts. The bind-time log below reads this so a slow first boot can be
+# told apart from a slow bind from the crash log alone.
+BOOT_T0 = time.time()
+try:
+    import psutil as _psutil
+    # True process start (includes the onefile unpack, which happens before
+    # any Python line runs) — this is the number that matches what the user
+    # experienced from the moment they double-clicked the app.
+    PROC_T0 = _psutil.Process().create_time()
+except Exception:
+    PROC_T0 = BOOT_T0
 
 crash_log_path = os.path.join(BASE_DIR, "PASADA_CRASH_LOG.txt")
 
@@ -301,12 +315,17 @@ class RouteRenameRequest(BaseModel):
     new_route_name: str
     new_prefix: str
     new_driving_route: str
+    # Only used when the office has a single active Admin (see the two-key
+    # rule below): the direct execution then demands a written reason.
+    override_reason: str = ""
 
 class UserCreate(BaseModel):
     first_name: str
     last_name: str
     username: str
     password: str
+    # Optional for older clients; the bundled UI always sends it.
+    password_confirm: Optional[str] = None
     role: str
 
 class LoginRequest(BaseModel):
@@ -326,6 +345,8 @@ class UsernameUpdate(BaseModel):
 class AdminPasswordReset(BaseModel):
     username: str
     new_password: str
+    # Optional for older clients; the bundled UI always sends it.
+    password_confirm: Optional[str] = None
 
 class RouteDataUpdate(BaseModel):
     population: int
@@ -339,6 +360,9 @@ class SignupRequest(BaseModel):
     last_name: str = Field(min_length=1, max_length=60)
     username: str = Field(min_length=3, max_length=60)
     password: str = Field(min_length=8, max_length=72)  # bcrypt hard limit
+    # Optional for backward compatibility with older clients; the bundled
+    # frontend always sends it and the endpoint enforces the match.
+    password_confirm: Optional[str] = None
     role: str = "Clerk"  # ignored by the endpoint — see setup_admin_notes
 
 class BatchGenerateRequest(BaseModel):
@@ -357,6 +381,10 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    if getattr(user, "is_deactivated", False):
+        # A deactivated account's tokens stop working immediately: sign-in is
+        # refused and every signed-in session is dropped on its next request.
+        raise HTTPException(status_code=401, detail="This account has been deactivated by the Admin.")
     return user
 
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
@@ -369,12 +397,34 @@ def alias_route(route: str) -> str:
         return "NPTODA"
     return r
 
+def _active_admins(db: Session) -> list:
+    """Admin accounts that can actually act: role Admin AND not deactivated.
+    A deactivated admin cannot sign in, so for bootstrap, the recovery valve,
+    and the last-admin guard only active admins count."""
+    return [u for u in db.query(User).filter(User.role == "Admin").all()
+            if not getattr(u, "is_deactivated", False)]
+
 def require_admin(current_user: User) -> None:
     """One gate for every Admin-only operation. Kept as a helper so the rule
     lives in exactly one place: if the signed-in account is not an Admin the
     request stops here with 403, no matter which endpoint called it."""
     if current_user.role != "Admin":
         raise HTTPException(status_code=403, detail="Admin only")
+
+def _other_active_admin_exists(db: Session, current_user: User) -> bool:
+    """TWO-KEY RULE: the big, hard-to-undo actions (delete a route, rename a
+    route, restore deleted records, deactivate an account) always need a
+    second active Admin to approve them, even when the person clicking is
+    themselves an Admin. When at least one OTHER active Admin exists, the
+    click files a ticket and only that other Admin can approve it; nobody
+    approves their own request. A one-admin office cannot second-key itself,
+    so there the Admin's valve is direct execution with a MANDATORY written
+    reason, recorded loudly in the audit log as an override."""
+    return db.query(User).filter(
+        User.role == "Admin",
+        User.is_deactivated == False,
+        User.id != current_user.id,
+    ).count() > 0
 
 def get_full_name(user: User) -> str:
     first = getattr(user, 'first_name', "") or ""
@@ -856,17 +906,38 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
     return {"message": f"{deleted_count} operator(s) deleted successfully."}
 
 @app.delete("/api/routes/{route_name}")
-def delete_entire_route(route_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Wiping a whole TODA line is a two-key action now: a clerk files an
-    # approval ticket, the Admin approves it, THEN the route is deleted.
-    # An Admin calling this directly still executes immediately (their click
-    # IS the approval); a clerk's call becomes a pending ticket instead of
-    # a 403, so the button never dead-ends.
+def delete_entire_route(route_name: str, override_reason: str = "", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Wiping a whole TODA line is a two-key action: the click files an
+    # approval ticket and a DIFFERENT Admin approves it, even when the
+    # person clicking is an Admin. Only in a one-admin office does the Admin
+    # execute directly, and only with a written reason (the override valve).
     route_to_delete = alias_route(route_name)
     records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
     
     if not records:
         raise HTTPException(status_code=404, detail="Route not found or already empty.")
+
+    if _other_active_admin_exists(db, current_user):
+        if db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "route_delete",
+                ApprovalTicket.status == "pending",
+                ApprovalTicket.payload_json.contains(route_to_delete)).first():
+            raise HTTPException(status_code=409, detail=f"A delete ticket for {route_to_delete} is already waiting for approval.")
+        ticket = ApprovalTicket(
+            created_by=get_full_name(current_user),
+            ticket_type="route_delete",
+            payload_json=json.dumps({"route": route_to_delete}),
+            reason=(override_reason or "").strip() or None,
+        )
+        db.add(ticket)
+        db.commit()
+        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, route_to_delete,
+                   f"Requested approval to delete route '{route_to_delete}' ({len(records)} records).")
+        if current_user.role == "Admin":
+            return {"status": "ticket_filed",
+                    "message": f"Delete request sent to another Admin for approval. {len(records)} records stay untouched until they approve."}
+        return {"status": "ticket_filed",
+                "message": f"Request sent to the Admin for approval. {len(records)} records stay untouched until they approve."}
 
     if current_user.role != "Admin":
         if db.query(ApprovalTicket).filter(
@@ -886,6 +957,13 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
         return {"status": "ticket_filed",
                 "message": f"Request sent to the Admin for approval. {len(records)} records stay untouched until they approve."}
 
+    # OVERRIDE VALVE: this office has exactly one active Admin. The action
+    # runs now, but only with a written reason so the audit log records why
+    # the two-key rule was bypassed.
+    reason = (override_reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="You are the only active Admin. Type a short reason for this deletion so the audit log records why.")
     count = 0
     for r in records:
         if not r.is_deleted:
@@ -895,7 +973,8 @@ def delete_entire_route(route_name: str, current_user: User = Depends(get_curren
     db.commit()
     invalidate_ml_cache(route_to_delete)
     clear_api_caches()
-    log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete, f"Soft deleted entire route line '{route_to_delete}' containing {count} record(s).")
+    log_action(db, get_full_name(current_user), "DELETE_ROUTE", "0", route_to_delete,
+               f"Single-admin override: soft deleted entire route line '{route_to_delete}' containing {count} record(s). Reason: {reason}")
     return {"message": f"Route '{route_to_delete}' deleted successfully."}
 
 @app.post("/api/operators/{record_id}/restore")
@@ -929,9 +1008,35 @@ def get_deleted_records(current_user: User = Depends(get_current_user), db: Sess
 @app.put("/api/routes/{route_name}/rename")
 def rename_route(route_name: str, payload: RouteRenameRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # A rename rewrites the route code and every SBN prefix on the line at
-    # once. Clerks file a ticket with the proposed names; the Admin's own
-    # rename still runs directly (their click IS the approval).
+    # once. The click files a ticket and a DIFFERENT Admin approves it, even
+    # when the person clicking is an Admin. Only in a one-admin office does
+    # the Admin execute directly, and only with a written reason.
     old_route = alias_route(route_name)
+    if _other_active_admin_exists(db, current_user):
+        if db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "route_rename",
+                ApprovalTicket.status == "pending",
+                ApprovalTicket.payload_json.contains(old_route)).first():
+            raise HTTPException(status_code=409, detail=f"A rename ticket for {old_route} is already waiting for approval.")
+        ticket = ApprovalTicket(
+            created_by=get_full_name(current_user),
+            ticket_type="route_rename",
+            payload_json=json.dumps({"route": old_route,
+                                     "new_route_name": payload.new_route_name,
+                                     "new_prefix": payload.new_prefix,
+                                     "new_driving_route": payload.new_driving_route or ""}),
+            reason=(payload.override_reason or "").strip() or None,
+        )
+        db.add(ticket)
+        db.commit()
+        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, old_route,
+                   f"Requested approval to rename route '{old_route}' to '{alias_route(payload.new_route_name)}'.")
+        if current_user.role == "Admin":
+            return {"status": "ticket_filed",
+                    "message": "Rename request sent to another Admin for approval."}
+        return {"status": "ticket_filed",
+                "message": "Rename request sent to the Admin for approval."}
+
     if current_user.role != "Admin":
         new_route_check = alias_route(payload.new_route_name)
         if db.query(ApprovalTicket).filter(
@@ -954,6 +1059,13 @@ def rename_route(route_name: str, payload: RouteRenameRequest, current_user: Use
                    f"Requested approval to rename route '{old_route}' to '{alias_route(payload.new_route_name)}'.")
         return {"status": "ticket_filed",
                 "message": f"Rename request sent to the Admin for approval."}
+
+    # OVERRIDE VALVE: one-admin office; direct execution with a mandatory
+    # written reason recorded in the audit log.
+    reason = (payload.override_reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="You are the only active Admin. Type a short reason for this rename so the audit log records why.")
 
     new_route = alias_route(payload.new_route_name)
     new_route = alias_route(payload.new_route_name)
@@ -993,7 +1105,8 @@ def rename_route(route_name: str, payload: RouteRenameRequest, current_user: Use
     invalidate_ml_cache(old_route)
     invalidate_ml_cache(new_route)
     clear_api_caches()
-    log_action(db, get_full_name(current_user), "RENAME_ROUTE", "0", new_route, f"Renamed route {old_route} to {new_route} with prefix {new_prefix}. Updated {count} records.")
+    log_action(db, get_full_name(current_user), "RENAME_ROUTE", "0", new_route,
+               f"Single-admin override: renamed route {old_route} to {new_route} with prefix {new_prefix}. Updated {count} records. Reason: {reason}")
     return {"status": "success", "message": f"Successfully renamed {count} records to {new_route}.", "new_route": new_route}
 
 # --- ADMIN APPROVAL TICKETS -------------------------------------------
@@ -1038,6 +1151,25 @@ def approve_ticket(ticket_id: str, decision: TicketDecision = None, current_user
     payload = json.loads(ticket.payload_json or "{}")
     admin_name = get_full_name(current_user)
 
+    # SECOND-KEY RULE: nobody approves their own request, not even an Admin.
+    # (Rejecting your own ticket is still allowed; withdrawing is fine.)
+    if ticket.created_by and ticket.created_by.strip().upper() == admin_name.strip().upper():
+        raise HTTPException(status_code=403,
+                            detail="You filed this ticket. Only a different Admin can approve it.")
+    if ticket.ticket_type == "user_deactivate" and not bool(payload.get("is_active", True)):
+        # The TARGET may approve their own deactivation (consent: A files it,
+        # B accepts being switched off, the other admin keeps the office
+        # alive). What must never happen is losing the LAST active Admin.
+        target_check = db.query(User).filter(User.username == str(payload.get("username", ""))).first()
+        if target_check and target_check.role == "Admin":
+            others = db.query(User).filter(
+                User.role == "Admin",
+                User.is_deactivated == False,
+                User.id != target_check.id,
+            ).count()
+            if others == 0:
+                raise HTTPException(status_code=403,
+                                    detail="This would switch off the last active Admin. Reactivate another Admin first.")
     if ticket.ticket_type == "route_delete":
         route_to_delete = payload.get("route", "")
         records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
@@ -1107,6 +1239,34 @@ def approve_ticket(ticket_id: str, decision: TicketDecision = None, current_user
         ticket.result_note = f"Restored {restored} record(s)."
         log_action(db, admin_name, "RESTORE_RECORD", ticket.id, "SYSTEM",
                    f"Approved ticket: restored {restored} record(s). Requested by {ticket.created_by}.")
+    elif ticket.ticket_type == "user_deactivate":
+        username = str(payload.get("username", ""))
+        is_active = bool(payload.get("is_active"))
+        target = db.query(User).filter(User.username == username).first()
+        if not target:
+            ticket.status = "rejected"
+            ticket.decided_by = admin_name
+            ticket.decided_at = get_pht_now()
+            ticket.result_note = "Rejected automatically: the account no longer exists."
+            db.commit()
+            raise HTTPException(status_code=404, detail="Account no longer exists; ticket rejected automatically.")
+        if not is_active and target.id == current_user.id:
+            # Consented removal: the target admin approves being switched off
+            # themselves; the filing admin stays active so the office keeps
+            # a working Admin.
+            pass
+        target.is_deactivated = not is_active
+        db.commit()
+        # HEARTBEAT: the flag must reach the other office computers in seconds.
+        sync_engine.notify_users_changed()
+        if not is_active:
+            _clear_persisted_lock(target.username, db)
+            with _login_lock:
+                _login_attempts.pop(target.username, None)
+        verb = "deactivated" if not is_active else "reactivated"
+        ticket.result_note = f"{verb.capitalize()} the account of {target.username}."
+        log_action(db, admin_name, "DEACTIVATE_USER" if not is_active else "REACTIVATE_USER", ticket.id, "SYSTEM",
+                   f"Approved ticket: {verb} the account of {target.username}. Requested by {ticket.created_by}.")
     else:
         raise HTTPException(status_code=400, detail=f"Unknown ticket type: {ticket.ticket_type}")
 
@@ -1136,15 +1296,38 @@ def reject_ticket(ticket_id: str, decision: TicketDecision = None, current_user:
 
 @app.post("/api/restore-records/ticket")
 def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Clerk asks to bring back deleted records. Admin approves from the
-    console. Accepts record_ids (specific rows) or {'all': True} for every
-    currently deleted record."""
+    """Bring back deleted records. Anyone can file the ticket; with two or
+    more active admins even the Admin's own restore waits for a DIFFERENT
+    admin's approval. In a one-admin office the Admin executes directly,
+    but only with a written reason. Accepts record_ids (specific rows) or
+    {'all': True} for every currently deleted record."""
     record_ids = payload.get("record_ids", [])
     want_all = bool(payload.get("all"))
     if not want_all and not record_ids:
         raise HTTPException(status_code=400, detail="Nothing to restore: pass record_ids or all=true.")
     if want_all:
         record_ids = [r.id for r in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()]
+
+    # OVERRIDE VALVE: one-admin office. Restoring deleted records is a big,
+    # registry-wide action, so even alone the Admin must write down why.
+    if current_user.role == "Admin" and not _other_active_admin_exists(db, current_user):
+        reason = (payload.get("override_reason") or "").strip()
+        if not reason:
+            raise HTTPException(status_code=400,
+                                detail="You are the only active Admin. Type a short reason for this restore so the audit log records why.")
+        restored = 0
+        for rid in record_ids:
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
+            if rec and rec.is_deleted:
+                rec.is_deleted = False
+                rec.updated_at = get_pht_now()
+                restored += 1
+        db.commit()
+        clear_api_caches()
+        log_action(db, get_full_name(current_user), "RESTORE_RECORD", "0", "SYSTEM",
+                   f"Single-admin override: restored {restored} record(s). Reason: {reason}")
+        return {"status": "success", "message": f"Restored {restored} record(s)."}
+
     if db.query(ApprovalTicket).filter(ApprovalTicket.ticket_type == "record_restore",
                                        ApprovalTicket.status == "pending").first():
         raise HTTPException(status_code=409, detail="A restore ticket is already waiting for approval.")
@@ -1262,6 +1445,12 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Registration is closed. Ask an administrator to create your account.")
     if payload.role != "Clerk":
         raise HTTPException(status_code=400, detail="Only Clerk accounts can be self-registered.")
+    # The signup screen asks twice on purpose: the very first password typed
+    # here is the one that later unlocks admin bootstrap, and there is no
+    # password recovery before an admin exists to reset it. A silent typo at
+    # this step would lock the whole installation out.
+    if payload.password_confirm is not None and payload.password != payload.password_confirm:
+        raise HTTPException(status_code=422, detail="Passwords do not match.")
     username_upper = payload.username.upper()
     if db.query(User).filter(User.username == username_upper).first():
         raise HTTPException(status_code=400, detail="Username taken")
@@ -1274,6 +1463,9 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
+    # HEARTBEAT: the first account must reach every other office computer
+    # immediately, or their next sync cycle would still be the clock.
+    sync_engine.notify_users_changed()
     log_action(db, "SYSTEM", "USER_REGISTRATION", "0", "SYSTEM", f"Registered first-run account for {username_upper}")
     return {"message": "Account created"}
 
@@ -1408,7 +1600,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         mins = max(1, seconds_left // 60)
         log_action(
             db, username_upper, "LOGIN_BLOCKED", "0", "SYSTEM",
-            f"Login attempt blocked — account locked. Try again in {mins} minute(s).",
+            f"Login attempt blocked: account locked. Try again in {mins} minute(s).",
             ip_or_source=payload.username
         )
         raise HTTPException(
@@ -1417,6 +1609,15 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         )
     
     user = db.query(User).filter(User.username == username_upper).first()
+    if user is not None and getattr(user, "is_deactivated", False):
+        # A deactivated account cannot sign in even with the right password.
+        # The message says so plainly: the alternative is the clerk and the
+        # admin chasing a phantom wrong-password problem, and the attempt is
+        # audit-logged here anyway.
+        log_action(db, username_upper, "LOGIN_BLOCKED", "0", "SYSTEM",
+                   "Sign-in refused: this account is deactivated.",
+                   ip_or_source=payload.username)
+        raise HTTPException(status_code=401, detail="This account has been deactivated by the Admin.")
     if not user or not pwd_context.verify(payload.password, user.password_hash):
         # 2. Failed attempt — i-record at i-lock kapag umabot na sa limit
         #    (i-mirror din sa DB para hindi mabura ng restart).
@@ -1537,6 +1738,19 @@ def recovery_reset(payload: RecoveryAnswers, db: Session = Depends(get_db)):
     username_upper = payload.username.strip().upper()
     _recovery_guard(username_upper)
     user = db.query(User).filter(User.username == username_upper).first()
+    # LAST-RESORT ADMIN RECOVERY. Security questions are stored only on the
+    # machine that set them, so an office whose accounts arrived through LAN
+    # sync has no in-app way to regain administrator access once every admin
+    # account is lost. While NO Admin exists anywhere, answering an account's
+    # three questions correctly also promotes that account to Admin. Same
+    # three proofs, same lockout; the account must already have its own
+    # password. Once any Admin exists this valve stays closed.
+    promote_to_admin = bool(
+        user
+        and user.password_hash
+        and user.password_hash != "SYNCED_NO_PASSWORD"
+        and len(_active_admins(db)) == 0
+    )
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     answers = [_normalize_answer(payload.a1), _normalize_answer(payload.a2), _normalize_answer(payload.a3)]
@@ -1553,9 +1767,24 @@ def recovery_reset(payload: RecoveryAnswers, db: Session = Depends(get_db)):
     if not all_correct:
         _recovery_fail(username_upper, db, "answer check")
     user.password_hash = pwd_context.hash(payload.new_password)
+    if promote_to_admin:
+        user.role = "Admin"
     db.commit()
+    # HEARTBEAT: the password reset (and any promotion) must reach the other
+    # office computers in seconds, not on the next sync cycle.
+    sync_engine.notify_users_changed()
+    # The recovery reset must also clear a stale login lockout: this path
+    # exists for offices with no Admin to do it manually, and a locked
+    # account that just proved its identity should be able to sign in now.
+    _clear_persisted_lock(username_upper, db)
+    with _login_lock:
+        _login_attempts.pop(username_upper, None)
     _recovery_ok(username_upper, db, "password reset")
     log_action(db, username_upper, "PASSWORD_RESET", "0", "SYSTEM", "Password reset via security questions on this computer.")
+    if promote_to_admin:
+        log_action(db, username_upper, "ADMIN_RESTORED", "0", "SYSTEM",
+                   "No Admin exists in the office. The recovered account was promoted to Admin (last-resort path).")
+        return {"status": "success", "message": "Password updated and this account is now the office Admin. You can now sign in with the new password."}
     return {"status": "success", "message": "Password updated. You can now sign in with the new password."}
 
 @app.put("/recovery/setup")
@@ -1596,6 +1825,8 @@ def update_password(payload: PasswordUpdate, current_user: User = Depends(get_cu
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     current_user.password_hash = pwd_context.hash(payload.new_password)
     db.commit()
+    # HEARTBEAT: the password roams, so wake the other computers to pull it.
+    sync_engine.notify_users_changed()
     log_action(db, get_full_name(current_user), "UPDATE_SECURITY", "0", "SYSTEM", "Updated account password")
     return {"status": "success"}
 
@@ -1607,6 +1838,8 @@ def update_username(payload: UsernameUpdate, current_user: User = Depends(get_cu
     old_username = current_user.username
     current_user.username = payload.new_username.upper()
     db.commit()
+    # HEARTBEAT: username changes roam with the account; wake the others now.
+    sync_engine.notify_users_changed()
     
     log_action(db, get_full_name(current_user), "UPDATE_USERNAME", "0", "SYSTEM", f"Changed username from {old_username} to {payload.new_username.upper()}")
     return {"status": "success"}
@@ -1623,14 +1856,21 @@ def update_username(payload: UsernameUpdate, current_user: User = Depends(get_cu
 class AdminBootstrap(BaseModel):
     password: str
 
+class UserSetActive(BaseModel):
+    username: str
+    # Deactivate or reactivate an account. true = active again, false = off.
+    is_active: bool
+    # Only used when the office has a single active Admin (two-key rule): the
+    # direct execution then demands a written reason.
+    override_reason: str = ""
+
 @app.get("/admin/needed")
 def admin_needed(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"needed": db.query(User).filter(User.role == "Admin").count() == 0}
 
 @app.post("/admin/bootstrap")
 def admin_bootstrap(payload: AdminBootstrap, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    has_admin = db.query(User).filter(User.role == "Admin").count() > 0
-    if has_admin:
+    if _active_admins(db):
         log_action(db, get_full_name(current_user), "ADMIN_BOOTSTRAP_DENIED", "0", "SYSTEM",
                    "Bootstrap refused: an Admin already exists.")
         raise HTTPException(status_code=403, detail="An Admin account already exists. Ask that Admin to manage accounts.")
@@ -1640,6 +1880,8 @@ def admin_bootstrap(payload: AdminBootstrap, current_user: User = Depends(get_cu
         raise HTTPException(status_code=401, detail="Password did not match this account.")
     current_user.role = "Admin"
     db.commit()
+    # HEARTBEAT: role changes roam, so wake the other computers now.
+    sync_engine.notify_users_changed()
     log_action(db, get_full_name(current_user), "ADMIN_BOOTSTRAP", "0", "SYSTEM",
                f"First-run bootstrap: {current_user.username} became the office Admin.")
     return {"status": "success", "role": "Admin", "message": f"{current_user.username} is now the office Admin."}
@@ -1655,9 +1897,20 @@ def admin_bootstrap(payload: AdminBootstrap, current_user: User = Depends(get_cu
 def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_admin(current_user)
     users = db.query(User).order_by(User.username).all()
+    # LOGIN rows are written with the signer's full name, so one lookup maps
+    # each account to its most recent successful sign-in. Accounts that never
+    # signed in (freshly created, or password-pending sync stubs) show None.
+    login_times = dict(
+        db.query(AuditLog.clerk_name, func.max(AuditLog.timestamp))
+        .filter(AuditLog.action == "LOGIN")
+        .group_by(AuditLog.clerk_name)
+        .all()
+    )
     return [
         {"username": u.username, "full_name": get_full_name(u), "role": u.role,
-         "has_password": bool(u.password_hash) and u.password_hash != "SYNCED_NO_PASSWORD"}
+         "has_password": bool(u.password_hash) and u.password_hash != "SYNCED_NO_PASSWORD",
+         "is_deactivated": bool(getattr(u, "is_deactivated", False)),
+         "last_login": login_times[get_full_name(u)].isoformat() if login_times.get(get_full_name(u)) else None}
         for u in users
     ]
 
@@ -1666,6 +1919,8 @@ def admin_create_user(payload: UserCreate, current_user: User = Depends(get_curr
     require_admin(current_user)
     if payload.role not in ("Admin", "Clerk"):
         raise HTTPException(status_code=400, detail="Role must be Admin or Clerk")
+    if payload.password_confirm is not None and payload.password != payload.password_confirm:
+        raise HTTPException(status_code=422, detail="Passwords do not match.")
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     username_upper = payload.username.strip().upper()
@@ -1682,12 +1937,17 @@ def admin_create_user(payload: UserCreate, current_user: User = Depends(get_curr
     )
     db.add(new_user)
     db.commit()
+    # HEARTBEAT: the new account can sign in on every computer, so wake the
+    # others to pull it immediately.
+    sync_engine.notify_users_changed()
     log_action(db, get_full_name(current_user), "CREATE_USER", "0", "SYSTEM", f"Admin created {payload.role} account {username_upper}")
     return {"status": "success", "message": f"Account {username_upper} created."}
 
 @app.put("/users/reset-password")
 def admin_reset_password(payload: AdminPasswordReset, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_admin(current_user)
+    if payload.password_confirm is not None and payload.new_password != payload.password_confirm:
+        raise HTTPException(status_code=422, detail="Passwords do not match.")
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     target = db.query(User).filter(User.username == payload.username.strip().upper()).first()
@@ -1695,11 +1955,82 @@ def admin_reset_password(payload: AdminPasswordReset, current_user: User = Depen
         raise HTTPException(status_code=404, detail="Account not found")
     target.password_hash = pwd_context.hash(payload.new_password)
     db.commit()
+    # HEARTBEAT: the old password must die everywhere within seconds.
+    sync_engine.notify_users_changed()
     _clear_persisted_lock(target.username, db)
     with _login_lock:
         _login_attempts.pop(target.username, None)
     log_action(db, get_full_name(current_user), "RESET_PASSWORD", "0", "SYSTEM", f"Admin reset the password of {target.username}")
     return {"status": "success", "message": f"Password of {target.username} reset."}
+
+@app.put("/users/set-active")
+def admin_set_user_active(payload: UserSetActive, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # DEACTIVATE / REACTIVATE. Deactivation switches an account off without
+    # deleting it: the person's records, audit history, and settings stay
+    # untouched, only sign-in is refused. Reactivation restores access.
+    require_admin(current_user)
+    if payload.is_active and current_user.is_deactivated:
+        # A deactivated admin's old token must not be able to sign anyone in;
+        # with this gate the request dies before the target is touched.
+        raise HTTPException(status_code=403, detail="This account is deactivated. Ask another Admin to sign in.")
+    target = db.query(User).filter(User.username == payload.username.strip().upper()).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if target.id == current_user.id:
+        # This rule is what guarantees every office always keeps at least one
+        # active Admin: whoever acts must be an active Admin, and an active
+        # Admin cannot switch off their own account, so the last active Admin
+        # can never be deactivated through the API.
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account while signed in to it.")
+
+    if _other_active_admin_exists(db, current_user):
+        # TWO-KEY: with another active Admin in the office, switching an
+        # account off (or back on) files a ticket that a DIFFERENT Admin must
+        # approve. Nobody switches an account on their own say-so.
+        action_word = "reactivate" if payload.is_active else "deactivate"
+        if db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "user_deactivate",
+                ApprovalTicket.status == "pending",
+                ApprovalTicket.payload_json.contains(target.username)).first():
+            raise HTTPException(status_code=409, detail=f"A ticket to {action_word} {target.username} is already waiting for approval.")
+        ticket = ApprovalTicket(
+            created_by=get_full_name(current_user),
+            ticket_type="user_deactivate",
+            payload_json=json.dumps({"username": target.username, "is_active": bool(payload.is_active)}),
+            reason=(payload.override_reason or "").strip() or None,
+        )
+        db.add(ticket)
+        db.commit()
+        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, "SYSTEM",
+                   f"Requested approval to {action_word} the account of {target.username}.")
+        if current_user.role == "Admin":
+            return {"status": "ticket_filed",
+                    "message": f"Request sent to another Admin for approval. {target.username} is unchanged until they approve."}
+        return {"status": "ticket_filed",
+                "message": f"Request sent to the Admin for approval. {target.username} is unchanged until they approve."}
+
+    # OVERRIDE VALVE: one-admin office; direct execution with a mandatory
+    # written reason recorded in the audit log.
+    reason = (payload.override_reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="You are the only active Admin. Type a short reason so the audit log records why this account is being switched.")
+    target.is_deactivated = not payload.is_active
+    db.commit()
+    # HEARTBEAT: a deactivated clerk must not be able to dodge the switch by
+    # signing in on another computer; wake those computers to pull the flag now.
+    sync_engine.notify_users_changed()
+    if not payload.is_active:
+        _clear_persisted_lock(target.username, db)
+        with _login_lock:
+            _login_attempts.pop(target.username, None)
+        log_action(db, get_full_name(current_user), "DEACTIVATE_USER", "0", "SYSTEM",
+                   f"Single-admin override: deactivated the account of {target.username}. Sign-in is refused until it is reactivated. Reason: {reason}")
+        return {"status": "success",
+                "message": f"{get_full_name(target)} is deactivated. History and records are kept; sign-in is refused."}
+    log_action(db, get_full_name(current_user), "REACTIVATE_USER", "0", "SYSTEM",
+               f"Single-admin override: reactivated the account of {target.username}. Reason: {reason}")
+    return {"status": "success", "message": f"{get_full_name(target)} can sign in again."}
 
 @app.get("/settings")
 def get_settings(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1757,7 +2088,19 @@ def get_network_status(current_user: User = Depends(get_current_user)):
         "connected_peers": list(PEERS),
         "peer_names": peer_names,
         "computer_name": sync_engine.COMPUTER_NAME,
+        "last_sync_check": sync_engine.get_last_sync_check(),
     }
+
+@app.post("/system/sync-now")
+def sync_now(current_user: User = Depends(get_current_user)):
+    """Sync now button (Admin Console > Technical). Wakes the pull loop for
+    an immediate cycle instead of waiting for the next 10-second tick. The
+    heartbeat nudge already does this automatically after user changes; this
+    is the manual override for when an office wants records pulled right
+    away, for example after reconnecting a cable."""
+    require_admin(current_user)
+    sync_engine.request_sync_cycle()
+    return {"status": "success", "message": "Sync cycle requested. Records refresh in a moment."}
 
 @app.post("/system/computer-name")
 def set_computer_name_endpoint(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1985,6 +2328,7 @@ def admin_diagnostics(current_user: User = Depends(get_current_user), db: Sessio
             "peers": sorted(PEERS),
             "peer_names": dict(sync_engine.PEER_NAMES),
             "computer_name": sync_engine.COMPUTER_NAME,
+            "last_sync_check": sync_engine.get_last_sync_check(),
         },
         "backup": latest_backup,
         "crash_log_tail": crash_tail,
@@ -2009,6 +2353,20 @@ def admin_audit_overview(current_user: User = Depends(get_current_user), db: Ses
         .group_by(AuditLog.clerk_name)
         .all()
     )
+    # One bar per day for the last 7 days. Counted in office time (the same
+    # clock the audit rows are written with), and empty days are filled with
+    # zero so the chart shows a quiet day as a quiet day, not a gap.
+    per_day = (
+        db.query(func.date(AuditLog.timestamp), func.count(AuditLog.id))
+        .filter(AuditLog.timestamp >= week_ago)
+        .group_by(func.date(AuditLog.timestamp))
+        .all()
+    )
+    counts_by_date = {str(d): c for d, c in per_day}
+    daily_last_7_days = []
+    for offset in range(6, -1, -1):
+        day = (get_pht_now() - timedelta(days=offset)).date()
+        daily_last_7_days.append({"day": day.strftime("%a"), "count": counts_by_date.get(day.isoformat(), 0)})
     return {
         "total_logs": db.query(AuditLog).count(),
         "logs_last_7_days": sum(c for _, c in actions),
@@ -2017,6 +2375,7 @@ def admin_audit_overview(current_user: User = Depends(get_current_user), db: Ses
             ({"action": a, "count": c} for a, c in actions), key=lambda x: -x["count"]),
         "users_last_7_days": sorted(
             ({"user": (u or "SYSTEM"), "count": c} for u, c in by_user), key=lambda x: -x["count"]),
+        "daily_last_7_days": daily_last_7_days,
     }
 
 @app.post("/api/operators")
@@ -3625,6 +3984,32 @@ def kill_zombie_port(port):
     except Exception as e:
         pass
 
+def _log_bind_time(host, port):
+    """Poll-loop that fires exactly once, when the port is first reachable.
+
+    Diagnosing a remote office's slow boot needs one number in the crash
+    log: how long from process start to "serving". uvicorn's own logs are
+    quiet at warning level, so this watcher answers it. "bound and serving"
+    from the log means the app UI's health probe will succeed on its very
+    next tick; total process age = imports + bind, both visible here.
+    """
+    import socket as _socket
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            with _socket.create_connection((probe_host, port), timeout=0.5):
+                force_log(
+                    f"[TELEMETRY] Backend bound and serving at "
+                    f"{time.time() - BOOT_T0:.1f}s after import finish "
+                    f"(host={host}, port={port}), proc age "
+                    f"{time.time() - PROC_T0:.1f}s"
+                )
+                return
+        except OSError:
+            time.sleep(0.2)
+    force_log("[TELEMETRY] Backend did NOT bind within 600s after start")
+
 if __name__ == "__main__":
     try:
         force_log("Scanning for zombie processes on Port 43888...")
@@ -3638,7 +4023,16 @@ if __name__ == "__main__":
         api_host = os.environ.get("PASADA_API_HOST", "0.0.0.0")
         print(f"[Backend] Starting Uvicorn server on http://{api_host}:43888 ...")
         sys.stdout.flush()
-        uvicorn.run(app, host=api_host, port=43888)
+        # log_level="warning" quiets the per-request access-log lines. The
+        # login/signup screens poll /health every 1s and the dashboard every
+        # 15s, so at the default INFO level the terminal floods with a line
+        # per GET and drowns out anything useful. Warnings and errors still
+        # print, so real problems stay visible. Set PASADA_HTTP_ACCESS_LOG=1
+        # to bring the access log back when debugging the wire.
+        http_access_log = os.environ.get("PASADA_HTTP_ACCESS_LOG", "") == "1"
+        # TELEMETRY: one background watcher thread, fires once on bind.
+        threading.Thread(target=_log_bind_time, args=(api_host, 43888), daemon=True).start()
+        uvicorn.run(app, host=api_host, port=43888, log_level="warning", access_log=http_access_log)
     except Exception as e:
         err_str = traceback.format_exc()
         force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{err_str}")

@@ -38,6 +38,7 @@ export default function Signup() {
     const [lastName, setLastName] = useState("");
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
+    const [confirmPassword, setConfirmPassword] = useState("");
     const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState("");
     const [loading, setLoading] = useState(false);
@@ -45,6 +46,17 @@ export default function Signup() {
 
     // DIAGNOSTIC STATE
     const [connError, setConnError] = useState("");
+
+    // Wait clock on the Connecting panel: same rationale as the login page.
+    // The backend can legitimately take minutes on its first boot; a bare
+    // spinner reads as "frozen".
+    const [waitSeconds, setWaitSeconds] = useState(0);
+
+    useEffect(() => {
+        if (serverReady) return;
+        const timer = setInterval(() => setWaitSeconds((s) => s + 1), 1000);
+        return () => clearInterval(timer);
+    }, [serverReady]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -83,6 +95,10 @@ export default function Signup() {
             setError("Password must be at least 8 characters.");
             return;
         }
+        if (password !== confirmPassword) {
+            setError("Passwords do not match.");
+            return;
+        }
         
         setLoading(true);
         setError("");
@@ -97,6 +113,7 @@ export default function Signup() {
                     last_name: lastName.trim().toUpperCase(),
                     username: username.trim().toUpperCase(),
                     password: password,
+                    password_confirm: confirmPassword,
                     role: "Clerk", 
                 }),
             });
@@ -128,13 +145,16 @@ export default function Signup() {
                     <div className="flex flex-col items-center justify-center space-y-4 py-8 bg-muted/30 rounded-xl border border-border">
                         <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />
                         <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>
-                        
-                        {/* ON-SCREEN DIAGNOSTIC OUTPUT */}
-                        {connError && (
-                            <p className="text-[10px] font-mono text-red-500 max-w-xs text-center break-words opacity-80 px-4">
-                                Diagnostic: {connError}
-                            </p>
-                        )}
+                        <p className="text-xs text-muted-foreground text-center px-4">
+                            {waitSeconds < 20
+                                ? "Starting the PASADA service on this computer..."
+                                : waitSeconds < 90
+                                ? "Still starting — first launch after a cold boot can take a while on this machine."
+                                : "The PASADA service is slow to start. The office computer is busy; it usually comes up on its own — if this lasts several minutes, restart the app."}
+                        </p>
+                        <p className="text-[10px] font-mono text-muted-foreground opacity-70">
+                            Waiting: {waitSeconds}s
+                        </p>
                     </div>
                 ) : (
                     <form onSubmit={handleSignup} className="space-y-5">
@@ -195,6 +215,29 @@ export default function Signup() {
                                     onClick={() => setShowPassword(!showPassword)}
                                     aria-label={showPassword ? "Hide password" : "Show password"}
                                     data-tip={showPassword ? "Hide the password" : "Show the password"}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-900 dark:hover:text-white p-1 transition-colors"
+                                >
+                                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div className="space-y-1.5 relative">
+                            <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">Confirm Password</label>
+                            <div className="relative">
+                                <input
+                                    type={showPassword ? "text" : "password"}
+                                    value={confirmPassword}
+                                    onChange={(e) => setConfirmPassword(e.target.value)}
+                                    placeholder="********"
+                                    className="w-full bg-muted/40 border border-border rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-slate-900/50 dark:focus:ring-white/50 transition-all pr-12 text-slate-900 dark:text-white [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
+                                    required
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowPassword(!showPassword)}
+                                    aria-label={showPassword ? "Hide passwords" : "Show passwords"}
+                                    data-tip={showPassword ? "Hide the passwords" : "Show the passwords"}
                                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-900 dark:hover:text-white p-1 transition-colors"
                                 >
                                     {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

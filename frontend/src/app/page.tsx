@@ -43,12 +43,48 @@ export default function Login() {
   const [password, setPassword] = useState("");  
   const [showPassword, setShowPassword] = useState(false);  
   const [error, setError] = useState("");  
-  const [loading, setLoading] = useState(false);  
-  const [serverReady, setServerReady] = useState(false);  
-  const [isCheckingSession, setIsCheckingSession] = useState(true);  
+  const [loading, setLoading] = useState(false);  const [serverReady, setServerReady] = useState(false); 
+  const [isCheckingSession, setIsCheckingSession] = useState(true); 
 
   // DIAGNOSTIC STATE
   const [connError, setConnError] = useState("");
+
+  // HOW LONG have we been waiting? The backend's first boot on a cold or
+  // busy machine (loading a 100 MB PyInstaller binary off a slow spinning
+  // disk) can take minutes while it races the office PC's other work for
+  // the disk. A spinner with no clock reads as "the app froze"; a wait that
+  // keeps reporting itself reads as "the app is working on it".
+  const [waitSeconds, setWaitSeconds] = useState(0);
+
+  useEffect(() => {
+    if (serverReady) return;
+    const timer = setInterval(() => setWaitSeconds((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, [serverReady]);
+
+  // REAL READINESS SIGNAL: inside the Tauri shell the Rust side watches the
+  // sidecar and emits backend-status — "ready" the moment the API port
+  // accepts a connection, "failed" when the backend process dies or never
+  // opens the port within five minutes. The health-probe fallback below
+  // still covers plain-browser contexts (e2e, dev server) where no Tauri
+  // event source exists.
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI_INTERNALS__) return;
+    let unlisten: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      type BackendStatus = { type: "ready" } | { type: "failed"; message?: string };
+      unlisten = await listen<BackendStatus>("backend-status", (event) => {
+        const status = event.payload as BackendStatus | undefined;
+        if (status?.type === "ready") {
+          setServerReady(true);
+          setConnError("");
+        } else if (status?.type === "failed") {
+          setConnError(status.message || "The PASADA service on this computer stopped.");
+        }
+      });
+    }).catch(() => {});
+    return () => { try { unlisten?.(); } catch {} };
+  }, []);
 
   // FORGOT PASSWORD (SECURITY QUESTIONS) STATE
   const [mode, setMode] = useState<"login" | "recover">("login");
@@ -61,7 +97,7 @@ export default function Login() {
   // Registration is first-run-only on the backend (403 once any account
   // exists). The backend answer arrives as errData.detail, and the button is
   // hidden as soon as the health probe reports a server that already has an
-  // account — probed once here so stale installs stop showing a dead button.
+  // account (probed once here so stale installs stop showing a dead button).
   const [registrationOpen, setRegistrationOpen] = useState(true);
 
   useEffect(() => {  
@@ -253,8 +289,17 @@ export default function Login() {
   
         {!serverReady ? (  
           <div className="flex-1 flex flex-col items-center justify-center space-y-4 bg-muted/30 rounded-xl border border-border">  
-            <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />  
-            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>  
+            <Loader2 className="h-8 w-8 animate-spin text-slate-900 dark:text-white" />            <p className="text-sm font-bold text-slate-900 dark:text-white animate-pulse">Connecting to server...</p>
+            <p className="text-xs text-muted-foreground text-center px-4">
+              {waitSeconds < 20
+                ? "Starting the PASADA service on this computer..."
+                : waitSeconds < 90
+                ? "Still starting — first launch after a cold boot can take a while on this machine."
+                : "The PASADA service is slow to start. The office computer is busy; it usually comes up on its own — if this lasts several minutes, restart the app."}
+            </p>
+            <p className="text-[10px] font-mono text-muted-foreground opacity-70">
+              Waiting: {waitSeconds}s
+            </p>
             
             {/* ON-SCREEN DIAGNOSTIC OUTPUT */}
             {connError && (

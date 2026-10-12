@@ -1,115 +1,168 @@
 # Releasing PASADA
 
-## How releases work (fully automatic)
+Installers are produced **on the Windows build machine** — the document
+pipeline needs Microsoft Word, so they cannot be built on the Linux dev
+machine (see README → "Packaging and deployment readiness"). There are two
+ways to get a release out:
 
-One workflow, one command. Every push to `main` is a release — no version
-editing, no tag commands, ever.
+1. **CI (Windows-only):** push to `main`. `release.yml` bumps the patch
+   version, stamps it, builds the signed Windows installer, and publishes the
+   GitHub Release with `latest.json`. This is the routine path.
+2. **By hand:** when CI is unavailable or you need a specific build, the steps
+   below are exactly what CI runs, in the same order, on the Windows machine.
 
-| Workflow | Trigger | Job |
-|----------|---------|-----|
-| `release.yml` | every push to `main`, `v*` tags, or manual run | bumps the version, stamps it into the app, tags the commit, builds the signed installer, publishes the GitHub Release |
+Either way the in-app updater reads the same endpoint, so the manual path must
+produce byte-identical artifacts to CI's.
 
-There is no `build.yml` anymore; `release.yml` replaces it.
+That endpoint is
+`https://github.com/Meseten/PASADA/releases/latest/download/latest.json`, so a
+release is not finished until that file is attached to a GitHub Release. If it
+is missing or its `version` is not greater than the installed app's, every
+office machine's *Check for Updates* silently reports "up to date".
 
-## What you do
+## 1. Bump the version
+
+(Skip this on the CI path — it stamps the version for you.) Four places must
+agree. Pick the next version by hand (PATCH for fixes, MINOR for features,
+MAJOR for breaking changes):
+
+| File | Field |
+|------|-------|
+| `frontend/src-tauri/tauri.conf.json` | `"version"` |
+| `frontend/src-tauri/Cargo.toml` | `version = "..."` |
+| `frontend/src/app/settings/page.tsx` | `const APP_VERSION = "..."` |
+| `.github/version.txt` | whole line (record of the current release) |
+
+The installer filename, the About page, and the update manifest all read these
+values; a mismatch makes the updater consider the new build "already
+installed".
+
+## 2. Build the Python sidecar
 
 ```bash
-git add -A && git commit -m "what you changed" && git push origin main
+cd backend
+pip install -r requirements.txt
+pyinstaller --onefile \
+  --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging \
+  --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto \
+  --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto \
+  --hidden-import python_multipart --hidden-import multipart \
+  --hidden-import anyio._backends._asyncio --hidden-import psutil \
+  --hidden-import jose --hidden-import pypdf \
+  --hidden-import win32com --hidden-import pythoncom \
+  --add-data "template.docx;." --add-data "dashboard_template.docx;." \
+  --name pasada-backend-x86_64-pc-windows-msvc main.py
+mkdir -p ../frontend/src-tauri/bin
+cp dist/pasada-backend-x86_64-pc-windows-msvc.exe ../frontend/src-tauri/bin/
 ```
 
-That is the whole ritual. The workflow then:
+The binary name encodes the target triple — `tauri.conf.json` declares it as
+`bundle.externalBin`, and the app will not start without it. `win32com` /
+`pythoncom` exist only on Windows; they are what make Word-rendered PDFs work
+in the packaged app.
 
-1. Reads `.github/version.txt` (the version source of truth, currently
-   `0.82.1`) and bumps the PATCH number: `0.82.1` → `0.82.2`.
-2. Stamps that version into `tauri.conf.json`, `Cargo.toml`, and `APP_VERSION`
-   in the settings page, so the installer, updater manifest, and About page
-   always agree.
-3. Commits `.github/version.txt` back to `main` as
-   `chore: release v0.82.2 [skip ci]` (the `[skip ci]` marker stops the bump
-   commit from re-triggering the workflow) and tags the commit `v0.82.2`.
-4. Builds the Python backend and the signed Tauri frontend.
-5. Publishes a GitHub Release with the installer, signatures, and
-   `latest.json`. Office machines pick it up through Settings > General >
-   App Updates > Check for Updates.
-
-Pushing a `v*` tag by hand also works and releases exactly that version
-without bumping — useful for re-running a broken release.
-
-## Version numbering
-
-Versions increase automatically: one commit on `main` = one PATCH bump
-(`0.82.1` → `0.82.2` → `0.82.3` ...). There is no manual bumping to forget.
-
-When *you* want a MINOR or MAJOR jump — a feature release or a breaking
-change — edit `.github/version.txt` once in a normal commit, for example to
-`0.83.0`. The next push to main releases `0.83.1` from that base.
-
-| Bump | When |
-|------|------|
-| PATCH `0.82.2` | automatic: every push to main |
-| MINOR `0.83.0` | you edit `.github/version.txt` when a feature set ships |
-| MAJOR `1.0.0` | you edit `.github/version.txt` for breaking changes |
-
-## Where the version lives now
-
-1. `.github/version.txt` — the single source of truth. The workflow owns it;
-   you only touch it for MINOR/MAJOR jumps.
-2. `tauri.conf.json`, `Cargo.toml`, `APP_VERSION` — written automatically by
-   the workflow at build time. Do not edit them by hand anymore; the next
-   release overwrites whatever is there.
-
-## One-time setup: signing key
-
-The updater refuses unsigned bundles, so generate a key pair once on any
-machine with the repo checked out:
+## 3. Build and sign the Tauri app
 
 ```bash
 cd frontend
-npx tauri signer generate -w ~/.tauri/pasada.key
+npm install
+set TAURI_SIGNING_PRIVATE_KEY=<key file contents>
+set TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<passphrase>
+npm run tauri build
 ```
 
-- Copy the **public key** (printed to the terminal) into
-  `frontend/src-tauri/tauri.conf.json` under `plugins.updater.pubkey`.
-- Keep the private key file and its passphrase safe; the private key must
-  never be committed. Lose it and every already-installed copy can never
-  auto-update again.
-- In the GitHub repo: Settings > Secrets and variables > Actions, add
-  `TAURI_SIGNING_PRIVATE_KEY` (the key file contents) and
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the passphrase).
+(`export` instead of `set` under Git Bash.) The updater refuses unsigned
+bundles, so the signing env vars are mandatory — without them the build
+succeeds but produces no `.sig` files and step 4 fails.
 
-## What the release pipeline produces
+Output lands in `frontend/src-tauri/target/release/bundle/`:
 
-`release.yml` runs on `windows-latest` and publishes to the release page:
+- `nsis/PASADA_<ver>_x64-setup.exe` (+ `.sig`) — new installs **and** the
+  updater bundle (Tauri v2 `createUpdaterArtifacts: true` re-uses the
+  installer; there is no `.zip`).
+- `msi/PASADA_<ver>_x64_en-US.msi` (+ `.sig`) — alternative installer.
 
-| File | What it is |
-|------|------------|
-| `PASADA_<ver>_x64-setup.exe` | NSIS installer for new installs; also the updater bundle |
-| `PASADA_<ver>_x64-setup.exe.sig` | minisign signature of the installer |
-| `PASADA_<ver>_x64_en-US.msi` (+ `.sig`) | MSI alternative |
-| `latest.json` | updater manifest: version, download URL, signature |
+## 4. Generate `latest.json`
 
-Tauri v2 with `createUpdaterArtifacts: true` produces **no `.zip` updater
-bundle on Windows**; the updater downloads and verifies the installer itself.
-The `latest.json` generator uses the v2 layout (`.exe`/`.msi` + `.sig`).
+Collect the signed assets and build the manifest (run from the repo root):
 
-## What end users experience
+```bash
+mkdir -p release-assets
+cp frontend/src-tauri/target/release/bundle/nsis/*.exe* release-assets/
+cp frontend/src-tauri/target/release/bundle/msi/*.msi*   release-assets/
 
-- **New installs:** download `PASADA_..._x64-setup.exe` from the release page
-  and run it. That is the only time an installer file is needed.
-- **Existing installs:** PASADA checks GitHub Releases when someone opens
-  Settings > General, finds the App Updates card, and clicks *Check for
-  Updates*. The app downloads the signed update, verifies the signature
-  against the embedded public key, and restarts into the new version.
-- **Data safety:** the SQLite database lives outside the install directory
-  (`platformdirs` user data dir), so updates never touch the records.
+VERSION=<the version you stamped in step 1> python - <<'PY'
+import json, os, glob, datetime
 
-## Release troubleshooting
+version = os.environ["VERSION"]
+assets = {}
+for pattern in ("release-assets/*x64-setup.exe", "release-assets/*.msi"):
+    for path in glob.glob(pattern):
+        name = os.path.basename(path)
+        if os.path.exists(path + ".sig"):
+            assets[name] = {
+                "signature": open(path + ".sig").read().strip(),
+                "url": f"https://github.com/Meseten/PASADA/releases/download/v{version}/{name}",
+            }
+
+if not assets:
+    raise SystemExit("No signed updater artifacts: need x64-setup.exe + .sig (or .msi + .sig).")
+
+setup = next((a for n, a in sorted(assets.items()) if n.endswith("x64-setup.exe")), None) \
+        or list(assets.values())[0]
+
+json.dump({
+    "version": version,
+    "notes": f"PASADA v{version}",
+    "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "platforms": {"windows-x86_64": setup},
+}, open("release-assets/latest.json", "w"), indent=2)
+print(open("release-assets/latest.json").read())
+PY
+```
+
+The download URLs must match the release tag **exactly** (`v<version>`), or
+the updater 404s on every office machine.
+
+## 5. Publish the GitHub Release
+
+Upload the installers, their `.sig` files, **and** `latest.json` to a release
+tagged `v<version>`. With the GitHub CLI:
+
+```bash
+gh release create "v$VERSION" --title "PASADA v$VERSION" release-assets/*
+```
+
+or by hand: GitHub → releases → Draft a new release → attach the files.
+
+**Upload each file exactly once.** Re-uploading `latest.json` over an existing
+asset fails with `update-a-release-asset ... Not Found` (hit in v0.82.3); if
+that happens, delete the release and recreate it.
+
+## 6. Verify before telling the office
+
+1. The release page shows the installers, signatures, and `latest.json`.
+2. On a machine with the **previous** version installed: Settings → General →
+   App Updates → *Check for Updates* finds, downloads, verifies, and restarts
+   into the new version.
+3. Data survives: the SQLite database lives in the platform data dir, outside
+   the install directory, so the update never touches records.
+
+## Version numbering
+
+| Bump | When |
+|------|------|
+| PATCH `0.82.5` | fixes |
+| MINOR `0.83.0` | feature set |
+| MAJOR `1.0.0` | breaking changes |
+
+## Troubleshooting
 
 | Symptom | Cause and fix |
 |---------|---------------|
-| `No signed updater artifacts found` | The asset-copy step found no `.exe`/`.msi` + `.sig` pairs. Open the "Prepare release assets" step log: it lists `release-assets/`. If empty, the Tauri build failed upstream or signing secrets are wrong. |
-| `A public key has been found, but no private key` | `TAURI_SIGNING_PRIVATE_KEY` missing/empty at build time. The workflow fails fast on this before the compile. Paste the **private** key contents (starts with `untrusted comment: minisign encrypted secret key`), not the `.pub` file. |
-| `checksum error` on install | The installer and the `.sig` on the release page are from different builds. Re-run the release; never hand-swap files. |
-| Updater says up to date but a newer release exists | The installed app's version is not lower than the manifest's. Next push to main bumps the patch again and clears it. |
-| Workflow skips the release step on a bump commit | Expected: commits containing `[skip ci]` never re-trigger workflows. |
-| Version jumped unexpectedly | Every push to main bumps the patch, including doc fixes. Harmless; no action needed. |
+| Build succeeds but step 4 says "No signed updater artifacts" | Signing env vars were unset — no `.sig` files exist. Rebuild step 3 with them set; never hand-craft `.sig` files. |
+| `A public key has been found, but no private key` | `TAURI_SIGNING_PRIVATE_KEY` missing or empty at build time. Paste the private key file contents (starts with `untrusted comment: minisign encrypted secret key`), not the `.pub` file. |
+| App starts but the backend never answers | The sidecar binary name doesn't match `bundle.externalBin` / the target triple. Rebuild step 2 with the exact `--name`. |
+| `checksum error` during update | Installer and `.sig` on the release page are from different builds. Rebuild and re-upload the pair; never hand-swap files. |
+| *Check for Updates* says up to date though a newer release exists | Installed version ≥ manifest version — the stamped versions in step 1 disagreed. Fix the stamp and re-release. |
+| Office machine never sees any release | `latest.json` missing from the release, or not the "latest" release. The endpoint is `releases/latest/download/latest.json`. |
