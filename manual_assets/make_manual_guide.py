@@ -324,6 +324,13 @@ def build():
         "Sign in with the new password.",
     ])
     note_box(doc, "NOTE:", "The admin can also set a new password for you from the Admin Console. Your records are never lost because of a forgotten password.")
+    h2(doc, "When the office has no admin at all")
+    para(doc, "Some offices end up with working accounts but no admin: the one admin left, or the office's accounts arrived from another computer. PASADA has two self-service doors for this, and both close forever the moment an admin exists.")
+    bullets(doc, [
+        "The one-time setup: while no admin exists, every signed-in account sees the Admin Console link in the sidebar. Opening it shows a panel that turns this account into the admin after you confirm your own password.",
+        "The recovery door: if nobody can sign in to reach that panel, a clerk who set security questions earlier can answer them at Forgot Password?. While no admin exists anywhere, a correct set of answers also makes that account the admin, not just reset the password.",
+    ])
+    para(doc, "Every promotion is written to the Activity History, and both doors shut permanently once an admin is in place. They cannot be used to mint a second admin behind the real one's back.")
     h2(doc, "The two roles: Clerk and Admin")
     para(doc, "Every account is a Clerk or an Admin. The difference is a short, clear list of extra powers, explained fully in Chapter 8:")
     data_table(doc,
@@ -332,9 +339,10 @@ def build():
             ("Add, edit, renew, delete records", "Yes", "Yes"),
             ("Search, print, export", "Yes", "Yes"),
             ("Import Excel files", "Yes", "Yes"),
-            ("File a request to delete/rename a route", "Yes", "Directly"),
-            ("Restore deleted records", "File request", "Approve or do directly"),
+            ("File a request to delete/rename a route", "Yes", "Ticket; another admin approves, or direct with a typed reason if alone"),
+            ("Restore deleted records", "File request", "Ticket; another admin approves, or direct with a typed reason if alone"),
             ("Create accounts, reset passwords", "No", "Yes"),
+            ("Deactivate or reactivate an account", "No", "Ticket; another admin approves, or direct with a typed reason if alone"),
             ("Upload document templates", "No", "Yes"),
             ("Import or restore a database file", "No", "Yes"),
             ("See system health and error notes", "No", "Yes"),
@@ -483,6 +491,21 @@ def build():
     para(doc, "Set a 4-digit PIN. PASADA then locks the screen when you step away, and the PIN unlocks it without typing your full password. The PIN is stored only on this computer, in secret form, and the change is written to the Activity History.")
     h2(doc, "Security: Manage Office Accounts (admin)")
     para(doc, "The admin creates accounts for new clerks here and resets forgotten passwords. Choose the account, type the new password, save. The new password works on every computer in the office. Creating an account and resetting a password both land in the Activity History.")
+    h2(doc, "Deactivating an account (admin)")
+    para(doc, "When a clerk leaves the office, deactivate the account instead of deleting it. The account table in Security (and in the Admin Console's Administrative tab) shows every account with a Status column and a Deactivate button. Click it, confirm, and the account can no longer sign in on any office computer, even with the right password. Everything the person did stays: records, certificates, and their Activity History entries keep their name.")
+    steps(doc, [
+        "Open Settings > Security (or Admin Console > Administrative).",
+        "Find the person in the account table. Their row shows Active.",
+        "Click Deactivate and read the confirmation window. Click OK.",
+        "The row turns to Deactivated and the button becomes Reactivate.",
+    ])
+    bullets(doc, [
+        "A deactivated account cannot sign in, and even a computer where they are already signed in loses access on the very next click.",
+        "Deactivation spreads to every office computer automatically through sync.",
+        "Changed your mind? Click Reactivate. The account signs in as before.",
+        "You cannot deactivate the account you are signed in with; PASADA blocks it. This also guarantees the office always keeps at least one working admin.",
+        "Every deactivation and reactivation is written to the Activity History.",
+    ])
     h2(doc, "Recovery questions")
     para(doc, "Set or change your three security questions here. Answer honestly; these are your spare key. Answers are stored in secret form and never leave this computer.")
     h2(doc, "Full Database Backup")
@@ -501,6 +524,7 @@ def build():
     para(doc, "Three cards at the top count all-time entries, entries in the last 7 days, and the most recent activity. Two lists below show the most common actions this week and the busiest people. Use this to notice unusual activity: a delete spree or a burst of logins at midnight looks exactly like what it is.")
     h2(doc, "Approvals tab: the two-key queue")
     para(doc, "Requests from clerks land here. Each ticket shows who asked, when, exactly what will happen, and any reason they gave. Waiting tickets sit at the top with Approve and Reject buttons.")
+    para(doc, "The two-key rule covers the Admin too. Deleting a route, renaming a route, restoring deleted records, and deactivating an account always become tickets, even when an Admin clicks them. Nobody can approve their own request. The one exception: an office with a single active Admin executes right away, but must type a reason, and the audit log records it. Every office always keeps at least one working Admin.")
     figure(doc, "12_approvals.png", "The Approvals tab: nothing big happens without a yes here.")
     h2(doc, "Approving or rejecting a ticket")
     steps(doc, [
@@ -517,13 +541,15 @@ def build():
         [
             ("This computer", "Machine name and when PASADA was last started on it."),
             ("Records", "Database check result (want: all good), records saved, accounts, and who the admins are."),
-            ("Sharing between computers", "This computer's name and address, and which other computers are connected."),
+            ("Sharing between computers", "This computer's name and address, which other computers are connected, and the time of the last sync check."),
             ("Latest backup", "The newest automatic nightly backup: file, date, size."),
             ("Error notes", "The last 60 lines of the error log. Normal logging, not a breakdown; support reads this first."),
         ],
         caption="The Technical tab cards.")
+    para(doc, "The Sharing between computers card also has a Sync now button. Sharing runs on its own and new or changed accounts arrive within seconds, but if you want to pull records from the other computers right away (for example after reconnecting a network cable), press it once.")
     h2(doc, "Administrative tab: accounts and templates")
-    para(doc, "Office accounts: create an account by typing a first name, last name, password, and role. Reset a password by choosing the account and typing the new one. Both sync to every computer in the office.")
+    para(doc, "Office accounts: create an account by typing a first name, last name, password, and role. Reset a password by choosing the account and typing the new one. Both reach every computer in the office within seconds.")
+    para(doc, "The account table under the forms lists every account with its role and status. Active means the account can sign in. Deactivated means it cannot, until an admin clicks Reactivate. The Deactivate button asks for confirmation first, and the button on your own row is disabled: no admin can switch off the account they are signed in with, which guarantees the office always keeps at least one working admin.")
     para(doc, "Document templates: the certificate (MTOP) and the TODA summary are Word files with placeholders like [SBN_NO] and [NAME]. When the LGU amends a form, upload the new .docx here. PASADA checks the file is readable, counts the placeholders, warns if any are missing, keeps the previous file as a .bak beside it, and writes the upload to the audit log. One bad upload can always be undone by restoring the .bak.")
     h2(doc, "Every admin power, in one list")
     data_table(doc,
@@ -532,8 +558,9 @@ def build():
             ("Approve or reject tickets", "Approvals tab", "Runs the action immediately on approve."),
             ("Create accounts", "Administrative tab", "Clerk or Admin role; syncs everywhere."),
             ("Reset any password", "Administrative tab / Settings", "Also clears a lockout on that account."),
-            ("Delete a route directly", "Sidebar / route page", "Admin click executes; clerk click files a ticket."),
-            ("Rename a route directly", "Route page", "Same rule: admin direct, clerk ticket."),
+            ("Deactivate / reactivate accounts", "Administrative tab / Settings", "Blocks sign-in everywhere; keeps records and history."),
+            ("Delete a route", "Sidebar / route page", "Two-key: becomes a ticket, even for an Admin; a different Admin approves."),
+            ("Rename a route", "Route page", "Same two-key rule; a one-admin office runs it with a typed reason."),
             ("Restore deleted records", "Deleted list / tickets", "One or many, on approval."),
             ("Import database (merge)", "Import page", "Admin only."),
             ("Full Restore a database", "Import page", "Admin only; replaces matching records."),
@@ -611,7 +638,7 @@ def build():
     bullets(doc, [
         "The Admin Console link appears in the sidebar.",
         "Approve and Reject buttons appear on the Approvals tab.",
-        "The big buttons (Delete Entire Route, Rename) now execute directly instead of filing tickets.",
+        "The big buttons (Delete Entire Route, Rename, Deactivate) follow the same two-key rule as everyone: with another active admin they file tickets for that admin to approve; if you are the only active admin they run right away but ask you to type a reason for the audit log.",
         "Database import and Full Restore accept your sign-in.",
         "Manage Office Accounts, template uploads, system health, and the audit overview become available.",
     ])
@@ -624,6 +651,7 @@ def build():
         "Download a database backup before any big import or cleanup, and keep one off this computer (a USB stick is fine).",
         "Check the Technical tab after installs, moves, or strange behavior; it usually names the problem.",
         "Promote a second admin only if the office truly needs one: two keys are safer than five.",
+        "Deactivate the accounts of staff who leave instead of ignoring them; reactivating takes one click if they return.",
     ])
 
     # ================= CH 12 =================
@@ -657,7 +685,7 @@ def build():
     steps(doc, [
         "Confirm both computers show Online.",
         "Admin: open the Technical tab and check the connected computers list names the other machine.",
-        "Give it a minute; sync runs in the background and catches up by itself.",
+        "Give it a few seconds; a change made on one computer nudges the others to sync right away, and the background cycle keeps catching up after that.",
         "A computer that was off for days catches up automatically the next time both are on.",
     ])
     h2(doc, "6. A record is missing or was deleted by mistake")
@@ -679,7 +707,7 @@ def build():
         "After a very large import, close and reopen the app once; the first open re-organizes the fast lists.",
     ])
     h2(doc, "9. Two computers show different numbers")
-    para(doc, "Short differences are normal; each computer catches up within a minute. If they stay different, restart PASADA on both, then check the connected computers list in the Technical tab. If one computer never appears there, treat it as problem 4.")
+    para(doc, "Short differences are normal; each computer catches up within seconds. If they stay different, restart PASADA on both, then check the connected computers list in the Technical tab. If one computer never appears there, treat it as problem 4.")
     h2(doc, "10. The screen is frozen or the app will not close")
     steps(doc, [
         "Wait 30 seconds first: big exports and batch prints can look like a freeze while working.",
@@ -706,6 +734,14 @@ def build():
         "Compare dashboard totals with the Activity History exports you expect.",
         "Admin: restore an earlier backup file if numbers are wrong; each restore keeps a rollback copy.",
     ])
+    h2(doc, "15. My account says it has been deactivated")
+    para(doc, "The admin switched the account off. Only an admin can switch it back on:")
+    steps(doc, [
+        "Ask the admin to sign in on any office computer.",
+        "Admin: open Settings > Security, find the account in the table, and click Reactivate. The Admin Console's account table has the same button.",
+        "Sign in again with the same password as before. Nothing was deleted.",
+    ])
+    para(doc, "A deactivated account keeps every record, certificate, and Activity History entry under its name. Deactivation spreads to every office computer automatically, so the account is blocked everywhere, not just on one machine.")
     h2(doc, "Still stuck?")
     para(doc, "Collect four things before asking for help: what you clicked, what appeared on screen, the time it happened, and the newest lines from the Technical tab's Error notes. With those four, almost any PASADA problem can be found and fixed quickly.")
 
@@ -725,6 +761,7 @@ def build():
             ("Request a big change", "Click the normal button; the admin approves it"),
             ("Approve requests", "Admin Console > Approvals"),
             ("New account / reset password", "Admin Console > Administrative (admin)"),
+            ("Switch an account off or on", "Admin Console > Administrative: Deactivate / Reactivate"),
             ("Lock the screen", "Set a PIN in Settings; it locks when you leave"),
             ("Backup everything", "Settings > Full Database Backup"),
             ("Check system health", "Admin Console > Technical"),
@@ -749,10 +786,12 @@ def build():
             ("Approval ticket", "A logged request for a big action, waiting for admin approval."),
             ("Audit log / Activity History", "The permanent record of every change: who, what, when, old and new values."),
             ("Backup", "An exact copy of the whole registry, downloadable as one .db file."),
-            ("Sync", "Automatic record sharing between office computers on the same network."),
+            ("Sync", "Automatic record sharing between office computers on the same network, usually within seconds of a change."),
             ("Cluster secret", "The shared key office computers use to recognize each other during sync."),
             ("Template", "The Word document (.docx) with placeholders that certificates are printed from."),
             ("Soft delete", "A delete that keeps the record recoverable in the deleted list."),
+            ("Deactivated account", "An account switched off by the admin. It cannot sign in anywhere, but its records and history are kept. Reactivating restores sign-in."),
+            ("One-time admin setup", "The panel that makes the first admin when an office has none. It closes forever once an admin exists."),
         ],
         caption="Terms used in this manual and in PASADA.")
 

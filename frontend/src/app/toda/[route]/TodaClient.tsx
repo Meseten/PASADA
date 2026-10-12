@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, AlertTriangle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe, Edit3, Save } from "lucide-react"
 import { API_URL, fetchWithAuth, resolveAutoChangeMotorDate } from "@/lib/api"
+import { confirmDialog } from "@/components/ui/confirm-dialog"
 
 interface Member {
   id: string;
@@ -536,21 +537,54 @@ export default function TodaClient() {
       new_prefix: renameData.new_prefix.trim().toUpperCase(),
       new_driving_route: renameData.new_driving_route.trim().toUpperCase()
     };
-    if (!window.confirm(`Are you sure you want to rename ${safeRouteName} to ${renamePayload.new_route_name}? This will update the entire registry and standardize all SBN prefixes. This cannot be easily undone.`)) return;
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `Rename ${safeRouteName} to ${renamePayload.new_route_name}`,
+      message: "The whole registry is updated and all SBN prefixes are standardized. This is not easily undone.",
+      confirmLabel: "Rename",
+    });
+    if (!ok) return;
 
     setIsRenaming(true);
     try {
-      const res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
+      // Two-key rule: with another active Admin the rename always lands as a
+      // ticket for a DIFFERENT Admin. In a one-admin office the backend asks
+      // for a written reason (400); we prompt once and retry with it.
+      let res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(renamePayload)
       });
+      if (res.status === 400) {
+        const first = await res.json().catch(() => ({}));
+        if (typeof first.detail === "string" && first.detail.includes("only active Admin")) {
+          const typed = await confirmDialog({
+            mode: "prompt",
+            title: "You are the only active Admin",
+            message: "This rename runs right away, and the reason is written into the audit log.",
+            fieldNote: "Shown in Activity History as a single-admin override.",
+            confirmLabel: "Rename",
+          });
+          if (typeof typed !== "string" || !typed.trim()) {
+            showToast("A reason is required: the rename was not done.", "error");
+            return;
+          }
+          res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...renamePayload, override_reason: typed.trim() })
+          });
+        } else {
+          showToast(first.detail || "Failed to rename route.", "error");
+          return;
+        }
+      }
       
       if (res.ok) {
         const data = await res.json();
         if (data.status === "ticket_filed") {
-          // Clerk path: the rename is only a request; the Admin decides.
-          showToast(data.message || "Rename request sent to the Admin for approval.", "success");
+          // Two-key path: the rename is only a request; a different Admin decides.
+          showToast(data.message || "Rename request sent for approval.", "success");
           setIsRenameOpen(false);
           return;
         }
@@ -570,7 +604,14 @@ export default function TodaClient() {
   };
 
   const handleDeleteOne = async (member: Member) => {
-    if (!window.confirm(`Are you sure you want to delete operator ${member.sbn_no}? This can be undone immediately via the Undo button.`)) return;
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `Delete operator ${member.sbn_no}`,
+      message: "The record moves to the Inactive list. The Undo button brings it back immediately.",
+      destructive: true,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
     // 25010 Safety: if a batch-print selection is still processing, prune it
     // so the merged PDF never carries a certificate for a just-deleted record
     // (undo can restore the record, but the print bundle cannot be un-merged).
@@ -596,7 +637,14 @@ export default function TodaClient() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Are you sure you want to delete ${selectedIds.length} selected operator(s)? This can be undone immediately via the Undo button.`)) return;
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `Delete ${selectedIds.length} selected operator${selectedIds.length === 1 ? "" : "s"}`,
+      message: "The records move to the Inactive list. The Undo button brings them back immediately.",
+      destructive: true,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
     setIsDeleting(true);
     try {
       const res = await fetchWithAuth(`${API_URL}/api/operators/bulk-delete`, {
@@ -1294,7 +1342,7 @@ export default function TodaClient() {
               </select>
             </div>
 
-            <Button variant="outline" onClick={() => { if(window.confirm("This checks all records and fixes the usual mistakes: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted. Continue?")) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" data-tip-align-right data-tip="Checks every record on this line and fixes the usual mistakes: wrong dates, misspelled routes, duplicates. Nothing is deleted.">
+            <Button variant="outline" onClick={async () => { const ok = await confirmDialog({ mode: "confirm", title: "Check and clean the records", message: "All records are checked and the usual mistakes get fixed: wrong dates, misspelled route names, and duplicate entries. Nothing is deleted.", confirmLabel: "Start" }); if (ok) handleRefreshDatabase(); }} disabled={isRefreshing} className="w-full sm:w-auto shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-orange-600" data-tip-align-right data-tip="Checks every record on this line and fixes the usual mistakes: wrong dates, misspelled routes, duplicates. Nothing is deleted.">
               {isRefreshing ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <RefreshCw className="mr-2 h-5 w-5" />}
               Refresh DB
             </Button>

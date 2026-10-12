@@ -119,9 +119,25 @@ this repository. A corrupted or tampered installer cannot run.
 These omissions are deliberate and approved for the single-tier, offline
 deployment:
 
-- **RBAC.** All tokens grant the same clerk-level access; Windows accounts
-  and the locked office handle personnel boundaries. Admin-role gating exists
-  on the user-management endpoints and Settings panel only.
+- **Fine-grained RBAC.** There are exactly two roles, Clerk and Admin, and
+  the gate is one helper (`require_admin` in `backend/main.py`) that stops any
+  non-Admin with a 403. Windows accounts and the locked office still handle
+  the physical boundary. As of the Sept 2026 full-endpoint audit, Admin-only
+  (hard `require_admin`) covers 14 endpoints: user list/create/reset-password/
+  set-active (`/users`, `/users/reset-password`, `/users/set-active`), the
+  approval decisions (`/admin/tickets/{id}/approve`, `/reject`), registry-wide
+  repair (`/admin/refresh-db`), manual sync (`/system/sync-now`), document
+  templates (`/admin/templates`, GET and POST), diagnostics and audit overview
+  (`/admin/diagnostics`, `/admin/audit-overview`), and both database file
+  operations (`/upload/database` merge import, `/restore/database` full
+  restore). The two-key rule (`_other_active_admin_exists`) additionally
+  routes four hard-to-undo actions through the approval queue even for an
+  Admin: route delete, route rename, batch record restore, and account
+  deactivate/reactivate. Three self-service doors exist only while NO Admin
+  exists (`/admin/needed`, `/admin/bootstrap`, and the recovery-reset
+  promotion) and close permanently once one does. Everything else (records
+  CRUD, single soft-delete/restore, exports, logs, settings, route data) is
+  open to any signed-in account by design.
 - **Password complexity/rotation.** Signup enforces an 8-character minimum;
   nothing more. The recovery-question path resets passwords on a single
   machine.

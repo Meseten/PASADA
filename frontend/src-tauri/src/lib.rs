@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -178,6 +178,56 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+// Sidecar status pipeline: one async task emits "failed" the moment the
+// backend process exits (crash mid-boot, missing payload), and a helper
+// thread emits "ready" as soon as something actually accepts a TCP
+// connection on the API port. The frontend listens on the backend-status
+// event channel so the login screen can distinguish "still starting" from
+// "the backend died" instead of showing a spinner forever.
+fn watch_backend_events(app: tauri::AppHandle, mut rx: tauri::async_runtime::Receiver<CommandEvent>) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => log::info!("[Backend]: {}", String::from_utf8_lossy(&line)),
+                CommandEvent::Stderr(line) => log::error!("[Backend]: {}", String::from_utf8_lossy(&line)),
+                CommandEvent::Terminated(status) => {
+                    // The backend process ended. Normal shutdown never reaches
+                    // here (we kill it ourselves on exit), so this is a crash
+                    // mid-boot or a payload problem — tell the webview, whose
+                    // Connecting panel turns it into a real error message.
+                    log::error!("[Backend] terminated: {:?}", status);
+                    let _ = handle.emit("backend-status", serde_json::json!({"type": "failed", "message": "The PASADA service on this computer stopped unexpectedly. Restart the app."}));
+                }
+                CommandEvent::Error(err) => {
+                    log::error!("[Backend] sidecar error: {}", err);
+                    let _ = handle.emit("backend-status", serde_json::json!({"type": "failed", "message": format!("The PASADA service failed to start: {}", err)}));
+                }
+                _ => {}
+            }
+        }
+    });
+    let watch_handle = app.clone();
+    std::thread::spawn(move || {
+        use std::net::TcpStream;
+        for _ in 0..600 {
+            if TcpStream::connect_timeout(
+                &"127.0.0.1:43888".parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            ).is_ok() {
+                log::info!("[Backend] port reachable; emitting ready");
+                let _ = watch_handle.emit("backend-status", serde_json::json!({"type": "ready"}));
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // The watcher thread exhausted its retries without the port ever
+        // opening. The died-handler above will fire on real process death;
+        // if the process is alive but wedged, tell the user after 5 minutes.
+        let _ = watch_handle.emit("backend-status", serde_json::json!({"type": "failed", "message": "The PASADA service did not become reachable after several minutes. Restart the app or check this computer's disk activity."}));
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let backend_child = Arc::new(Mutex::new(None));
@@ -201,28 +251,20 @@ pub fn run() {
             install_app_update
         ])
         .manage(BackendState(backend_child))
-        .manage(PreparedUpdateState(Arc::new(Mutex::new(None))))
+        .manage(PreparedUpdateState(Arc::new(Mutex::new(None)))) 
         .setup(move |app| {
             // Gracefully attempt to launch Python Backend
             match app.shell().sidecar("pasada-backend") {
                 Ok(command) => {
                     match command.spawn() {
-                        Ok((mut rx, child)) => {
+                        Ok((rx, child)) => {
                             // Lock the child process in managed state
                             if let Ok(mut lock) = backend_child_clone.lock() {
                                 *lock = Some(child);
                             }
-                            
-                            // Pipe the Python output to the Tauri logger
-                            tauri::async_runtime::spawn(async move {
-                                while let Some(event) = rx.recv().await {
-                                    match event {
-                                        CommandEvent::Stdout(line) => log::info!("[Backend]: {}", String::from_utf8_lossy(&line)),
-                                        CommandEvent::Stderr(line) => log::error!("[Backend]: {}", String::from_utf8_lossy(&line)),
-                                        _ => {}
-                                    }
-                                }
-                            });
+                            // NEW: drive the readiness + death pipeline so the
+                            // webview sees backend-status events in real time.
+                            watch_backend_events(app.handle().clone(), rx);
                         }
                         Err(e) => log::error!("Failed to spawn FastAPI backend: {}", e),
                     }
