@@ -1,15 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use tauri::{Emitter, Manager, RunEvent};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
-use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Deserialize)]
 struct PrintPdfRequest {
@@ -18,11 +19,44 @@ struct PrintPdfRequest {
 }
 
 // Holds the background Python process so we can kill it safely when closing the app
-struct BackendState(Arc<Mutex<Option<CommandChild>>>);
+struct BackendState(Arc<Mutex<Option<Child>>>);
 
 // The update downloaded and signature-verified by prepare_app_update, kept
 // so install_app_update does not need a second download. Cleared when used.
 struct PreparedUpdateState(Arc<Mutex<Option<Vec<u8>>>>);
+
+// The backend now ships as an ONEDIR PyInstaller folder (exe + _internal/).
+// Onefile self-extracted ~106 MB on EVERY launch — measured as the dominant
+// chunk of the office's first boot. Onedir pays the unpack once at install
+// time; launch goes straight to interpreter import. The folder rides in the
+// bundle as a Tauri resource (tauri.conf.json -> bundle.resources -> "backend/").
+fn locate_backend_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // Bundled (installed) app: the resource dir holds the "backend/" folder.
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidate = resource_dir.join("backend");
+        if candidate.join(backend_exe_name()).exists() {
+            return Some(candidate);
+        }
+    }
+    // Unpackaged local run (cargo target/release): the folder sits beside exe.
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            let candidate = exe_dir.join("backend");
+            if candidate.join(backend_exe_name()).exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn backend_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "pasada-backend.exe"
+    } else {
+        "pasada-backend"
+    }
+}
 
 fn unique_temp_pdf_path(file_name: &str) -> PathBuf {
     let temp_dir = std::env::temp_dir();
@@ -50,7 +84,7 @@ fn print_pdf_fallback(request: PrintPdfRequest) -> Result<String, String> {
         // Prevent PowerShell string injection by properly escaping single quotes
         let escaped_path = path_string.replace("'", "''");
 
-        // THE FIX: Bulletproof PowerShell try/catch. 
+        // THE FIX: Bulletproof PowerShell try/catch.
         // 1. Tries to invoke the native Print verb (Works flawlessly for Acrobat).
         // 2. If it fails (Because Edge/Chrome is default and blocks it), it catches the error and forces the PDF to open on screen so the user can manually print.
         let ps_script = format!(
@@ -76,7 +110,7 @@ fn print_pdf_fallback(request: PrintPdfRequest) -> Result<String, String> {
             .map_err(|error| format!("failed to launch native printer: {error}"))?;
     }
 
-    // Memory Leak Prevention: Spawn a thread to delete the temp file after 5 minutes 
+    // Memory Leak Prevention: Spawn a thread to delete the temp file after 5 minutes
     // giving the OS spooler enough time to process it.
     let temp_path_clone = temp_path.clone();
     std::thread::spawn(move || {
@@ -178,20 +212,28 @@ async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
-// Sidecar status pipeline: one async task emits "failed" the moment the
+// The onedir backend is spawned with std::process and streamed to the
+// backend-status pipeline through this channel.
+enum BackendEvent {
+    Stdout(String),
+    Stderr(String),
+    Terminated(Option<i32>),
+}
+
+// Sidecar status pipeline: one consumer task emits "failed" the moment the
 // backend process exits (crash mid-boot, missing payload), and a helper
 // thread emits "ready" as soon as something actually accepts a TCP
 // connection on the API port. The frontend listens on the backend-status
 // event channel so the login screen can distinguish "still starting" from
 // "the backend died" instead of showing a spinner forever.
-fn watch_backend_events(app: tauri::AppHandle, mut rx: tauri::async_runtime::Receiver<CommandEvent>) {
+fn watch_backend_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<BackendEvent>) {
     let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
             match event {
-                CommandEvent::Stdout(line) => log::info!("[Backend]: {}", String::from_utf8_lossy(&line)),
-                CommandEvent::Stderr(line) => log::error!("[Backend]: {}", String::from_utf8_lossy(&line)),
-                CommandEvent::Terminated(status) => {
+                BackendEvent::Stdout(line) => log::info!("[Backend]: {}", line),
+                BackendEvent::Stderr(line) => log::error!("[Backend]: {}", line),
+                BackendEvent::Terminated(status) => {
                     // The backend process ended. Normal shutdown never reaches
                     // here (we kill it ourselves on exit), so this is a crash
                     // mid-boot or a payload problem — tell the webview, whose
@@ -199,11 +241,6 @@ fn watch_backend_events(app: tauri::AppHandle, mut rx: tauri::async_runtime::Rec
                     log::error!("[Backend] terminated: {:?}", status);
                     let _ = handle.emit("backend-status", serde_json::json!({"type": "failed", "message": "The PASADA service on this computer stopped unexpectedly. Restart the app."}));
                 }
-                CommandEvent::Error(err) => {
-                    log::error!("[Backend] sidecar error: {}", err);
-                    let _ = handle.emit("backend-status", serde_json::json!({"type": "failed", "message": format!("The PASADA service failed to start: {}", err)}));
-                }
-                _ => {}
             }
         }
     });
@@ -228,15 +265,98 @@ fn watch_backend_events(app: tauri::AppHandle, mut rx: tauri::async_runtime::Rec
     });
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let backend_child = Arc::new(Mutex::new(None));
-    let backend_child_clone = backend_child.clone();
+// Launches the onedir backend folder and feeds its streams into the event
+// channel. Windows: without CREATE_NO_WINDOW the console binary flashes a
+// cmd window before the webview is up — visible and ugly on every boot.
+// The child lives in BackendState; the death watcher polls try_wait() through
+// the SAME state lock instead of taking ownership, so the exit handler keeps
+// its clean kill path.
+fn launch_backend(app: &tauri::AppHandle, dir: PathBuf, state: &BackendState) {
+    let exe_path = dir.join(backend_exe_name());
+    log::info!("launching onedir backend at {}", exe_path.display());
 
+    let mut command = Command::new(&exe_path);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            log::error!("Failed to spawn FastAPI backend: {}", error);
+            let _ = app.emit("backend-status", serde_json::json!({"type": "failed", "message": format!("The PASADA service failed to start: {}", error)}));
+            return;
+        }
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<BackendEvent>();
+    watch_backend_events(app.clone(), rx);
+
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => { let _ = tx.send(BackendEvent::Stdout(line)); }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stderr).lines() {
+                match line {
+                    Ok(line) => { let _ = tx.send(BackendEvent::Stderr(line)); }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    let death_tx = tx;
+    let death_state = state.0.clone();
+    std::thread::spawn(move || {
+        // Death watcher: poll try_wait through the shared state lock. Exits
+        // when the process ends (emit Terminated) or when the state was taken
+        // by the app's own shutdown kill (state empty — stay quiet).
+        loop {
+            let observed = {
+                let mut lock = match death_state.lock() {
+                    Ok(lock) => lock,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                match lock.as_mut() {
+                    None => break,
+                    Some(child) => child.try_wait(),
+                }
+            };
+            match observed {
+                Ok(Some(status)) => {
+                    let _ = death_tx.send(BackendEvent::Terminated(status.code()));
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Err(_) => {
+                    let _ = death_tx.send(BackendEvent::Terminated(None));
+                    break;
+                }
+            }
+        }
+    });
+
+    *(state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())) = Some(child);
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         // Prevents the user from opening PASADA twice and crashing the ports
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -250,39 +370,35 @@ pub fn run() {
             prepare_app_update,
             install_app_update
         ])
-        .manage(BackendState(backend_child))
-        .manage(PreparedUpdateState(Arc::new(Mutex::new(None)))) 
+        .manage(BackendState(Arc::new(Mutex::new(None))))
+        .manage(PreparedUpdateState(Arc::new(Mutex::new(None))))
         .setup(move |app| {
-            // Gracefully attempt to launch Python Backend
-            match app.shell().sidecar("pasada-backend") {
-                Ok(command) => {
-                    match command.spawn() {
-                        Ok((rx, child)) => {
-                            // Lock the child process in managed state
-                            if let Ok(mut lock) = backend_child_clone.lock() {
-                                *lock = Some(child);
-                            }
-                            // NEW: drive the readiness + death pipeline so the
-                            // webview sees backend-status events in real time.
-                            watch_backend_events(app.handle().clone(), rx);
-                        }
-                        Err(e) => log::error!("Failed to spawn FastAPI backend: {}", e),
-                    }
+            // Launch the ONEDIR backend engine (bundled as the "backend/"
+            // resource folder). A missing folder is a packaging bug: say so
+            // and surface it on the login screen, never a silent dark wait.
+            match locate_backend_dir(app.handle()) {
+                Some(dir) => {
+                    let state = app.state::<BackendState>();
+                    launch_backend(app.handle(), dir, &state);
                 }
-                Err(e) => log::error!("Failed to locate sidecar: {}", e),
+                None => {
+                    log::error!("Backend engine folder not found next to the app (expected a backend/pasada-backend folder).");
+                    let _ = app.emit("backend-status", serde_json::json!({"type": "failed", "message": "The PASADA service folder is missing on this computer. Reinstall the app."}));
+                }
             }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |app_handle, event| {
-            // Cross-platform Graceful Shutdown (Replaces taskkill)
+            // Cross-platform Graceful Shutdown
             if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<BackendState>() {
                     if let Ok(mut lock) = state.0.lock() {
-                        if let Some(child) = lock.take() {
+                        if let Some(mut child) = lock.take() {
                             log::info!("Gracefully terminating the backend...");
                             let _ = child.kill();
+                            let _ = child.wait();
                         }
                     }
                 }

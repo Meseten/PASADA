@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build BOTH the Linux engine and the Windows engine from this one spec file.
+# Build BOTH the Linux engine and the Windows engine from this one spec file,
+# in ONEDIR mode (a folder holding the exe plus its libraries).
 #
-# On Linux (your Zorin machine) — builds the engine for testing / Linux .deb:
 #   pyinstaller --clean --noconfirm pasada-backend.spec
+#     -> dist/pasada-backend/pasada-backend(.exe)   + dist/pasada-backend/_internal/
 #
-# On Windows or in GitHub Actions — builds the engine that goes inside the .msi:
-#   pyinstaller --clean --noconfirm pasada-backend.spec
-#   (the exe comes out as dist/pasada-backend.exe — the Tauri sidecar is
-#    expected at frontend/src-tauri/bin/pasada-backend-x86_64-pc-windows-msvc.exe)
+# WHY ONEDIR, NOT ONEFILE: the onefile bundle self-extracted ~106 MB into a
+# temp directory on EVERY launch — measured as ~8-10s of the office's first
+# boot before uvicorn even started, no matter how fast the app itself was.
+# Onedir pays the unpack once at install time; cold launch skips straight to
+# interpreter import (~x2 faster bind, verified on Linux). The Tauri shell
+# carries the WHOLE dist folder as a bundle resource; see
+# frontend/src-tauri/tauri.conf.json (bundle.resources) and the spawn logic in
+# frontend/src-tauri/src/lib.rs.
 #
 # The templates (template.docx, dashboard_template.docx) are bundled inside the
-# exe, and every hidden import the engine needs is listed here — so no more
+# folder, and every hidden import the engine needs is listed here — so no more
 # long --hidden-import lines on the command line.
 
 a = Analysis(
@@ -60,24 +65,28 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='pasada-backend',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX OFF: per-launch decompression of the ~106 MB onefile bundle was a
-    # measured, large share of the minutes-long first boot on the office's
-    # 5400-rpm disk (bind dropped to ~11s with this off on Linux; the same
-    # cost exists on Windows). Raw bundle rides the page cache instead.
+    # UPX OFF everywhere (belt for the --noupx CLI builds too).
     upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='pasada-backend',
 )

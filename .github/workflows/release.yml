@@ -107,17 +107,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build Python Backend
+      - name: Build Python Backend (onedir)
         shell: bash
         run: |
           cd backend
           pip install -r requirements.txt
-          # NOTE: the package was renamed multipart -> python_multipart, and the
-          # old "multipart" import name no longer exists in current versions.
-          # Both names are listed so the build works on any pip version.
-          pyinstaller --onefile --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import python_multipart --hidden-import multipart --hidden-import anyio._backends._asyncio --hidden-import psutil --hidden-import jose --hidden-import pypdf --hidden-import win32com --hidden-import pythoncom --add-data "template.docx;." --add-data "dashboard_template.docx;." --name pasada-backend-x86_64-pc-windows-msvc main.py
-          mkdir -p ../frontend/src-tauri/bin
-          cp dist/pasada-backend-x86_64-pc-windows-msvc.exe ../frontend/src-tauri/bin/
+          # ONEDIR, not onefile: the onefile bundle self-extracted ~106 MB on
+          # every launch — measured as the dominant chunk of cold boot. The
+          # spec carries every hidden import + both docx templates, so no
+          # long CLI lists.
+          pyinstaller --clean --noconfirm --noupx pasada-backend.spec
+          # The WHOLE folder becomes a Tauri bundle resource
+          # (tauri.conf.json -> bundle.resources -> "backend/") and
+          # src-tauri/src/lib.rs launches backend/pasada-backend(.exe)
+          # from the resource dir (exe-dir fallback for local runs).
+          mkdir -p ../frontend/src-tauri/backend
+          cp -r dist/pasada-backend/. ../frontend/src-tauri/backend/
 
       - name: Build Tauri Frontend (signed)
         shell: bash

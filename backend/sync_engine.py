@@ -7,7 +7,7 @@ import secrets
 import requests
 import os
 from database import SessionLocal, FranchiseRecord, get_pht_now, BASE_DIR
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def force_log(msg):
     """Append to the same crash log main.py uses, without importing main
@@ -151,6 +151,23 @@ _wake_pull_loop = threading.Event()
 def request_sync_cycle():
     """Wake the pull loop NOW instead of at its next periodic tick."""
     _wake_pull_loop.set()
+
+# FAILURE PATHS FOR A REAL OFFICE:
+#  - CLOCK SKEW: the pull asks for "everything after my newest record". If a
+#    peer's Windows clock runs even minutes behind ours, its fresh edits are
+#    stamped in our past and a strict filter would drop them forever (the
+#    watermark only ever moves forward). The pull therefore looks back one
+#    extra margin: re-sent rows are idempotent under last-write-wins, so the
+#    only cost is a few repeated rows per cycle on the LAN.
+#  - STALE PEER: a machine powered off (or one whose DHCP address went to a
+#    printer) used to stay in the peer registry forever, costing a failed
+#    5-second pull every cycle and a crash-log line every cycle. Now a peer
+#    is dropped after a bounded misses streak; its discovery broadcast
+#    re-adds it the moment it comes back or moves address.
+PULL_SKEW_GUARD_SECONDS = 5 * 60
+PEER_MAX_CONSECUTIVE_FAILURES = 20
+_peer_failures = {}
+_peer_failures_lock = threading.Lock()
 
 # LAST SYNC CHECK: the office should be able to SEE that sharing is alive,
 # not just trust a green light. Every finished pull cycle (nudge woken or
@@ -336,7 +353,15 @@ def sync_with_peers():
         db = SessionLocal()
         try:
             latest_record = db.query(FranchiseRecord).order_by(FranchiseRecord.updated_at.desc()).first()
-            last_sync_time = latest_record.updated_at.replace(tzinfo=None).isoformat() if (latest_record and latest_record.updated_at) else "2000-01-01T00:00:00"
+            # SKEW GUARD: look back a little further than the newest local
+            # stamp, so a peer with a slightly slower office clock still
+            # delivers records stamped "in our past". (First sync, or an
+            # empty registry, still starts from 2000.)
+            if latest_record and latest_record.updated_at:
+                watermark = latest_record.updated_at.replace(tzinfo=None) - timedelta(seconds=PULL_SKEW_GUARD_SECONDS)
+                last_sync_time = watermark.isoformat()
+            else:
+                last_sync_time = "2000-01-01T00:00:00"
             
             for peer in list(PEERS):
                 try:
@@ -360,6 +385,11 @@ def sync_with_peers():
                     )
                     if response.ok:
                         incoming_data = response.json()
+                        # A pull that reaches a working peer clears its miss
+                        # streak, so a flaky network frame is not counted
+                        # against it forever.
+                        with _peer_failures_lock:
+                            _peer_failures.pop(peer, None)
                         
                         # SYNC ACCOUNTS: the bcrypt password hash now ROAMS with
                         # the account, so a login created on one office computer
@@ -383,12 +413,26 @@ def sync_with_peers():
                             
                             if not existing:
                                 new_rec = FranchiseRecord(**clean_item)
-                                new_rec.issue_date = datetime.fromisoformat(clean_item['issue_date']).replace(tzinfo=None) if clean_item.get('issue_date') else None
-                                new_rec.valid_until = datetime.fromisoformat(clean_item['valid_until']).replace(tzinfo=None) if clean_item.get('valid_until') else None
-                                new_rec.updated_at = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None) if clean_item.get('updated_at') else get_pht_now().replace(tzinfo=None)
+                                try:
+                                    new_rec.issue_date = datetime.fromisoformat(clean_item['issue_date']).replace(tzinfo=None) if clean_item.get('issue_date') else None
+                                    new_rec.valid_until = datetime.fromisoformat(clean_item['valid_until']).replace(tzinfo=None) if clean_item.get('valid_until') else None
+                                    new_rec.updated_at = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None) if clean_item.get('updated_at') else get_pht_now().replace(tzinfo=None)
+                                except (ValueError, TypeError):
+                                    # Same poison tolerance as below: a row we
+                                    # cannot even timestamp still arrives with
+                                    # a local now instead of killing the pull.
+                                    new_rec.updated_at = get_pht_now().replace(tzinfo=None)
                                 db.add(new_rec)
                             else:
-                                incoming_time = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None)
+                                # One poisoned row (missing timestamp, from an
+                                # old version) used to raise here, roll back
+                                # the WHOLE peer pull and retry the same
+                                # poison every cycle. Tolerate it: rows without
+                                # a timestamp are older than anything local.
+                                try:
+                                    incoming_time = datetime.fromisoformat(clean_item['updated_at']).replace(tzinfo=None) if clean_item.get('updated_at') else datetime.min
+                                except (ValueError, TypeError):
+                                    incoming_time = datetime.min
                                 existing_time = existing.updated_at.replace(tzinfo=None) if existing.updated_at else datetime.min
                                 
                                 if incoming_time > existing_time:
@@ -400,9 +444,30 @@ def sync_with_peers():
                         db.commit()
                 except Exception as e:
                     # A bad record from one peer must not kill the loop or the
-                    # whole cycle: log it and move to the next peer. The crash
-                    # log is the only place this is visible, so make it count.
-                    force_log(f"[SYNC] Pull from {peer} failed: {e}")
+                    # whole cycle: log it and count the miss. The crash log is
+                    # the only place this is visible, so make it count — but
+                    # bound the spam: after a bounded fail streak the peer is
+                    # dropped from the registry (its next discovery broadcast
+                    # re-adds it, so a powered-off machine or a stale DHCP
+                    # address costs nothing until it is really back).
+                    with _peer_failures_lock:
+                        misses = _peer_failures.get(peer, 0) + 1
+                        _peer_failures[peer] = misses
+                        if misses == 1:
+                            force_log(f"[SYNC] Pull from {peer} failed: {e}")
+                            drop = False
+                        elif misses >= PEER_MAX_CONSECUTIVE_FAILURES:
+                            drop = True
+                        else:
+                            drop = False
+                    if drop:
+                        force_log(
+                            f"[SYNC] {peer} unreachable after "
+                            f"{PEER_MAX_CONSECUTIVE_FAILURES} misses; dropped "
+                            "from the peer registry until it broadcasts again.")
+                        PEERS.discard(peer)
+                        with _peer_failures_lock:
+                            _peer_failures.pop(peer, None)
                     db.rollback()
                     continue
         except Exception as e:

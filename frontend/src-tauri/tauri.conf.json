@@ -39,8 +39,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "bin/pasada-backend"
+    "resources": [
+      "backend/"
     ]
   },
   "plugins": {
