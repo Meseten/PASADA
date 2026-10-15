@@ -544,7 +544,7 @@ export default function InactiveLines() {
                                         </TableCell>
                                         <TableCell className="text-center">
                                             <div className="flex items-center justify-center gap-1">
-                                                <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" title="View Certificate Preview" data-tip-align-right data-tip="Opens this archived record's MTOP certificate preview. You can still print the certificate for a revoked operator from here." onClick={() => handleOpenView(record)}>
+                                                <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="View Certificate Preview" title="View Certificate Preview" data-tip-align-right data-tip="Opens this archived record's MTOP certificate preview. You can still print the certificate for a revoked operator from here." onClick={() => handleOpenView(record)}>
                                                     <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                                                 </Button>
                                             </div>

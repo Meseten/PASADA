@@ -24,7 +24,8 @@ export default function MassImport() {
   const [forceOverwrite, setForceOverwrite] = useState(false);
   const [dbImportMode, setDbImportMode] = useState<'merge' | 'restore'>('merge');
   
-  const isDatabaseFile = files.length === 1 && files[0].name.endsWith(".db");   
+  const isDatabaseFile = files.length === 1 && (files[0].name.endsWith(".db") || files[0].name.endsWith(".zip"));
+  const isZipBackup = files.length === 1 && files[0].name.endsWith(".zip");
 
   useEffect(() => {
     // Load Client-side UI preferences
@@ -78,9 +79,11 @@ export default function MassImport() {
   const executeUpload = async () => {     
     setUploading(true);     
     setServerErrors([]);     
-    try {       
-      if (isDatabaseFile) {         
-        if (dbImportMode === 'restore') {
+    try {      
+      if (isDatabaseFile) {  
+        // A nightly backup ZIP holds the .db inside. The backend extracts it and
+        // merges (its safe default), so ZIPs skip the Full Restore option.
+        if (dbImportMode === 'restore' && !isZipBackup) {
             const confirmed = await confirmDialog({
               mode: "confirm",
               title: "Restore records from this backup",
@@ -98,7 +101,7 @@ export default function MassImport() {
         const formData = new FormData();         
         formData.append("file", files[0]);         
         
-        const endpoint = dbImportMode === 'restore' ? `${API_URL}/restore/database` : `${API_URL}/upload/database`;
+        const endpoint = (dbImportMode === 'restore' && !files[0].name.endsWith(".zip")) ? `${API_URL}/restore/database` : `${API_URL}/upload/database`;
 
         const res = await fetchWithAuth(endpoint, {           
           method: "POST",           
@@ -120,7 +123,7 @@ export default function MassImport() {
         const data = await res.json();         
         stopFluidProgress();         
         
-        if (dbImportMode === 'restore') {
+        if (dbImportMode === 'restore' && !isZipBackup) {
             showToast(`Database restored! Inserted: ${data.restored_inserted}, Updated: ${data.restored_updated}.`, "success");
         } else {
             if (typeof data.imported === 'number') {
@@ -174,8 +177,8 @@ export default function MassImport() {
               chunkErrors = [...chunkErrors, ...data.errors];             
             }           
             chunksSucceeded++;
-          } catch (chunkErr: any) {             
-            chunkErrors.push(`Failed to upload chunk ${i + 1}: ${chunkErr.message || "Network Error"}`);           
+          } catch (chunkErr: unknown) {             
+            chunkErrors.push(`Failed to upload chunk ${i + 1}: ${(chunkErr as Error)?.message || "Network Error"}`);           
           }         
         }         
         
@@ -196,14 +199,14 @@ export default function MassImport() {
         setUploading(false);         
         setProgress(0);       
       }, 3000);     
-    } catch (err: any) {       
+    } catch (err: unknown) {       
       if (progressInterval.current) {         
         clearInterval(progressInterval.current);         
         progressInterval.current = null;       
       }       
       setProgress(0);       
       setUploading(false);       
-      showToast(err.message || "Upload failed. Ensure the server is connected.", "error");     
+      showToast((err as Error)?.message || "Upload failed. Ensure the server is connected.", "error");     
     }   
   };   
 
@@ -265,9 +268,9 @@ export default function MassImport() {
             <div className="bg-blue-500/10 border border-blue-500/30 p-5 rounded-xl space-y-4 animate-in fade-in">               
               <div className="flex items-center gap-3">
                 <Database className="text-blue-600 shrink-0" size={24} />               
-                <div>                 
-                  <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>                 
-                  <p className="text-xs text-blue-600/80 font-semibold">Choose how to import records from this backup file.</p>               
+                <div>
+                  <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>
+                  <p className="text-xs text-blue-600/80 font-semibold">Choose how to import records from this backup file.{isZipBackup && " A nightly backup ZIP (the .db is inside) is imported by merging new records only."}</p>
                 </div>             
               </div>
 
@@ -280,7 +283,7 @@ export default function MassImport() {
                    </div>
                  </label>
                  <label className="flex items-start gap-3 cursor-pointer">
-                   <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} className="mt-0.5" />
+                   <input type="radio" name="db_mode" checked={dbImportMode === 'restore'} onChange={() => setDbImportMode('restore')} disabled={isZipBackup} className="mt-0.5" />
                    <div>
                      <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Full Restore (replaces matching records)</p>
                      <p className="text-xs text-muted-foreground font-medium">Replaces current records with the contents of this backup. Admin only: a clerk signing in will be asked to ask the Admin.</p>
@@ -297,12 +300,12 @@ export default function MassImport() {
           )}                      
           
           <div className="space-y-2">             
-            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db)</label>             
+            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db, .zip)</label>             
             <div className={`border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 transition-colors relative ${uploading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-muted/50'}`}>               
               <input                 
                 type="file"                 
                 multiple                 
-                accept=".docx,.xlsx,.csv,.db"                 
+                accept=".docx,.xlsx,.csv,.db,.zip"                 
                 onChange={handleFileChange}                 
                 disabled={uploading}                 
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"               

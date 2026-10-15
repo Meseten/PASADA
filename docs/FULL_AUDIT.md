@@ -234,19 +234,33 @@ per-request noise while **warnings and errors still print**. A debug escape hatc
 is preserved: set `PASADA_HTTP_ACCESS_LOG=1` to bring the access log back when you
 are actually debugging the wire.
 
-### (b) Black window — **documented workaround, not a PASADA bug**
+### (b) Black window — **ROOT-CAUSED Oct 2026: WebKitGTK 2.52 bug on Sandy Bridge**
 
-Root cause: on some Linux stacks — **notably Wayland sessions and NVIDIA +
-WebKitGTK 4.1** — the Tauri window renders **solid black** even though the app is
-running perfectly behind it. It is a WebKit compositing problem, not your code.
+Not a Wayland/NVIDIA issue, and not a PASADA bug. Proven on the office machine
+(Intel HD 2000 / Sandy Bridge i915, X11): **WebKitGTK 2.52 never paints a frame
+there** — the web process commits the document but the UI process never receives
+one, identically in bare MiniBrowser and the app, even for a `data:` URI. Every
+env workaround is ineffective on 2.52.
 
-Documented in `TESTING_ON_LINUX.md` §7b, escalating:
+Fix in place: downgrade to **libwebkit2gtk-4.1-0 = 2.44.0-2** and `apt-mark hold`
+both packages (see `TESTING_ON_LINUX.md` §7b for the commands and the re-entry
+checklist). Verified: 2.44.0 paints the test pattern (62% coverage), and the real
+desktop build shows the login page with visible text — proof capture in
+`docs/BLACK_WINDOW_FIXED_PROOF.png`. The env-var block below remains the
+other-machine fallback only:
 
 1. `WEBKIT_DISABLE_COMPOSITING_MODE=1 npm run tauri dev`
 2. If still black, also force the software renderer:
    `WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev`
 3. Or skip the desktop shell entirely and run the **browser** flow
    (`npm run dev` → `localhost:3000`), which avoids WebKitGTK completely.
+
+Build-system regression fixed in the same pass: the onefile CLI build command
+run on Oct 13 had rewritten `backend/pasada-backend-x86_64-unknown-linux-gnu.spec`
+back to ONEFILE (COLLECT removed) — restored from git to the onedir form.
+The stray 106 MB onefile binary it dropped into `frontend/src-tauri/bin/` is
+not referenced by the build (the shell consumes the onedir `backend/` folder);
+remove it by hand if disk space matters.
 
 ---
 

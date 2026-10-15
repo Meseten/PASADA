@@ -411,15 +411,26 @@ def require_admin(current_user: User) -> None:
     if current_user.role != "Admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
+def require_record_writer(current_user: User) -> None:
+    """One gate for every write to the records themselves (create/edit/delete
+    operators, uploads, certificate generation). Admin and Clerk pass; the
+    Viewer role — added so the second office PC can look at the registry
+    without being able to change it — is stopped here with 403. Kept beside
+    require_admin for the same reason: the rule lives in one place."""
+    if current_user.role == "Viewer":
+        raise HTTPException(status_code=403, detail="Viewer accounts are read-only. Ask the Admin for a Clerk account to make changes.")
+
 def _other_active_admin_exists(db: Session, current_user: User) -> bool:
-    """TWO-KEY RULE: the big, hard-to-undo actions (delete a route, rename a
-    route, restore deleted records, deactivate an account) always need a
-    second active Admin to approve them, even when the person clicking is
-    themselves an Admin. When at least one OTHER active Admin exists, the
-    click files a ticket and only that other Admin can approve it; nobody
-    approves their own request. A one-admin office cannot second-key itself,
-    so there the Admin's valve is direct execution with a MANDATORY written
-    reason, recorded loudly in the audit log as an override."""
+    """KEPT FOR COMPATIBILITY but no longer gates the Admin's own actions.
+    DECISION 2026-10-14 (owner): PASADA runs as ONE person operating the
+    office PC(s), so the old two-key rule dead-ended the hard-to-undo
+    actions behind an approval ticket the second Admin (often the same
+    person on the other PC) could not meaningfully consent to. The rule for
+    the big, hard-to-undo actions is now SINGLE-KEY: an Admin executes
+    directly, but ALWAYS with a MANDATORY written reason recorded loudly in
+    the audit log; a Clerk still files a ticket for the Admin to execute.
+    This helper remains only for code/tests that read the admin roster.
+    """
     return db.query(User).filter(
         User.role == "Admin",
         User.is_deactivated == False,
@@ -847,6 +858,7 @@ def health_check():
 
 @app.delete("/api/operators/{identifier}")
 def delete_single_operator(identifier: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_record_writer(current_user)
     if len(identifier) > 15 and "-" in identifier: 
         records = db.query(FranchiseRecord).filter(
             FranchiseRecord.id == identifier,
@@ -880,6 +892,7 @@ def delete_single_operator(identifier: str, current_user: User = Depends(get_cur
 
 @app.post("/api/operators/bulk-delete")
 def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_record_writer(current_user)
     deleted_count = 0
     for identifier in payload.sbn_list:
         if len(identifier) > 15 and "-" in identifier:
@@ -907,37 +920,15 @@ def delete_bulk_operators(payload: BulkDeleteRequest, current_user: User = Depen
 
 @app.delete("/api/routes/{route_name}")
 def delete_entire_route(route_name: str, override_reason: str = "", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Wiping a whole TODA line is a two-key action: the click files an
-    # approval ticket and a DIFFERENT Admin approves it, even when the
-    # person clicking is an Admin. Only in a one-admin office does the Admin
-    # execute directly, and only with a written reason (the override valve).
+    # Wiping a whole TODA line is one of the hard-to-undo actions. Since the
+    # single-key decision (2026-10-14): an Admin executes DIRECTLY, with a
+    # mandatory written reason recorded in the audit log. A Clerk files a
+    # ticket for the Admin instead — clerks never execute these.
     route_to_delete = alias_route(route_name)
     records = db.query(FranchiseRecord).filter(FranchiseRecord.route == route_to_delete).all()
     
     if not records:
         raise HTTPException(status_code=404, detail="Route not found or already empty.")
-
-    if _other_active_admin_exists(db, current_user):
-        if db.query(ApprovalTicket).filter(
-                ApprovalTicket.ticket_type == "route_delete",
-                ApprovalTicket.status == "pending",
-                ApprovalTicket.payload_json.contains(route_to_delete)).first():
-            raise HTTPException(status_code=409, detail=f"A delete ticket for {route_to_delete} is already waiting for approval.")
-        ticket = ApprovalTicket(
-            created_by=get_full_name(current_user),
-            ticket_type="route_delete",
-            payload_json=json.dumps({"route": route_to_delete}),
-            reason=(override_reason or "").strip() or None,
-        )
-        db.add(ticket)
-        db.commit()
-        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, route_to_delete,
-                   f"Requested approval to delete route '{route_to_delete}' ({len(records)} records).")
-        if current_user.role == "Admin":
-            return {"status": "ticket_filed",
-                    "message": f"Delete request sent to another Admin for approval. {len(records)} records stay untouched until they approve."}
-        return {"status": "ticket_filed",
-                "message": f"Request sent to the Admin for approval. {len(records)} records stay untouched until they approve."}
 
     if current_user.role != "Admin":
         if db.query(ApprovalTicket).filter(
@@ -957,13 +948,12 @@ def delete_entire_route(route_name: str, override_reason: str = "", current_user
         return {"status": "ticket_filed",
                 "message": f"Request sent to the Admin for approval. {len(records)} records stay untouched until they approve."}
 
-    # OVERRIDE VALVE: this office has exactly one active Admin. The action
-    # runs now, but only with a written reason so the audit log records why
-    # the two-key rule was bypassed.
+    # DIRECT EXECUTION (single-key rule): the action
+    # runs now, and only with a written reason so the audit log records why.
     reason = (override_reason or "").strip()
     if not reason:
         raise HTTPException(status_code=400,
-                            detail="You are the only active Admin. Type a short reason for this deletion so the audit log records why.")
+                            detail="Type a short reason for this deletion so the audit log records why.")
     count = 0
     for r in records:
         if not r.is_deleted:
@@ -979,6 +969,7 @@ def delete_entire_route(route_name: str, override_reason: str = "", current_user
 
 @app.post("/api/operators/{record_id}/restore")
 def restore_single_operator(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_record_writer(current_user)
     record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
     if not record:
         raise HTTPException(status_code=404, detail="Operator record not found.")
@@ -1008,35 +999,10 @@ def get_deleted_records(current_user: User = Depends(get_current_user), db: Sess
 @app.put("/api/routes/{route_name}/rename")
 def rename_route(route_name: str, payload: RouteRenameRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # A rename rewrites the route code and every SBN prefix on the line at
-    # once. The click files a ticket and a DIFFERENT Admin approves it, even
-    # when the person clicking is an Admin. Only in a one-admin office does
-    # the Admin execute directly, and only with a written reason.
+    # once. Since the single-key decision (2026-10-14): an Admin executes
+    # DIRECTLY with a mandatory written reason for the audit log; a Clerk
+    # files a ticket for the Admin. No second-Admin approval gate anymore.
     old_route = alias_route(route_name)
-    if _other_active_admin_exists(db, current_user):
-        if db.query(ApprovalTicket).filter(
-                ApprovalTicket.ticket_type == "route_rename",
-                ApprovalTicket.status == "pending",
-                ApprovalTicket.payload_json.contains(old_route)).first():
-            raise HTTPException(status_code=409, detail=f"A rename ticket for {old_route} is already waiting for approval.")
-        ticket = ApprovalTicket(
-            created_by=get_full_name(current_user),
-            ticket_type="route_rename",
-            payload_json=json.dumps({"route": old_route,
-                                     "new_route_name": payload.new_route_name,
-                                     "new_prefix": payload.new_prefix,
-                                     "new_driving_route": payload.new_driving_route or ""}),
-            reason=(payload.override_reason or "").strip() or None,
-        )
-        db.add(ticket)
-        db.commit()
-        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, old_route,
-                   f"Requested approval to rename route '{old_route}' to '{alias_route(payload.new_route_name)}'.")
-        if current_user.role == "Admin":
-            return {"status": "ticket_filed",
-                    "message": "Rename request sent to another Admin for approval."}
-        return {"status": "ticket_filed",
-                "message": "Rename request sent to the Admin for approval."}
-
     if current_user.role != "Admin":
         new_route_check = alias_route(payload.new_route_name)
         if db.query(ApprovalTicket).filter(
@@ -1060,12 +1026,12 @@ def rename_route(route_name: str, payload: RouteRenameRequest, current_user: Use
         return {"status": "ticket_filed",
                 "message": f"Rename request sent to the Admin for approval."}
 
-    # OVERRIDE VALVE: one-admin office; direct execution with a mandatory
-    # written reason recorded in the audit log.
+    # DIRECT EXECUTION (single-key rule): one written reason for the audit
+    # log, then the rename runs.
     reason = (payload.override_reason or "").strip()
     if not reason:
         raise HTTPException(status_code=400,
-                            detail="You are the only active Admin. Type a short reason for this rename so the audit log records why.")
+                            detail="Type a short reason for this rename so the audit log records why.")
 
     new_route = alias_route(payload.new_route_name)
     new_route = alias_route(payload.new_route_name)
@@ -1296,11 +1262,11 @@ def reject_ticket(ticket_id: str, decision: TicketDecision = None, current_user:
 
 @app.post("/api/restore-records/ticket")
 def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Bring back deleted records. Anyone can file the ticket; with two or
-    more active admins even the Admin's own restore waits for a DIFFERENT
-    admin's approval. In a one-admin office the Admin executes directly,
-    but only with a written reason. Accepts record_ids (specific rows) or
-    {'all': True} for every currently deleted record."""
+    """Bring back deleted records. Since the single-key decision
+    (2026-10-14): an Admin restores DIRECTLY with a mandatory written reason
+    recorded in the audit log; a Clerk files a restore ticket for the Admin,
+    as before. Accepts record_ids (specific rows) or {'all': True} for every
+    currently deleted record."""
     record_ids = payload.get("record_ids", [])
     want_all = bool(payload.get("all"))
     if not want_all and not record_ids:
@@ -1308,13 +1274,13 @@ def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_
     if want_all:
         record_ids = [r.id for r in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()]
 
-    # OVERRIDE VALVE: one-admin office. Restoring deleted records is a big,
-    # registry-wide action, so even alone the Admin must write down why.
-    if current_user.role == "Admin" and not _other_active_admin_exists(db, current_user):
+    # DIRECT EXECUTION (single-key rule): one written reason for the audit
+    # log, then the restore runs.
+    if current_user.role == "Admin":
         reason = (payload.get("override_reason") or "").strip()
         if not reason:
             raise HTTPException(status_code=400,
-                                detail="You are the only active Admin. Type a short reason for this restore so the audit log records why.")
+                                detail="Type a short reason for this restore so the audit log records why.")
         restored = 0
         for rid in record_ids:
             rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
@@ -1917,8 +1883,8 @@ def list_users(current_user: User = Depends(get_current_user), db: Session = Dep
 @app.post("/users")
 def admin_create_user(payload: UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_admin(current_user)
-    if payload.role not in ("Admin", "Clerk"):
-        raise HTTPException(status_code=400, detail="Role must be Admin or Clerk")
+    if payload.role not in ("Admin", "Clerk", "Viewer"):
+        raise HTTPException(status_code=400, detail="Role must be Admin, Clerk, or Viewer")
     if payload.password_confirm is not None and payload.password != payload.password_confirm:
         raise HTTPException(status_code=422, detail="Passwords do not match.")
     if len(payload.password) < 8:
@@ -1983,38 +1949,13 @@ def admin_set_user_active(payload: UserSetActive, current_user: User = Depends(g
         # can never be deactivated through the API.
         raise HTTPException(status_code=400, detail="You cannot deactivate your own account while signed in to it.")
 
-    if _other_active_admin_exists(db, current_user):
-        # TWO-KEY: with another active Admin in the office, switching an
-        # account off (or back on) files a ticket that a DIFFERENT Admin must
-        # approve. Nobody switches an account on their own say-so.
-        action_word = "reactivate" if payload.is_active else "deactivate"
-        if db.query(ApprovalTicket).filter(
-                ApprovalTicket.ticket_type == "user_deactivate",
-                ApprovalTicket.status == "pending",
-                ApprovalTicket.payload_json.contains(target.username)).first():
-            raise HTTPException(status_code=409, detail=f"A ticket to {action_word} {target.username} is already waiting for approval.")
-        ticket = ApprovalTicket(
-            created_by=get_full_name(current_user),
-            ticket_type="user_deactivate",
-            payload_json=json.dumps({"username": target.username, "is_active": bool(payload.is_active)}),
-            reason=(payload.override_reason or "").strip() or None,
-        )
-        db.add(ticket)
-        db.commit()
-        log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, "SYSTEM",
-                   f"Requested approval to {action_word} the account of {target.username}.")
-        if current_user.role == "Admin":
-            return {"status": "ticket_filed",
-                    "message": f"Request sent to another Admin for approval. {target.username} is unchanged until they approve."}
-        return {"status": "ticket_filed",
-                "message": f"Request sent to the Admin for approval. {target.username} is unchanged until they approve."}
-
-    # OVERRIDE VALVE: one-admin office; direct execution with a mandatory
-    # written reason recorded in the audit log.
+    # DIRECT EXECUTION (single-key rule, 2026-10-14): switching an account
+    # off or back on runs right away — no second-Admin ticket — and the
+    # mandatory written reason is recorded in the audit log.
     reason = (payload.override_reason or "").strip()
     if not reason:
         raise HTTPException(status_code=400,
-                            detail="You are the only active Admin. Type a short reason so the audit log records why this account is being switched.")
+                            detail="Type a short reason so the audit log records why this account is being switched.")
     target.is_deactivated = not payload.is_active
     db.commit()
     # HEARTBEAT: a deactivated clerk must not be able to dodge the switch by
@@ -2058,6 +1999,7 @@ def get_route_data(route_name: str, current_user: User = Depends(get_current_use
 
 @app.post("/route_data/{route_name}")
 def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_record_writer(current_user)
     route_name = alias_route(route_name)
     route_info = db.query(RouteData).filter(RouteData.route_name == route_name).first()
     if not route_info:
@@ -2384,6 +2326,7 @@ def create_operator_api(record: FranchiseCreate, current_user: User = Depends(ge
 
 @app.post("/franchise/")
 def create_franchise(record: FranchiseCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_record_writer(current_user)
     record.route = alias_route(record.route)
     record.address = expand_address_abbreviations(record.address)
 
@@ -2446,6 +2389,10 @@ def update_franchise(
     current_user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
+    # AUTH FIRST: the Viewer/Clerk gate fires before any record lookup, so a
+    # crafted request learns nothing about which record ids exist (a 404 on
+    # a guessed id would otherwise leak existence before authorization).
+    require_record_writer(current_user)
     db_record = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
     if not db_record: raise HTTPException(status_code=404)
     
@@ -2637,14 +2584,45 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
     require_admin(current_user)
     temp_db_path = os.path.join(BASE_DIR, f"temp_import_{uuid.uuid4().hex}.db")
     written = 0
-    with open(temp_db_path, "wb") as buffer:
-        while chunk := await file.read(1024 * 1024):
-            written += len(chunk)
-            if written > MAX_DB_UPLOAD_BYTES:
-                buffer.close()
+    # The nightly backup is a ZIP whose payload is pasada.db. Accept it here so
+    # an office whose Franchise folder is stale can still import from the
+    # backup package alone (same merge-only path as a raw .db).
+    if (file.filename or "").lower().endswith(".zip"):
+        member_name = None
+        try:
+            written = 0
+            with zipfile.ZipFile(io.BytesIO(await file.read())) as zf:
+                # Pick the largest .db member; the nightly zip holds exactly one.
+                db_members = [i for i in zf.infolist()
+                              if not i.is_dir() and i.filename.lower().endswith(".db")
+                              and not os.path.basename(i.filename).startswith("._")]
+                if not db_members:
+                    raise HTTPException(status_code=400, detail="This ZIP has no .db file inside. Choose the nightly PASADA_Backup zip or a plain .db import file.")
+                member = max(db_members, key=lambda i: i.file_size)
+                member_name = member.filename
+                with zf.open(member) as src, open(temp_db_path, "wb") as buffer:
+                    while chunk := src.read(1024 * 1024):
+                        written += len(chunk)
+                        if written > MAX_DB_UPLOAD_BYTES:
+                            raise HTTPException(status_code=413, detail="The .db inside this ZIP exceeds the 500 MB import limit.")
+                        buffer.write(chunk)
+        except HTTPException:
+            if os.path.exists(temp_db_path):
                 os.remove(temp_db_path)
-                raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB import limit.")
-            buffer.write(chunk)
+            raise
+        except zipfile.BadZipFile:
+            return JSONResponse(status_code=415, content={"detail": "This ZIP file is corrupted. Try the plain .db file instead."})
+        force_log(f"ZIP import: extracted {member_name} ({written} bytes) from {(file.filename or '').rsplit('/', 1)[-1]}")
+    else:
+        written = 0
+        with open(temp_db_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_DB_UPLOAD_BYTES:
+                    buffer.close()
+                    os.remove(temp_db_path)
+                    raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB import limit.")
+                buffer.write(chunk)
     
     temp_db = None
     db = None
@@ -2801,6 +2779,7 @@ async def upload_bulk_files(
     current_user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
+    require_record_writer(current_user)
     route_name = alias_route(route_name)
     full_name = get_full_name(current_user)
     imported_count = 0

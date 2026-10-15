@@ -123,7 +123,7 @@ def test_computer_name_never_defaults_to_hostname():
     # The broadcast label is the signed-in ACCOUNT's name (or the neutral
     # "PASADA" placeholder), never the machine's hostname.
     assert sync_engine.COMPUTER_NAME != platform.node()
-    assert sync_engine.COMPUTER_NAME in ("PASADA", "BEN JAMES DUAG")
+    assert sync_engine.COMPUTER_NAME in ("PASADA", "Front Desk", "MAIN PC", "BACKUP PC")
 
 
 def test_pull_signature_rejects_stale():

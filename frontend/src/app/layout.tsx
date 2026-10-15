@@ -379,19 +379,19 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     });
     if (!ok) return;
     try {
-        // Two-key rule: with another active Admin the delete always lands
-        // as a ticket for a DIFFERENT Admin. In a one-admin office the
-        // backend asks for a written reason (400); we prompt and retry.
+        // Single-key rule (2026-10-14): the Admin's delete runs directly,
+        // but the backend demands a written reason (400) first; we prompt
+        // and retry with it. A Clerk still files an approval ticket.
         let res = await fetchWithAuth(`${API_URL}/api/routes/${route}`, {
             method: "DELETE"
         });
         let body = await res.json().catch(() => ({}));
-        if (res.status === 400 && typeof body.detail === "string" && body.detail.includes("only active Admin")) {
+        if (res.status === 400 && typeof body.detail === "string" && body.detail.includes("Type a short reason")) {
             const typed = await confirmDialog({
               mode: "prompt",
-              title: "You are the only active Admin",
+              title: "Reason required",
               message: "This deletion runs right away, and the reason is written into the audit log.",
-              fieldNote: "Shown in Activity History as a single-admin override.",
+              fieldNote: "Shown in Activity History next to the deletion.",
               confirmLabel: "Delete",
             });
             if (typeof typed !== "string" || !typed.trim()) {
@@ -405,8 +405,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         }
         if (res.ok) {
             if (body.status === "ticket_filed") {
-                // Two-key path: nothing was deleted; a different Admin must approve.
-                await confirmDialog({ mode: "alert", title: "Approval requested", message: typeof body.message === "string" && body.message ? body.message : "The deletion request was sent to another Admin for approval." });
+                // Clerk path: nothing was deleted; the Admin must approve.
+                await confirmDialog({ mode: "alert", title: "Approval requested", message: typeof body.message === "string" && body.message ? body.message : "The deletion request was sent to the Admin for approval." });
                 return;
             }
             if (pinnedRoutes.includes(route)) {
@@ -493,9 +493,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" suppressHydrationWarning>
       <head>
         <style dangerouslySetInnerHTML={{ __html: `
-          /* System font stack on purpose: the desktop app runs air-gapped and
-             its CSP only allows self-hosted assets, so no webfont is fetched. */
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important; }
+          /* Montserrat (self-hosted, see globals.css) first in the stack. */
+          body { font-family: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important; }
           /* Tooltips: the [data-tip] attribute is the single source. ONE look
              everywhere (dark bubble, light text, both themes, same as the
              chart tooltips) so nothing flips white/black between modes. They

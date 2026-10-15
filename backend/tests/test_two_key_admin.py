@@ -1,11 +1,12 @@
-# TWO-KEY RULE FOR ADMINS: the big, hard-to-undo actions (delete a route,
-# rename a route, restore deleted records, deactivate an account) always
-# need a second active Admin to approve, even when the person clicking is
-# themselves an Admin. Nobody approves their own ticket. A one-admin office
-# (the deployment reality) cannot second-key itself, so there the Admin's
-# valve is direct execution with a MANDATORY written reason, recorded in
-# the audit log as a single-admin override. The last active Admin can never
-# be switched off through any path.
+# SINGLE-KEY RULE FOR HARD-TO-UNDO ACTIONS (decision 2026-10-14, owner):
+# PASADA runs as ONE person operating the office PC(s), so the old two-key
+# rule (a second active Admin must approve) is gone. The big, hard-to-undo
+# actions (delete a route, rename a route, restore deleted records,
+# deactivate an account) now run DIRECTLY when an Admin executes them, but
+# ALWAYS with a MANDATORY written reason recorded loudly in the audit log.
+# A Clerk still files a ticket for the Admin to execute — clerks never
+# execute these themselves. The last active Admin can never be switched off
+# through any path.
 
 import sys
 import os
@@ -92,80 +93,75 @@ def _pending_ticket(client, headers, ticket_type):
     return pending[0]
 
 
-# --- WITH TWO ACTIVE ADMINS: EVERY BIG ACTION BECOMES A TICKET ---
+# --- WITH TWO ADMINS: THE ADMIN STILL EXECUTES DIRECTLY, REASON REQUIRED ---
 
-def test_admin_delete_route_files_ticket_for_other_admin(client):
+def test_admin_delete_route_runs_directly_with_reason(client):
     admin_one = _token(client, "ADMIN ONE", "adminone1")
     admin_two = _token(client, "ADMIN TWO", "admintwo1")
     _add_route(client, admin_one, "TWOKLINE", "TWK-001")
 
+    # Even with a second active Admin in the office, the Admin's own delete
+    # runs right away — the single-key decision removed the ticket gate.
+    # What stays mandatory is the written reason.
     res = client.delete("/api/routes/TWOKLINE", headers=admin_one)
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
+    assert res.status_code == 400 and "Type a short reason" in res.json()["detail"], res.text
 
-    # Nobody approves their own ticket, even the other admin filing it.
-    ticket = _pending_ticket(client, admin_two, "route_delete")
-    assert ticket["created_by"] == "ADMIN ONE"
-    res = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_one)
-    assert res.status_code == 403, res.text
-
-    # A DIFFERENT admin approves; only then does the delete run.
-    ok = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_two, json={"note": "confirmed with the office"})
-    assert ok.status_code == 200, ok.text
+    res = client.delete("/api/routes/TWOKLINE?override_reason=confirmed%20with%20the%20office",
+                        headers=admin_one)
+    assert res.status_code == 200, res.text
     db = TestingSessionLocal()
     gone = db.query(FranchiseRecord).filter(FranchiseRecord.route == "TWOKLINE",
                                             FranchiseRecord.is_deleted == True).count()
+    details = [a.details for a in db.query(AuditLog).filter(AuditLog.action == "DELETE_ROUTE").all()]
     db.close()
-    assert gone == 1, "approval must execute the delete"
+    assert gone == 1, "the delete must execute directly"
+    # The written reason is recorded loudly in the audit log.
+    assert any("confirmed with the office" in d for d in details), details
 
 
-def test_admin_rename_files_ticket_and_other_admin_approves(client):
+def test_admin_rename_runs_directly_with_reason(client):
     admin_one = _token(client, "ADMIN ONE", "adminone1")
     admin_two = _token(client, "ADMIN TWO", "admintwo1")
     _add_route(client, admin_one, "RENLINE", "REN-001")
 
     res = client.put("/api/routes/RENLINE/rename", headers=admin_one,
                      json={"new_route_name": "RENLINE2", "new_prefix": "RN2", "new_driving_route": ""})
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
+    assert res.status_code == 400 and "Type a short reason" in res.json()["detail"], res.text
 
-    ticket = _pending_ticket(client, admin_two, "route_rename")
-    ok = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_two, json={"note": "line really moved"})
-    assert ok.status_code == 200, ok.text
+    res = client.put("/api/routes/RENLINE/rename", headers=admin_one,
+                     json={"new_route_name": "RENLINE2", "new_prefix": "RN2",
+                           "new_driving_route": "", "override_reason": "line really moved"})
+    assert res.status_code == 200, res.text
     db = TestingSessionLocal()
     moved = db.query(FranchiseRecord).filter(FranchiseRecord.route == "RENLINE2").count()
     db.close()
-    assert moved == 1, "approval must execute the rename"
+    assert moved == 1, "the rename must execute directly"
 
 
-def test_admin_deactivation_files_ticket_and_consent_flow_works(client):
+def test_admin_deactivation_runs_directly_with_reason(client):
     admin_one = _token(client, "ADMIN ONE", "adminone1")
     admin_two = _token(client, "ADMIN TWO", "admintwo1")
 
-    # Admin ONE files to switch off Admin TWO.
+    # The Admin may switch another account off right away, with a reason.
     res = client.put("/users/set-active", headers=admin_one,
                      json={"username": "ADMIN TWO", "is_active": False})
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
+    assert res.status_code == 400 and "Type a short reason" in res.json()["detail"], res.text
 
-    # Admin TWO approves his own switch-off: that is the consent flow (the
-    # filing admin stays active, so the office keeps a working admin).
-    # What is forbidden is the FILER approving their own ticket.
-    ticket = _pending_ticket(client, admin_two, "user_deactivate")
-    res = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_one)
-    assert res.status_code == 403, "the filing admin must not approve their own ticket"
-    ok = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_two, json={"note": "I accept the switch-off"})
-    assert ok.status_code == 200, ok.text
+    res = client.put("/users/set-active", headers=admin_one,
+                     json={"username": "ADMIN TWO", "is_active": False,
+                           "override_reason": "second account is leaving"})
+    assert res.status_code == 200, res.text
     db = TestingSessionLocal()
     flag = db.query(User).filter(User.username == "ADMIN TWO").first().is_deactivated
+    details = [a.details for a in db.query(AuditLog).filter(AuditLog.action == "DEACTIVATE_USER").all()]
     db.close()
-    assert flag, "the consented deactivation must take effect"
+    assert flag, "the deactivation must take effect immediately"
+    assert any("second account is leaving" in d for d in details), details
 
-    # Reactivation: with ADMIN TWO switched off the office is back to ONE
-    # active admin, so the override valve applies (reason required).
-    admin_one = _token(client, "ADMIN ONE", "adminone1")
+    # Reactivation works the same way: direct, reason required.
     res = client.put("/users/set-active", headers=admin_one,
-                     json={"username": "ADMIN TWO", "is_active": True})
-    assert res.status_code == 400, res.text
-    res = client.put("/users/set-active", headers=admin_one,
-                     json={"username": "ADMIN TWO", "is_active": True, "override_reason": "second admin returns to work"})
+                     json={"username": "ADMIN TWO", "is_active": True,
+                           "override_reason": "returns to work"})
     assert res.status_code == 200, res.text
     db = TestingSessionLocal()
     flag = db.query(User).filter(User.username == "ADMIN TWO").first().is_deactivated
@@ -174,66 +170,118 @@ def test_admin_deactivation_files_ticket_and_consent_flow_works(client):
 
 
 def test_last_active_admin_cannot_be_switched_off(client):
+    # The invariant that mattered most under two-key STILL holds: an active
+    # Admin cannot switch off their own account, so the office never runs
+    # zero active Admins, no matter what.
     admin_one = _token(client, "ADMIN ONE", "adminone1")
     admin_two = _token(client, "ADMIN TWO", "admintwo1")
 
-    # Admin ONE files to switch off Admin TWO. Admin TWO approves (consent),
-    # leaving ADMIN ONE as the last active admin. Now nobody may switch
-    # ADMIN ONE off: the guard fires even before a ticket could help.
     res = client.put("/users/set-active", headers=admin_one,
-                     json={"username": "ADMIN TWO", "is_active": False})
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
-    ticket = _pending_ticket(client, admin_two, "user_deactivate")
-    client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin_two, json={"note": "agreed"})
+                     json={"username": "ADMIN TWO", "is_active": False,
+                           "override_reason": "leaving"})
+    assert res.status_code == 200, res.text
 
+    # Only ADMIN ONE remains active. They cannot switch themselves off.
     db = TestingSessionLocal()
     only_admin = db.query(User).filter(User.username == "ADMIN ONE").first()
     assert only_admin.role == "Admin" and not only_admin.is_deactivated
     db.close()
 
-    # A clerk calls set-active on the last admin: 403 before anything else.
+    # A clerk calling set-active on the last admin: 403 before anything else.
     clerk = _token(client, "CLERK WORKER", "clerkone1")
     res = client.put("/users/set-active", headers=clerk,
-                     json={"username": "ADMIN ONE", "is_active": False})
+                     json={"username": "ADMIN ONE", "is_active": False,
+                           "override_reason": "anything"})
     assert res.status_code == 403
 
     # Even the last admin's own account refuses self-deactivation (400).
     res = client.put("/users/set-active", headers=admin_one,
-                     json={"username": "ADMIN ONE", "is_active": False})
+                     json={"username": "ADMIN ONE", "is_active": False,
+                           "override_reason": "why not"})
     assert res.status_code == 400
     db = TestingSessionLocal()
     assert not db.query(User).filter(User.username == "ADMIN ONE").first().is_deactivated
     db.close()
 
 
-# --- SINGLE-ADMIN OFFICE: THE OVERRIDE VALVE ---
+# --- CLERKS: TICKETS, NEVER DIRECT EXECUTION ---
 
-def test_single_admin_override_requires_reason(client):
+def test_clerk_delete_files_ticket_for_admin(client):
+    admin = _token(client, "ADMIN ONE", "adminone1")
+    clerk = _token(client, "CLERK WORKER", "clerkone1")
+    _add_route(client, admin, "CLERKLINE", "CLK-001")
+
+    res = client.delete("/api/routes/CLERKLINE", headers=clerk)
+    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
+    assert "the Admin" in res.json()["message"]
     db = TestingSessionLocal()
-    db.query(User).filter(User.username == "ADMIN TWO").delete()
+    alive = db.query(FranchiseRecord).filter(FranchiseRecord.route == "CLERKLINE",
+                                             FranchiseRecord.is_deleted == False).count()
+    db.close()
+    assert alive == 1, "a filed ticket must not touch the data"
+
+    db = TestingSessionLocal()
+    details = [a.details for a in db.query(AuditLog).filter(AuditLog.action == "TICKET_FILED").all()]
+    db.close()
+    assert any("CLERKLINE" in d for d in details), details
+
+    # A clerk cannot approve anything: the gate is Admin-only.
+    ticket = _pending_ticket(client, admin, "route_delete")
+    assert client.post(f"/admin/tickets/{ticket['id']}/approve", headers=clerk).status_code == 403
+
+
+def test_clerk_restore_filed_and_admin_executes_with_reason(client):
+    admin = _token(client, "ADMIN ONE", "adminone1")
+    clerk = _token(client, "CLERK WORKER", "clerkone1")
+    db = TestingSessionLocal()
+    db.add(FranchiseRecord(sbn_no="OVR-001", operator_name="OVERRIDE OP",
+                           route="OVRROUTE", address="NATIVE TEST ADDRESS", is_deleted=True))
     db.commit()
     db.close()
-    admin = _token(client, "ADMIN ONE", "adminone1")
-    _add_route(client, admin, "SINGLETON", "SGL-001")
 
-    # Without a reason: refused with guidance.
-    res = client.delete("/api/routes/SINGLETON", headers=admin)
-    assert res.status_code == 400 and "only active Admin" in res.json()["detail"], res.text
-    res = client.put("/users/set-active", headers=admin,
-                     json={"username": "CLERK WORKER", "is_active": False})
-    assert res.status_code == 400 and "only active Admin" in res.json()["detail"], res.text
+    # The clerk files. Nothing moves.
+    res = client.post("/api/restore-records/ticket", headers=clerk, json={"all": True})
+    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
+    ticket = _pending_ticket(client, admin, "record_restore")
 
-    # With a reason: executes, and the audit log records the override.
-    res = client.put("/users/set-active", headers=admin,
-                     json={"username": "CLERK WORKER", "is_active": False, "override_reason": "account left the office"})
-    assert res.status_code == 200, res.text
+    # A restore ticket already pending blocks a second one (409).
+    res = client.post("/api/restore-records/ticket", headers=clerk, json={"all": True})
+    assert res.status_code == 409, res.text
+
+    # The Admin approves. The queued action executes the restore.
+    ok = client.post(f"/admin/tickets/{ticket['id']}/approve", headers=admin, json={"note": "ok"})
+    assert ok.status_code == 200, ok.text
     db = TestingSessionLocal()
-    details = [a.details for a in db.query(AuditLog).filter(AuditLog.action == "DEACTIVATE_USER").all()]
+    alive = db.query(FranchiseRecord).filter(FranchiseRecord.sbn_no == "OVR-001",
+                                             FranchiseRecord.is_deleted == False).count()
     db.close()
-    assert any("Single-admin override" in d and "account left the office" in d for d in details)
+    assert alive == 1, "approval must execute the restore"
 
 
-def test_single_admin_route_delete_and_rename_override(client):
+def test_admin_restore_direct_requires_reason(client):
+    admin = _token(client, "ADMIN ONE", "adminone1")
+    admin_two = _token(client, "ADMIN TWO", "admintwo1")  # second admin present
+    db = TestingSessionLocal()
+    db.add(FranchiseRecord(sbn_no="DR-001", operator_name="DIRECT OP",
+                           route="DRROUTE", address="NATIVE TEST ADDRESS", is_deleted=True))
+    db.commit()
+    db.close()
+
+    res = client.post("/api/restore-records/ticket", headers=admin, json={"all": True})
+    assert res.status_code == 400 and "Type a short reason" in res.json()["detail"], res.text
+    res = client.post("/api/restore-records/ticket", headers=admin,
+                      json={"all": True, "override_reason": "records were deleted by mistake"})
+    assert res.status_code == 200 and res.json()["status"] == "success", res.text
+    db = TestingSessionLocal()
+    alive = db.query(FranchiseRecord).filter(FranchiseRecord.sbn_no == "DR-001",
+                                             FranchiseRecord.is_deleted == False).count()
+    db.close()
+    assert alive == 1
+
+
+def test_single_admin_office_same_rule_all_actions(client):
+    # One-admin office: identical rule to two-admin — direct execution with
+    # a mandatory reason for every hard-to-undo action.
     db = TestingSessionLocal()
     db.query(User).filter(User.username == "ADMIN TWO").delete()
     db.commit()
@@ -241,56 +289,16 @@ def test_single_admin_route_delete_and_rename_override(client):
     admin = _token(client, "ADMIN ONE", "adminone1")
     _add_route(client, admin, "LONELY", "LON-001")
 
-    # Route delete without a reason: refused. With a reason: runs.
     res = client.delete("/api/routes/LONELY", headers=admin)
-    assert res.status_code == 400, res.text
+    assert res.status_code == 400 and "Type a short reason" in res.json()["detail"], res.text
     res = client.delete("/api/routes/LONELY?override_reason=end%20of%20the%20line", headers=admin)
     assert res.status_code == 200, res.text
+
+    res = client.put("/users/set-active", headers=admin,
+                     json={"username": "CLERK WORKER", "is_active": False,
+                           "override_reason": "account left the office"})
+    assert res.status_code == 200, res.text
     db = TestingSessionLocal()
-    gone = db.query(FranchiseRecord).filter(FranchiseRecord.route == "LONELY", FranchiseRecord.is_deleted == True).count()
+    details = [a.details for a in db.query(AuditLog).filter(AuditLog.action == "DEACTIVATE_USER").all()]
     db.close()
-    assert gone == 1
-
-    # Rename through the override valve as well.
-    res = client.put("/api/routes/LONELY/rename", headers=admin,
-                     json={"new_route_name": "LONELY2", "new_prefix": "", "new_driving_route": "", "override_reason": "typo fix"})
-    assert res.status_code == 404, "the route was just deleted, so no records remain"
-
-
-def test_single_admin_restore_override(client):
-    db = TestingSessionLocal()
-    db.query(User).filter(User.username == "ADMIN TWO").delete()
-    db.commit()
-    db.add(FranchiseRecord(sbn_no="OVR-001", operator_name="OVERRIDE OP",
-                           route="OVRROUTE", address="NATIVE TEST ADDRESS", is_deleted=True))
-    db.commit()
-    db.close()
-    admin = _token(client, "ADMIN ONE", "adminone1")
-
-    res = client.post("/api/restore-records/ticket", headers=admin, json={"all": True})
-    assert res.status_code == 400 and "only active Admin" in res.json()["detail"], res.text
-    res = client.post("/api/restore-records/ticket", headers=admin,
-                      json={"all": True, "override_reason": "records were deleted by mistake"})
-    assert res.status_code == 200 and res.json()["status"] == "success", res.text
-    db = TestingSessionLocal()
-    alive = db.query(FranchiseRecord).filter(FranchiseRecord.sbn_no == "OVR-001",
-                                             FranchiseRecord.is_deleted == False).count()
-    db.close()
-    assert alive == 1
-
-
-# --- CLERKS ARE UNCHANGED: TICKETS, NEVER DIRECT EXECUTION ---
-
-def test_clerk_path_unchanged_by_two_key_rule(client):
-    admin = _token(client, "ADMIN ONE", "adminone1")
-    clerk = _token(client, "CLERK WORKER", "clerkone1")
-    _add_route(client, admin, "CLERKLINE", "CLK-001")
-
-    res = client.delete("/api/routes/CLERKLINE", headers=clerk)
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
-    # The clerk's message names the Admin (there is no 'other' admin for them).
-    assert "the Admin" in res.json()["message"]
-    # A clerk cannot approve anything, and the reason override never applies
-    # to a clerk (require_admin fires first on approve).
-    ticket = _pending_ticket(client, admin, "route_delete")
-    assert client.post(f"/admin/tickets/{ticket['id']}/approve", headers=clerk).status_code == 403
+    assert any("account left the office" in d for d in details), details

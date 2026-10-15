@@ -8,7 +8,7 @@ Full audit of backend, frontend, security, and data security, performed with the
 
 | Finding | Fix |
 |---------|-----|
-| `frontend/src-tauri/tauri.conf.json` version was corrupted: `"0.82.0.B&V Software Solutions, Inc."` concatenated the version with an author string. Semver comparison and the updater's version logic would fail against it. | Restored to a clean `0.82.0`, matching `Cargo.toml` and `APP_VERSION` in the Settings page. |
+| `frontend/src-tauri/tauri.conf.json` version was corrupted: the `version` field contained `"0.82.0." followed by a vendor/author string instead of a clean semver. Semver comparison and the updater's version logic would fail against it. | Restored to a clean `0.82.0`, matching `Cargo.toml` and `APP_VERSION` in the Settings page. |
 
 ### Backend security (HIGH)
 

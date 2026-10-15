@@ -124,28 +124,45 @@ Run this against a scratch instance before tagging a release:
 
 ## 7b. If the Tauri window is black (desktop build only)
 
-`npm run tauri dev` opens a real desktop window. On some Linux graphics
-stacks (notably Wayland sessions and NVIDIA + WebKitGTK 4.1) that window
-comes up **solid black** even though the app is running fine behind it. The
-black screen is a WebKit compositing problem, not a PASADA bug: the backend
-is serving, the frontend is loaded, the webview just is not painting.
+**Root cause found (Oct 2026):** on this office machine (Intel HD 2000 /
+Sandy Bridge i915, X11, Zorin OS 24.04 base) the desktop window comes up
+solid dark and never renders any UI because **WebKitGTK 2.52 never paints
+on this hardware** — the web process commits the document but the UI never
+receives a single frame, in MiniBrowser just as in the app. It is not a
+PASADA bug and none of the old env workarounds work on 2.52
+(WEBKIT_DISABLE_COMPOSITING_MODE, WEBKIT_DISABLE_DMABUF_RENDERER,
+LIBGL_ALWAYS_SOFTWARE, GALLIUM_DRIVER=llvmpipe, sandbox off, NO_AT_BRIDGE,
+JSC_useJIT=0 — all verified ineffective; MESA_LOADER_DRIVER_OVERRIDE=crocus
+and Xvfb too).
 
-Two fixes, in this order:
+The fix on the machine: **downgrade to WebKitGTK 2.44.0** (Ubuntu archive
+keeps it) and hold the packages so updates cannot re-break them:
 
-1. Disable WebKit compositing for that run:
-   ```bash
-   WEBKIT_DISABLE_COMPOSITING_MODE=1 npm run tauri dev
-   ```
-2. If it is still black, also force the software renderer:
-   ```bash
-   WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev
-   ```
+```bash
+sudo apt install libwebkit2gtk-4.1-0=2.44.0-2 libjavascriptcoregtk-4.1-0=2.44.0-2
+sudo apt-mark hold libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+```
+
+With 2.44.0 the same window renders the login page normally (measured:
+~62% of the window paints a test pattern, 3257 distinct colors and visible
+text in the real app; see docs/BLACK_WINDOW_FIXED_PROOF.png).
+All the old env vars below are **only** other-machine fallbacks, not a
+replacement for the pin:
+
+```bash
+WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev
+```
+
+If the window goes black again after an update/ reinstall, check
+`apt policy libwebkit2gtk-4.1-0` first — a version above 2.44.0 is the
+prime suspect. If a newer WebKitGTK ever ships a proper fix, unhold with
+`sudo apt-mark unhold` and test `WebView` rendering on this exact machine
+before upgrading.
 
 The supported way to exercise PASADA on Linux is the **browser flow in
 section 1**, not the Tauri window. Use the Tauri window only when you are
 specifically testing the desktop shell (updater, sidecar lifecycle,
-right-click menu); for records, sync, and business logic the browser flow is
-equivalent and avoids the WebKit rendering issue entirely.
+right-click menu).
 
 The backend no longer prints a line per HTTP request (access logging is off
 by default), so a quiet terminal while you use the app is normal. To bring

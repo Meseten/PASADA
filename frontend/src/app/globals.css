@@ -2,6 +2,48 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* MONTSERRAT, SELF-HOSTED: the desktop app is air-gapped and its CSP only
+   allows self-hosted assets, so the font ships inside the bundle (public/fonts,
+   from Fontsource; SIL OFL licence, latin subset, ~19 KB per weight). Without
+   this the system stack fell through to DejaVu on Linux boxes — the "funny
+   font" reported after the Linux build. Weights 400-800 cover every weight
+   the UI asks for (font-black/900 renders from the 800 face). */
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin-800-normal.woff2") format("woff2");
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -49,6 +91,7 @@
 }
 
 :root {
+  --font-sans: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);

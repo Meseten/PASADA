@@ -52,6 +52,10 @@ function GlobalSearchClient() {
   const [search, setSearch] = useState(initialQuery)
   const [deferredSearch, setDeferredSearch] = useState(initialQuery)
 
+  // VIEWER ROLE: read-only accounts see the search results but no edit/delete
+  // actions. Hiding is courtesy — the API refuses records writes with 403.
+  const isViewer = typeof window !== "undefined" && (localStorage.getItem("pasada_role") || "") === "Viewer"
+
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isViewOpen, setIsViewOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -528,12 +532,15 @@ function GlobalSearchClient() {
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="View Certificate Preview" data-tip-align-right data-tip="Opens the MTOP certificate preview for this operator, where you can print or download it." onClick={() => handleOpenView(member)}>
                               <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                             </Button>
+                            {!isViewer && (
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Edit Operator" data-tip-align-right data-tip="Edit or renew this record. Editing the SBN counts as a renewal and updates the dates." onClick={() => handleOpenEdit(member)}>
                               <Edit className="h-3.5 w-3.5" />
                             </Button>
+                            )}
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Record History" data-tip-align-right data-tip="Every change ever recorded for this operator, with dates and who made them." onClick={() => handleOpenHistory(member)}>
                               <History className="h-3.5 w-3.5" />
                             </Button>
+                            {!isViewer && (
                             <Button 
                                 variant="outline" 
                                 size="icon" 
@@ -543,6 +550,7 @@ function GlobalSearchClient() {
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -652,6 +660,23 @@ function GlobalSearchClient() {
             <DialogTitle className="text-2xl font-bold">Edit / Renew Operator</DialogTitle>
             <DialogDescription>Update record details or clear fields to set as Vacant.</DialogDescription>
           </DialogHeader>
+          {/* MTOP PREVIEW WHILE EDITING: a clerk who lands here from Search and
+              edits doesn't need to close the dialog and hunt for the eye icon —
+              this opens the same certificate preview from right inside the edit
+              form (request #3 from the office). */}
+          <div className="-mt-3">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => activeMember && handleOpenView(activeMember)}
+              disabled={!activeMember}
+              className="font-bold text-blue-600 hover:text-blue-700 hover:bg-blue-50 dark:hover:bg-blue-950/40 border-blue-200 dark:border-blue-900"
+              data-tip-below
+              data-tip="Opens the MTOP certificate preview for this operator, where you can print or download it."
+            >
+              <Shield className="mr-2 h-4 w-4" /> MTOP Certificate Preview
+            </Button>
+          </div>
           <form onSubmit={handleSubmitForm} className="space-y-5 mt-2">
             <div className="grid grid-cols-2 gap-5">
               <div className="space-y-2">

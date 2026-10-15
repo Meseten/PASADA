@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from passlib.context import CryptContext
 
@@ -64,6 +64,26 @@ def _token(client, username="ADMIN BOSS", password="password123"):
     res = client.post("/token", json={"username": username, "password": password})
     assert res.status_code == 200, res.text
     return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+@pytest.fixture(autouse=True)
+def _clean_login_state():
+    # LOGIN STATE ISOLATION: failed-login counters (in-memory _login_attempts
+    # and the persisted login_lockouts rows) leak across tests within this
+    # module — a deliberate lockout in one test made later tests' first sign-in
+    # answer '4 attempts left'. Clear both before every test.
+    from main import _login_attempts
+    _login_attempts.clear()
+    db = TestingSessionLocal()
+    try:
+        db.execute(text("DELETE FROM login_lockouts"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+    yield
+    _login_attempts.clear()
 
 
 def test_signup_open_flags_closed_office(client):
@@ -255,21 +275,16 @@ def test_deactivated_admin_loses_access_immediately(client):
     second = _token(client, "SECOND ADMIN", "secondpass1")
     # The second admin can act while active.
     assert client.get("/users", headers=second).status_code == 200
-    # The first admin files the deactivation (two-key: a different admin
-    # must approve) and the second admin CONSENTS by approving it himself.
+    # SINGLE-KEY RULE (2026-10-14): the deactivation now runs directly with
+    # a mandatory written reason; no second-Admin approval ticket.
     res = client.put("/users/set-active", headers=headers,
-                     json={"username": "SECOND ADMIN", "is_active": False})
-    assert res.status_code == 200 and res.json()["status"] == "ticket_filed", res.text
-    queue = client.get("/admin/tickets", headers=second).json()
-    pending = [t for t in queue if t["status"] == "pending" and t["ticket_type"] == "user_deactivate"]
-    assert pending, queue[:2]
-    ok = client.post(f"/admin/tickets/{pending[0]['id']}/approve", headers=second, json={"note": "agreed"})
-    assert ok.status_code == 200, ok.text
+                     json={"username": "SECOND ADMIN", "is_active": False, "override_reason": "second account is leaving"})
+    assert res.status_code == 200, res.text
     # The second admin's signed-in session is dead and sign-in is refused.
     assert client.get("/users", headers=second).status_code == 401
     res = client.post("/token", json={"username": "SECOND ADMIN", "password": "secondpass1"})
     assert res.status_code == 401
-    # Reactivated: back to one active admin, so the override valve applies.
+    # Reactivation follows the same single-key rule: direct, reason required.
     res = client.put("/users/set-active", headers=headers,
                      json={"username": "SECOND ADMIN", "is_active": True, "override_reason": "second admin returns to work"})
     assert res.status_code == 200, res.text
@@ -566,3 +581,122 @@ def test_recovery_reset_with_admin_does_not_promote(synced_client):
 # Deactivation is the missing middle ground between "account works" and
 # "account never existed": the person's records and audit history stay, but
 # sign-in is refused everywhere and even an already-signed-in session is
+
+
+# --- VIEWER ROLE (read-only accounts for the second office PC) ---
+# A Viewer can look at everything but must not be able to change a single
+# record. The API is the boundary; the hidden buttons in the UI are courtesy.
+# ORDER-INDEPENDENT on purpose: these four tests run against their OWN
+# function-scoped database (viewer_client) because the earlier module tests
+# mutate shared state (lockouts, deactivations, recovery fixtures), and a
+# module-scoped DB made fresh-user logins flaky depending on test order.
+VIEWER_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "test_viewer_block.db"))
+viewer_engine = create_engine(
+    f"sqlite:///{VIEWER_DB_PATH}",
+    connect_args={"check_same_thread": False, "timeout": 30},
+)
+ViewerSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=viewer_engine)
+
+
+def viewer_override_get_db():
+    db = ViewerSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def viewer_client():
+    if os.path.exists(VIEWER_DB_PATH):
+        try:
+            os.remove(VIEWER_DB_PATH)
+        except OSError:
+            pass
+    Base.metadata.create_all(bind=viewer_engine)
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = viewer_override_get_db
+    with TestClient(app) as c:
+        yield c
+    if previous_override is not None:
+        app.dependency_overrides[get_db] = previous_override
+    else:
+        app.dependency_overrides.pop(get_db, None)
+    viewer_engine.dispose()
+    if os.path.exists(VIEWER_DB_PATH):
+        try:
+            os.remove(VIEWER_DB_PATH)
+        except OSError:
+            pass
+
+
+def _make_viewer_fixtures(viewer_client):
+    import uuid
+    suffix = uuid.uuid4().hex[:6].upper()
+    admin_user, viewer_user = f"VADM {suffix}", f"VIEW {suffix}"
+    db = ViewerSessionLocal()
+    db.add(User(first_name="VADM", last_name=suffix,
+                username=admin_user,
+                password_hash=pwd_context.hash("vadminpass1"), role="Admin"))
+    db.add(User(first_name="VIEW", last_name=suffix,
+                username=viewer_user,
+                password_hash=pwd_context.hash("viewpass123"), role="Viewer"))
+    db.commit()
+    db.close()
+    return _token(viewer_client, admin_user, "vadminpass1"), _token(viewer_client, viewer_user, "viewpass123")
+
+def test_viewer_role_whitelist_rejects_unknown_role(viewer_client):
+    admin_headers, _ = _make_viewer_fixtures(viewer_client)
+    res = viewer_client.post("/users", headers=admin_headers, json={
+        "first_name": "HACK", "last_name": "ERMAN",
+        "username": "HACK ERMAN", "password": "hackpass123", "role": "SuperAdmin",
+    })
+    assert res.status_code == 400
+
+def test_viewer_cannot_create_edit_or_delete_records(viewer_client):
+    _, viewer_headers = _make_viewer_fixtures(viewer_client)
+    # Create
+    res = viewer_client.post("/franchise/", headers=viewer_headers, json={
+        "route": "TESTODA", "operator_name": "SHOULD NOT EXIST",
+        "address": "Test Address", "sbn_no": "", "motor_no": "M-1", "chassis_no": "C-1",
+    })
+    assert res.status_code == 403, f"create: {res.status_code} {res.text}"
+    # Edit (record may not exist; 403 must fire before any record lookup result)
+    res = viewer_client.put("/franchise/some-id-not-real", headers=viewer_headers, json={
+        "route": "TESTODA", "operator_name": "X", "address": "Y",
+        "sbn_no": "T-1", "motor_no": "M-1", "chassis_no": "C-1",
+    })
+    assert res.status_code == 403, f"edit: {res.status_code} {res.text}"
+    # Delete
+    res = viewer_client.delete("/api/operators/whatever", headers=viewer_headers)
+    assert res.status_code == 403, f"delete: {res.status_code} {res.text}"
+    # Bulk delete
+    res = viewer_client.post("/api/operators/bulk-delete", headers=viewer_headers, json={"sbn_list": ["T-1"]})
+    assert res.status_code == 403, f"bulk delete: {res.status_code} {res.text}"
+
+def test_viewer_can_still_read_and_print(viewer_client):
+    _, viewer_headers = _make_viewer_fixtures(viewer_client)
+    # Read paths stay open: the route listing the records pages use, plus
+    # dashboard stats. (GET /franchise/ is not a route in this app; the
+    # per-route list is the real read path.)
+    res = viewer_client.get("/franchise/route/TESTODA", headers=viewer_headers)
+    assert res.status_code == 200, res.text
+    res = viewer_client.get("/stats/global", headers=viewer_headers)
+    assert res.status_code == 200, res.text
+
+def test_clerk_can_still_create_records(viewer_client):
+    import uuid
+    suffix = uuid.uuid4().hex[:6].upper()
+    clerk_user = f"CLERK {suffix}"
+    db = ViewerSessionLocal()
+    db.add(User(first_name="CLERK", last_name=suffix,
+                username=clerk_user,
+                password_hash=pwd_context.hash("clerkpass123"), role="Clerk"))
+    db.commit()
+    db.close()
+    clerk_headers = _token(viewer_client, clerk_user, "clerkpass123")
+    res = viewer_client.post("/franchise/", headers=clerk_headers, json={
+        "route": "TESTODA", "operator_name": "CLERK MADE ME",
+        "address": "Test Address", "sbn_no": "", "motor_no": "M-2", "chassis_no": "C-2",
+    })
+    assert res.status_code == 200, res.text

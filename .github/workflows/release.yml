@@ -116,7 +116,7 @@ jobs:
           # every launch — measured as the dominant chunk of cold boot. The
           # spec carries every hidden import + both docx templates, so no
           # long CLI lists.
-          pyinstaller --clean --noconfirm --noupx pasada-backend.spec
+          pyinstaller --clean --noconfirm pasada-backend.spec
           # The WHOLE folder becomes a Tauri bundle resource
           # (tauri.conf.json -> bundle.resources -> "backend/") and
           # src-tauri/src/lib.rs launches backend/pasada-backend(.exe)

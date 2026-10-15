@@ -2,7 +2,7 @@
 name = "app"
 version = "0.82.1"
 description = "PASADA Municipal Franchise Registry System"
-authors = ["Ben James J. Duag (B&V Software Solutions,Inc.)"]
+authors = ["PASADA"]
 license = "MIT"
 repository = ""
 edition = "2021"

@@ -143,16 +143,16 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
     setUsersLoading(false);
   };
 
-  // The big actions are two-key: when another active Admin exists the click
-  // files a ticket and a DIFFERENT Admin approves. A one-admin office (the
-  // deployment reality) executes directly but must type a reason, which the
-  // backend demands and the audit log records as an override.
+  // The big actions follow the single-key rule (2026-10-14): the Admin
+  // executes directly and must type a written reason, which the backend
+  // demands and the audit log records. A Clerk still files a ticket for the
+  // Admin.
   const askOverrideReason = async (action: string): Promise<string | null> => {
     const typed = await confirmDialog({
       mode: "prompt",
-      title: "You are the only active Admin",
+      title: "Reason required",
       message: `This ${action} runs right away, and the reason is written into the audit log.`,
-      fieldNote: "Shown in Activity History as a single-admin override.",
+      fieldNote: "Shown in Activity History next to the change.",
       confirmLabel: "Continue",
     });
     if (typeof typed !== "string") return null;
@@ -162,21 +162,21 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
   const handleSetActive = async (target: ManagedUser) => {
     const nextActive = target.is_deactivated;
     const verb = nextActive ? "reactivate" : "deactivate";
-    const twoKey = users.filter((u) => u.role === "Admin" && !u.is_deactivated).length > 1;
+    const isClerk = (localStorage.getItem("pasada_role") || "") !== "Admin";
     if (!nextActive) {
       const ok = await confirmDialog({
         mode: "confirm",
         title: `Deactivate ${target.full_name}`,
-        message: twoKey
-          ? "The request goes to another Admin for approval. Records and history are kept."
+        message: isClerk
+          ? "The request goes to the Admin for approval. Records and history are kept."
           : "Records and history are kept; sign-in is refused until an Admin reactivates the account.",
         destructive: true,
-        confirmLabel: twoKey ? "File the request" : "Deactivate",
+        confirmLabel: isClerk ? "File the request" : "Deactivate",
       });
       if (!ok) return;
     }
     let overrideReason = "";
-    if (users.filter((u) => u.role === "Admin" && !u.is_deactivated).length <= 1) {
+    if (!isClerk) {
       const typed = await askOverrideReason(verb);
       if (typed === null) return;
       overrideReason = typed;
@@ -276,10 +276,11 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
               >
                 <option value="Clerk">Clerk</option>
                 <option value="Admin">Admin</option>
+                <option value="Viewer">Viewer (read-only)</option>
               </select>
             </label>
           </div>
-          <p className="text-[11px] text-muted-foreground font-medium">Username is built from the full name, same as self-registration.</p>
+          <p className="text-[11px] text-muted-foreground font-medium">Username is built from the full name, same as self-registration. Viewer accounts can look at records but cannot add, edit, or delete anything.</p>
           <Button
             type="submit"
             disabled={usersLoading}

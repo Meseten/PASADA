@@ -99,6 +99,10 @@ export default function TodaClient() {
   // enforces this with the same Admin-only rule, so hiding is courtesy, not
   // the security boundary.
   const isAdmin = typeof window !== "undefined" && (localStorage.getItem("pasada_role") || "") === "Admin"
+  // VIEWER ROLE: read-only accounts don't get edit/delete buttons here. Hiding
+  // is courtesy, not security — the API refuses every records write from a
+  // Viewer with 403, so a crafted request gains nothing.
+  const isViewer = typeof window !== "undefined" && (localStorage.getItem("pasada_role") || "") === "Viewer"
 
   const [members, setMembers] = useState<Member[]>([])
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
@@ -547,9 +551,9 @@ export default function TodaClient() {
 
     setIsRenaming(true);
     try {
-      // Two-key rule: with another active Admin the rename always lands as a
-      // ticket for a DIFFERENT Admin. In a one-admin office the backend asks
-      // for a written reason (400); we prompt once and retry with it.
+      // Single-key rule (2026-10-14): the Admin's rename runs directly, but
+      // the backend demands a written reason (400) first; we prompt once and
+      // retry with it. A Clerk still files an approval ticket.
       let res = await fetchWithAuth(`${API_URL}/api/routes/${safeRouteName}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -557,12 +561,12 @@ export default function TodaClient() {
       });
       if (res.status === 400) {
         const first = await res.json().catch(() => ({}));
-        if (typeof first.detail === "string" && first.detail.includes("only active Admin")) {
+        if (typeof first.detail === "string" && first.detail.includes("Type a short reason")) {
           const typed = await confirmDialog({
             mode: "prompt",
-            title: "You are the only active Admin",
+            title: "Reason required",
             message: "This rename runs right away, and the reason is written into the audit log.",
-            fieldNote: "Shown in Activity History as a single-admin override.",
+            fieldNote: "Shown in Activity History next to the rename.",
             confirmLabel: "Rename",
           });
           if (typeof typed !== "string" || !typed.trim()) {
@@ -583,7 +587,7 @@ export default function TodaClient() {
       if (res.ok) {
         const data = await res.json();
         if (data.status === "ticket_filed") {
-          // Two-key path: the rename is only a request; a different Admin decides.
+          // Clerk path: the rename is only a request; the Admin decides.
           showToast(data.message || "Rename request sent for approval.", "success");
           setIsRenameOpen(false);
           return;
@@ -1359,9 +1363,11 @@ export default function TodaClient() {
               <Printer className="mr-2 h-5 w-5" /> Batch Print
             </Button>
             
+            {!isViewer && (
             <Button onClick={handleOpenAdd} className="flex-1 w-full sm:w-auto shadow-md hover:shadow-lg transition-all duration-300 h-11 px-6 rounded-lg font-bold bg-blue-600 hover:bg-blue-700 text-white" data-tour="tour-add" data-tip="Registers a new operator on this line. Leave the name blank to keep the slot vacant. (Alt+N)">
               <PlusCircle className="mr-2 h-5 w-5" /> Add Operator
             </Button>
+            )}
           </div>
         </div>
       </div>
@@ -2126,12 +2132,15 @@ export default function TodaClient() {
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="View Certificate Preview" data-tip-align-right data-tip="Opens the MTOP certificate preview for this operator, where you can print or download it." onClick={() => handleOpenView(member)}>
                               <Eye className="h-3.5 w-3.5 text-slate-700 dark:text-slate-200" />
                             </Button>
+                            {!isViewer && (
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Edit Operator" data-tip-align-right data-tip="Edit or renew this record. Editing the SBN counts as a renewal and updates the dates." onClick={() => handleOpenEdit(member)}>
                               <Edit className="h-3.5 w-3.5" />
                             </Button>
+                            )}
                             <Button variant="outline" size="icon" className="h-8 w-8 bg-background/50 hover:bg-background hover:text-blue-600 transition-all hover:scale-105 border-border/60 shadow-sm" aria-label="Record History" data-tip-align-right data-tip="Every change ever recorded for this operator, with dates and who made them." onClick={() => handleOpenHistory(member)}>
                               <History className="h-3.5 w-3.5" />
                             </Button>
+                            {!isViewer && (
                             <Button 
                                  variant="outline" 
                                  size="icon" 
@@ -2141,6 +2150,7 @@ export default function TodaClient() {
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>

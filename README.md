@@ -2,8 +2,6 @@
 
 PASADA is a municipal tricycle franchise registry for Local Government Units (LGUs) in the Philippines. It is a centralized digital ledger for Motorized Tricycle Operator's Permits (MTOP): it tracks every franchise slot on every TODA line from initial application through renewal, flags non-renewal, generates certificates and summary documents, and keeps multiple office computers in sync without a server.
 
-PASADA is designed and engineered by Mr. Ben James Jocson Duag of B&V Software Solutions, Inc.
-
 ---
 
 ## Table of contents

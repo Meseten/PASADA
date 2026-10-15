@@ -212,7 +212,7 @@ def build():
         doc.add_paragraph()
     for _ in range(6):
         doc.add_paragraph()
-    para(doc, "BEN JAMES J. DUAG", size=16, bold=True, color=BLACK, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
+    para(doc, "LGU Office Edition", size=16, bold=True, color=BLACK, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
     para(doc, "2026 Edition", size=11, italic=True, color=BLACK, align=WD_ALIGN_PARAGRAPH.CENTER)
 
     # ================= ABOUT =================
@@ -265,8 +265,9 @@ def build():
         ("9", "The Two-Key Rule", "How approval tickets protect the registry"),
         ("10", "Connecting Computers (Sync)", "How office computers share one registry"),
         ("11", "If You Are the Admin", "What changes when you become admin, and what stays the same"),
-        ("12", "Troubleshooting", "14 common problems, each with exact fix steps"),
+        ("12", "Troubleshooting", "17 common problems, each with exact fix steps"),
         ("13", "Quick Reference Card", "One page to print and keep beside the computer"),
+        ("14", "Setting Up the Second Office Computer", "Install on PC 2, sign in as Viewer, connect, verify sync end to end"),
     ]
     data_table(doc,
         ["Chapter", "Title", "What it covers"],
@@ -331,23 +332,26 @@ def build():
         "The recovery door: if nobody can sign in to reach that panel, a clerk who set security questions earlier can answer them at Forgot Password?. While no admin exists anywhere, a correct set of answers also makes that account the admin, not just reset the password.",
     ])
     para(doc, "Every promotion is written to the Activity History, and both doors shut permanently once an admin is in place. They cannot be used to mint a second admin behind the real one's back.")
-    h2(doc, "The two roles: Clerk and Admin")
-    para(doc, "Every account is a Clerk or an Admin. The difference is a short, clear list of extra powers, explained fully in Chapter 8:")
+    h2(doc, "The three roles: Viewer, Clerk, and Admin")
+    para(doc, "Every account is a Viewer, a Clerk, or an Admin. The difference is a short, clear list of extra powers, explained fully in Chapter 8:")
     data_table(doc,
-        ["Work", "Clerk", "Admin"],
+        ["Work", "Viewer", "Clerk", "Admin"],
         [
-            ("Add, edit, renew, delete records", "Yes", "Yes"),
-            ("Search, print, export", "Yes", "Yes"),
-            ("Import Excel files", "Yes", "Yes"),
-            ("File a request to delete/rename a route", "Yes", "Ticket; another admin approves, or direct with a typed reason if alone"),
-            ("Restore deleted records", "File request", "Ticket; another admin approves, or direct with a typed reason if alone"),
-            ("Create accounts, reset passwords", "No", "Yes"),
-            ("Deactivate or reactivate an account", "No", "Ticket; another admin approves, or direct with a typed reason if alone"),
-            ("Upload document templates", "No", "Yes"),
-            ("Import or restore a database file", "No", "Yes"),
-            ("See system health and error notes", "No", "Yes"),
+            ("Add, edit, renew, delete records", "No", "Yes", "Yes"),
+            ("Search, print, view certificates", "Yes", "Yes", "Yes"),
+            ("Export Excel and PDF", "Yes", "Yes", "Yes"),
+            ("Import Excel files", "No", "Yes", "Yes"),
+            ("File a request to delete/rename a route", "No", "Yes", "Ticket; another admin approves, or direct with a typed reason if alone"),
+            ("Restore deleted records", "No", "File request", "Ticket; another admin approves, or direct with a typed reason if alone"),
+            ("Create accounts, reset passwords", "No", "No", "Yes"),
+            ("Deactivate or reactivate an account", "No", "No", "Ticket; another admin approves, or direct with a typed reason if alone"),
+            ("Upload document templates", "No", "No", "Yes"),
+            ("Import or restore a database file", "No", "No", "Yes"),
+            ("See system health and error notes", "No", "No", "Yes"),
         ],
         caption="What each role can do. The full list of admin tools is in Chapter 8.")
+    h2(doc, "The Viewer role: a second computer that only looks")
+    para(doc, "A Viewer account is made for the second office computer. It can open every page, search everything, read every record, and print — but the edit, delete, and import buttons are hidden, and the system itself refuses any change a Viewer tries to make. Give a Viewer account to a computer where people only need to look things up; give Clerk accounts where records are actually worked on. The admin creates the Viewer account the same way as any other, choosing Viewer as the role.")
 
     # ================= CH 3 =================
     h1(doc, "Chapter 3 — The Dashboard")
@@ -439,6 +443,8 @@ def build():
         "Type a name, an SBN, a plate number, or any word from an address.",
         "Results appear grouped by TODA line. Click a result to open the record with full actions.",
     ])
+    h2(doc, "The MTOP certificate preview while editing")
+    para(doc, "When you open a record from Search and click Edit, the edit form carries its own MTOP Certificate Preview button. Click it to see the exact certificate that will print, without closing the form or hunting for the eye icon on the row. Print or download it right from the preview. This is the same preview the record view shows — it just follows you into the edit form so you can double-check the certificate while you fix the details.")
     h2(doc, "Activity History")
     para(doc, "The Activity History page lists every change made in PASADA: log-ins, edits, renewals, deletions, restorations, exports, prints, account changes, ticket approvals. Each line shows when it happened, who did it, the action, the record it touched, and the details including old and new values.")
     figure(doc, "06_activity.png", "Activity History: the office's complete record of changes.")
@@ -462,12 +468,14 @@ def build():
     h2(doc, "Bringing records in from a file")
     steps(doc, [
         "Click Import Records in the sidebar.",
-        "Drop or choose the Excel or CSV file. A .db database backup is also accepted.",
+        "Drop or choose the Excel or CSV file. A .db database backup is also accepted, and so is the nightly backup ZIP (a .zip file with the .db inside — it imports by merging new records only).",
         "PASADA previews the file. Check that columns line up: name, SBN, route, dates.",
         "For spreadsheets, choose whether to skip existing records or overwrite them.",
+        "For a database file, choose Merge (adds records that are new) or Full Restore (replaces matching records; admins only).",
         "Click Import. A summary reports rows added, updated, or skipped, and any row-level errors.",
     ])
     figure(doc, "08_import.png", "Import Records: pick the file, check the preview, confirm.")
+    note_box(doc, "GOOD TO KNOW:", "The nightly backup ZIP works even when the old Franchise folder is long gone. If the office's spreadsheet files cannot be found, the ZIP from the backup drive is enough to bring every record over. Merge mode never overwrites: it only adds records the current registry does not have yet.")
     h2(doc, "Importing a database backup file")
     para(doc, "When the chosen file is a .db backup, PASADA offers two choices. Merge new records only adds records that do not exist yet and leaves everything else alone. Full Restore replaces the current records with the backup's contents. Full Restore is admin-only: a clerk who selects it will be refused at the moment of upload, and the request must go through the admin.")
     warn(doc, "Full Restore overwrites matching records with the backup's values. Download a fresh backup first (Settings > Full Database Backup) so today's state can always be recovered.")
@@ -742,6 +750,16 @@ def build():
         "Sign in again with the same password as before. Nothing was deleted.",
     ])
     para(doc, "A deactivated account keeps every record, certificate, and Activity History entry under its name. Deactivation spreads to every office computer automatically, so the account is blocked everywhere, not just on one machine.")
+    h2(doc, "16. My buttons for edit and delete are missing")
+    para(doc, "That is the Viewer role working correctly. A Viewer account can look at everything but change nothing — it is meant for a second computer where people only read records. If you need to make changes on that computer, ask the admin to give you a Clerk account instead, and sign in with it.")
+    h2(doc, "17. I need to import records but the Franchise folder is gone")
+    steps(doc, [
+        "Open Import Records in the sidebar.",
+        "Choose the nightly backup ZIP file (PASADA_Backup_YYYY-MM-DD.zip). PASADA finds the .db inside automatically.",
+        "Leave Merge selected and click Import. Every record the current registry is missing is added; nothing already there is touched.",
+        "Check the totals on the Dashboard against what the office expects, and against a print of the old Excel masterlist if there is one.",
+    ])
+    para(doc, "A plain .db file works the same way. Both are admin-only imports; a clerk attempting one sees an access message instead.")
     h2(doc, "Still stuck?")
     para(doc, "Collect four things before asking for help: what you clicked, what appeared on screen, the time it happened, and the newest lines from the Technical tab's Error notes. With those four, almost any PASADA problem can be found and fixed quickly.")
 
@@ -763,12 +781,76 @@ def build():
             ("New account / reset password", "Admin Console > Administrative (admin)"),
             ("Switch an account off or on", "Admin Console > Administrative: Deactivate / Reactivate"),
             ("Lock the screen", "Set a PIN in Settings; it locks when you leave"),
+            ("Import from backup", "Import Records; drop the nightly .zip or the .db"),
+            ("Preview a certificate while editing", "MTOP Certificate Preview button inside the edit form"),
             ("Backup everything", "Settings > Full Database Backup"),
             ("Check system health", "Admin Console > Technical"),
             ("Dark mode", "Sun/moon button, top of the sidebar"),
             ("Log out", "Log out button, bottom of the sidebar"),
         ],
         caption="The one-page cheat sheet.")
+
+    # ================= CH 14 =================
+    h1(doc, "Chapter 14 — Setting Up the Second Office Computer")
+    para(doc, "This chapter walks the whole path from an empty PC to a second office computer that shares the same records: install, sign in as a viewer, connect, and prove the two machines are talking. Follow it in order; each step assumes the ones before it.")
+
+    h2(doc, "Step 1: Install PASADA on PC 2")
+    steps(doc, [
+        "Download the newest installer from the PASADA release page. Use the ...-setup.exe file (or the .msi).",
+        "Copy it on a USB stick if PC 2 has no internet. The installer carries everything: the interface and the registry engine.",
+        "Run the installer and accept the default options. A PASADA shortcut appears on the desktop.",
+        "Open PASADA once, and let it sit on the log-in screen. Do not register a new account here.",
+    ])
+    warn(doc, "Never click Register Account on PC 2. Registration closes after the first account; the office's real accounts live on PC 1 and sync over. Registering on PC 2 would create a second, separate registry.")
+
+    h2(doc, "Step 2: Sign in as a Viewer")
+    para(doc, "On PC 1, the admin first creates the account PC 2 will use:")
+    steps(doc, [
+        "Admin, on PC 1: open the Admin Console > Administrative tab and create an account.",
+        "Choose the Viewer role. A Viewer can look at everything, search, and print — but cannot change records.",
+        "Give the new username and password to PC 2's user.",
+    ])
+    steps(doc, [
+        "On PC 2, type that username and password on the log-in screen and click Log In.",
+        "The dashboard opens. The sidebar shows your name with the role Viewer.",
+    ])
+    para(doc, "Why Viewer: the second computer is usually for looking things up at the front desk. With a Viewer account, nobody can edit records from PC 2 by accident — the edit and delete buttons are not even shown, and the system itself refuses any change.")
+    note_box(doc, "TIP:", "If PC 2's people really do need to enter records, give that computer a Clerk account instead. Everything in the rest of this chapter is identical.")
+
+    h2(doc, "Step 3: Connect the two computers")
+    steps(doc, [
+        "Make sure both computers are on the same office network — same Wi-Fi, or wired to the same switch/router.",
+        "Admin, on PC 1: open the Admin Console > Technical tab. Look at the connected computers list.",
+        "On PC 2, click the connection status at the bottom of the sidebar and connect to PC 1's name, or wait a few seconds for automatic discovery.",
+        "When the status under the sidebar says Online on BOTH computers, they are connected.",
+        "PC 2 then pulls the whole registry from PC 1 automatically the first time. Give it a moment on a large registry.",
+    ])
+    para(doc, "The connection is safe without you doing anything: computers recognize each other with a shared secret, and every transfer between them is signed. A computer that was off for days catches up automatically the next time both are on.")
+
+    h2(doc, "Step 4: Verify sync end to end")
+    para(doc, "Do this the first day, and any time something feels out of date later:")
+    steps(doc, [
+        "On PC 1, add a test record: open any TODA line, click Add Operator, fill the name and address, and save.",
+        "On PC 2, wait a few seconds, then open the same TODA line. The record is there.",
+        "On PC 2, search the test operator's name from the Search page. Found — the whole registry reached PC 2.",
+        "On PC 1, edit the record (change the address slightly) and save.",
+        "On PC 2, refresh or reopen the record. The new address shows.",
+        "On PC 1, delete the test record. PC 2 catches up and the record leaves the list there too.",
+        "Check the Activity History on either computer: the add, the edit, and the delete all appear with the names of who did them.",
+    ])
+    para(doc, "That full loop — add, edit, delete, all visible on both sides — is the proof the office now runs one registry across two computers. Delete nothing else; the test record you removed was the only one entered for this.")
+
+    h2(doc, "If something does not work")
+    data_table(doc,
+        ["Symptom", "What to do"],
+        [
+            ("PC 2 never shows Online", "Both computers must be on the same network. Check the network first, then restart PASADA on PC 2. See Troubleshooting problems 4 and 5."),
+            ("Records missing on PC 2", "Confirm PC 1 shows Online. PC 2 pulls from PC 1; if PC 1 is off, PC 2 counts on its last data or shows Offline Mode."),
+            ("Login fails on PC 2", "The account was created on PC 1 but the registry has not reached PC 2 yet. Wait for the first pull to finish, then try again."),
+            ("Edit buttons missing on PC 2", "That is the Viewer role. Ask the admin for a Clerk account if that computer needs to enter records."),
+            ("Numbers differ between PCs", "Short differences clear in seconds. If not, restart both and check the connected computers list; treat it as Troubleshooting problem 9."),
+        ],
+        caption="Second-computer setup problems.")
 
     # ================= GLOSSARY =================
     h1(doc, "Glossary")
@@ -792,11 +874,21 @@ def build():
             ("Soft delete", "A delete that keeps the record recoverable in the deleted list."),
             ("Deactivated account", "An account switched off by the admin. It cannot sign in anywhere, but its records and history are kept. Reactivating restores sign-in."),
             ("One-time admin setup", "The panel that makes the first admin when an office has none. It closes forever once an admin exists."),
+            ("Viewer account", "A read-only account. It can open, search, and print everything but cannot change records, meant for a second office computer that only looks things up."),
+            ("Nightly backup ZIP", "The automatic backup PASADA makes each night: a .zip file with the whole registry (.db) inside. It can be imported on another computer to rebuild the records."),
         ],
         caption="Terms used in this manual and in PASADA.")
 
     out_docx = os.path.join(HERE, "PASADA_Software_Manual_Guide.docx")
     doc.save(out_docx)
+    # Keep the tracked copy in manual_assets and the shipped copy at the repo
+    # root in sync; the root PDF is what office staff receive.
+    out_pdf = os.path.abspath(os.path.join(HERE, "..", "PASADA_Software_Manual_Guide.pdf"))
+    if os.path.exists(out_pdf):
+        try:
+            os.remove(out_pdf)
+        except OSError:
+            pass
     print(f"saved {out_docx} with {FIG['n']} figures, {TBL['n']} tables")
 
 
