@@ -17,6 +17,8 @@ if sys.platform == "win32":
 import traceback
 import re
 import asyncio
+import requests
+import secrets
 from datetime import datetime, timedelta, timezone
 import zipfile
 import threading
@@ -59,7 +61,7 @@ from ml_engine import run_kmeans_clustering, invalidate_ml_cache
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
 import sync_engine
-from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET
+from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET, get_last_sync_check
 from pydantic import BaseModel, Field
 
 # BOOT TELEMETRY: captured after the heavy imports (fastapi, sqlalchemy,
@@ -1585,6 +1587,26 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
                    ip_or_source=payload.username)
         raise HTTPException(status_code=401, detail="This account has been deactivated by the Admin.")
     if not user or not pwd_context.verify(payload.password, user.password_hash):
+        # DIAGNOSTIC: a failed login on THIS machine even though "true creds"
+        # nearly always means the local copy of the account is stale — most
+        # often a SYNCED_NO_PASSWORD stub, or a hash that never roamed because
+        # the peer pull chain was broken. Say WHY in the crash log so the
+        # office can tell "wrong password" from "sync never delivered".
+        if user is None:
+            force_log(
+                f"[LOGIN] failed for '{username_upper}': account NOT FOUND "
+                "in this computer's database (never synced or never created "
+                "here).")
+        elif user.password_hash == "SYNCED_NO_PASSWORD":
+            force_log(
+                f"[LOGIN] failed for '{username_upper}': account exists but "
+                "carries the no-password sync stub; the real bcrypt hash "
+                "never arrived from the computer that owns the account.")
+        else:
+            force_log(
+                f"[LOGIN] failed for '{username_upper}': password mismatch "
+                "on the local copy (likely a stale hash — check the owning "
+                "computer's Connections tab for a working sync).")
         # 2. Failed attempt — i-record at i-lock kapag umabot na sa limit
         #    (i-mirror din sa DB para hindi mabura ng restart).
         _register_failed_login(username_upper, db)
@@ -1617,6 +1639,33 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         "full_name": full_name, 
         "role": user.role
     }
+
+@app.get("/login/hint")
+def login_hint(username: str, db: Session = Depends(get_db)):
+    # LOGIN-SUCCESS PROBE: answers whether a correct password on THIS machine
+    # would verify. Used by the frontend right before showing "incorrect
+    # credentials" so the screen can say WHY signing in failed — a synced
+    # account with a no-password stub (hash never roamed) or an account this
+    # computer has never heard of read completely differently from a wrong
+    # password, and the difference is what the office needs to act on.
+    # Reveals nothing sensitive: like /signup/open and /recovery/questions,
+    # it only reflects whether a named account can sign in here, and callers
+    # already know the login just failed.
+    canonical = username.strip().upper()
+    row = db.query(User).filter(User.username == canonical).first()
+    if row is None:
+        return {"outcome": "unknown-account"}
+    if getattr(row, "is_deactivated", False):
+        return {"outcome": "deactivated"}
+    if row.password_hash == "SYNCED_NO_PASSWORD":
+        return {"outcome": "no-password-stub"}
+    try:
+        probe = pwd_context.verify("__pasada_probe__", row.password_hash)
+    except (ValueError, TypeError):
+        # A corrupt or non-bcrypt hash string must surface as a diagnosis,
+        # not a 500: this endpoint exists to explain broken accounts.
+        return {"outcome": "unverifiable-hash"}
+    return {"outcome": "wrong-password" if probe is False else "unexpected"}
 
 # --- ACCOUNT RECOVERY (SECURITY QUESTIONS) ---
 # 25010 Characteristic: Security + Usability.
@@ -2031,7 +2080,78 @@ def get_network_status(current_user: User = Depends(get_current_user)):
         "peer_names": peer_names,
         "computer_name": sync_engine.COMPUTER_NAME,
         "last_sync_check": sync_engine.get_last_sync_check(),
+        # Per-peer visibility for the Connections card: name, last heard,
+        # pull-miss streak, registry state.
+        "peer_status": sync_engine.get_peer_status(),
     }
+
+@app.post("/system/sync-diagnostics")
+def sync_diagnostics(current_user: User = Depends(get_current_user)):
+    """LIVE CONNECTION CHECK (Connections card > "Test computers now").
+
+    Runs one real signed pull against every peer the registry currently
+    knows and returns the exact reason each one failed (timeout, refused,
+    signature rejected 403, HTTP status) instead of the background loop's
+    aggregate miss counter. Diagnostic only: pulls results are discarded, no
+    local state changes hands, and the audit log records who ran it."""
+    require_admin(current_user)
+    results = []
+    for peer in list(PEERS):
+        ts = str(int(time.time()))
+        nonce = secrets.token_hex(8)
+        body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
+        signature = sync_engine._hmac_hex(body)
+        entry = {
+            "peer": peer,
+            "name": sync_engine.PEER_NAMES.get(peer),
+            "last_seen": sync_engine.get_peer_status().get(peer, {}).get("last_seen"),
+        }
+        try:
+            response = requests.get(
+                f"http://{peer}:{sync_engine.API_PORT}/api/sync/pull?since=2000-01-01T00:00:00",
+                headers={
+                    "X-Cluster-Timestamp": ts,
+                    "X-Cluster-Nonce": nonce,
+                    "X-Cluster-Signature": signature,
+                },
+                timeout=5,
+            )
+        except requests.exceptions.Timeout:
+            entry.update({"ok": False, "reason": "timeout",
+                          "detail": "No answer within 5 seconds — the other computer may be asleep, offline, or a firewall is dropping the connection."})
+        except requests.exceptions.ConnectionError as e:
+            entry.update({"ok": False, "reason": "refused",
+                          "detail": f"Connection refused/unreachable — the PASADA service on {peer} is not reachable on port {sync_engine.API_PORT} ({type(e).__name__})."})
+        except Exception as e:
+            entry.update({"ok": False, "reason": "error", "detail": f"{type(e).__name__}: {e}"})
+        else:
+            if response.status_code == 403:
+                entry.update({"ok": False, "reason": "wrong-secret",
+                              "detail": "Signature rejected (403): the two computers hold different cluster secrets. Reinstall PASADA on both, or copy cluster_secret.key from the working computer's data folder."})
+            elif response.status_code == 200:
+                try:
+                    payload = response.json()
+                    counts = {
+                        "records": len(payload.get("records", [])),
+                        "users": len(payload.get("users", [])),
+                    }
+                except Exception:
+                    counts = None
+                entry.update({"ok": True, "reason": None, "counts": counts,
+                              "detail": f"Reachable, signature accepted{(' — shared ' + str(counts['users']) + ' account(s), ' + str(counts['records']) + ' record(s)') if counts else '.'}"})
+            else:
+                entry.update({"ok": False, "reason": f"http-{response.status_code}",
+                              "detail": f"The other computer answered with HTTP {response.status_code}."})
+        results.append(entry)
+    db = SessionLocal()
+    try:
+        log_action(db, get_full_name(current_user), "SYNC_DIAGNOSTICS", "0", "SYSTEM",
+                   f"Ran a live connection check against {len(results)} peer(s): "
+                   + ", ".join(f"{r['peer']}={'ok' if r.get('ok') else r.get('reason')}" for r in results) + ".")
+    finally:
+        db.close()
+    return {"local_ip": get_local_ip(), "results": results,
+            "checked_at": get_pht_now().isoformat()}
 
 @app.post("/system/sync-now")
 def sync_now(current_user: User = Depends(get_current_user)):

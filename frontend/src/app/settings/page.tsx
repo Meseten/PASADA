@@ -89,7 +89,33 @@ export default function Settings() {
   // the suggestion list also show as custom on load.
   const [customSlots, setCustomSlots] = useState({ 1: false, 2: false, 3: false });
   const [recoveryLoading, setRecoveryLoading] = useState(false);
-  const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[]; peer_names?: Record<string, string>; computer_name?: string; last_sync_check?: string | null } | null>(null);
+  const [networkInfo, setNetworkInfo] = useState<{ local_ip: string; connected_peers: string[]; peer_names?: Record<string, string>; computer_name?: string; last_sync_check?: string | null; peer_status?: Record<string, { name?: string; last_seen?: string | null; misses?: number; registered?: boolean }> } | null>(null);
+  // LIVE CONNECTION CHECK (Connections card): one real pull per visible peer,
+  // with the exact failure reason per machine — timeout, refused, wrong
+  // cluster secret — so the office diagnoses a stuck laptop in one click.
+  type DiagPeerResult = { peer: string; name?: string | null; last_seen?: string | null; ok: boolean; reason?: string | null; detail?: string; counts?: { records: number; users: number } | null };
+  const [diagResults, setDiagResults] = useState<DiagPeerResult[] | null>(null);
+  const [diagCheckedAt, setDiagCheckedAt] = useState<string | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
+
+  const runSyncDiagnostics = async () => {
+    setDiagRunning(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/system/sync-diagnostics`, { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data) {
+        setDiagResults(data.results || []);
+        setDiagCheckedAt(data.checked_at || new Date().toISOString());
+        showToast(data.results?.length ? "Connection check finished." : "No other computers are visible to check.", data.results?.length ? "success" : "error");
+      } else {
+        showToast(data?.detail || "Connection check failed to run.", "error");
+      }
+    } catch (e: any) {
+      showToast("Connection check failed to run.", "error");
+    } finally {
+      setDiagRunning(false);
+    }
+  };
   // FRIENDLY COMPUTER NAME: what this machine broadcasts on the network so
   // other computers can show a real label next to its IP.
   const [computerName, setComputerName] = useState("");
@@ -1038,13 +1064,53 @@ export default function Settings() {
                       <p className="text-xs font-bold text-muted-foreground">No other computers connected.</p>
                     ) : (
                       (networkInfo?.connected_peers ?? []).map(peer => (
-                        <div key={peer} className="text-xs font-bold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 border border-border px-3 py-2 rounded-md font-mono shadow-sm flex items-center justify-between gap-2">
-                          <span>{peer}</span>
-                          {networkInfo?.peer_names?.[peer] && (
-                            <span className="text-[11px] font-black text-blue-600 dark:text-blue-400 text-right" title={`Announced by ${peer}`}>{networkInfo.peer_names[peer]}</span>
-                          )}
+                        <div key={peer} className="text-xs font-bold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 border border-border px-3 py-2 rounded-md font-mono shadow-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{peer}</span>
+                            {networkInfo?.peer_names?.[peer] && (
+                              <span className="text-[11px] font-black text-blue-600 dark:text-blue-400 text-right" title={`Announced by ${peer}`}>{networkInfo.peer_names[peer]}</span>
+                            )}
+                          </div>
+                          {(() => {
+                            const st = networkInfo?.peer_status?.[peer];
+                            if (!st) return null;
+                            return (
+                              <div className="mt-1 space-y-0.5 text-[10px] font-medium text-muted-foreground font-sans">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`w-1.5 h-1.5 rounded-full ${st.registered ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                                  <span>
+                                    {st.registered
+                                      ? (st.misses ?? 0) > 0
+                                        ? `active, ${st.misses} missed pull(s) since last success`
+                                        : "active, pulling normally"
+                                      : "dropped from the registry until it broadcasts again"}
+                                  </span>
+                                </div>
+                                <div>Last heard: {st.last_seen ? new Date(st.last_seen).toLocaleString() : "never"}</div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       ))
+                    )}
+                  </div>
+                  {/* LIVE CONNECTION CHECK: one real signed pull per visible peer. */}
+                  <div className="mt-4 border-t border-border pt-3 space-y-2">
+                    <Button onClick={runSyncDiagnostics} disabled={diagRunning} size="sm" className="w-full h-8 font-bold text-xs" variant="outline">
+                      {diagRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Test computers now"}
+                    </Button>
+                    {diagResults !== null && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+                          Last check: {diagCheckedAt ? new Date(diagCheckedAt).toLocaleTimeString() : "—"}
+                        </p>
+                        {diagResults.map(r => (
+                          <div key={r.peer} className={`text-[11px] px-2.5 py-1.5 rounded-md border font-medium ${r.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-400"}`}>
+                            <p className="font-bold">{r.name || r.peer}: {r.ok ? "reachable, signature OK" : `FAILED — ${r.reason}`}</p>
+                            {r.detail && <p className="opacity-80 mt-0.5 normal-case">{r.detail}</p>}
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>

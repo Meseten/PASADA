@@ -161,21 +161,54 @@ export default function Login() {
             password: password  
         }),  
         cache: "no-store"  
-      });  
-  
-      if (res.ok) {  
-        const data = await res.json();  
+      });      if (res.ok) { 
+        const data = await res.json(); 
         localStorage.setItem("pasada_token", data.access_token);  
         localStorage.setItem("pasada_full_name", data.full_name);  
         localStorage.setItem("pasada_role", data.role || "Clerk");  
-  
+ 
         localStorage.setItem("token", data.access_token);  
         localStorage.setItem("full_name", data.full_name);  
-  
+ 
         router.replace("/dashboard");  
-      } else {  
+      } else { 
         const errData = await res.json().catch(() => ({}));
-        setError(errData.detail || "Invalid login credentials."); 
+        const detail = errData.detail || "Invalid login credentials.";
+        // The 400 "Incorrect credentials" line only says THAT it failed. When
+        // the office is sure the creds are right (they work on another
+        // computer), the /login/hint probe names WHY this machine refuses:
+        // unknown account, or a synced no-password stub whose hash never
+        // arrived. Lockout/deactivation messages already say so — leave them.
+        if (res.status === 400 && detail.startsWith("Incorrect credentials")) {
+          try {
+            const hint = await fetch(
+              `${API_URL}/login/hint?username=${encodeURIComponent(username.trim().toUpperCase())}`,
+              { cache: "no-store" }
+            ).then((r) => (r.ok ? r.json() : null));
+            if (hint?.outcome === "unknown-account") {
+              setError(
+                "Incorrect credentials — and this computer has never received that account. " +
+                "Open PASADA on the computer where the account was created, let it connect " +
+                "(Settings → Connections), then try here again."
+              );
+            } else if (hint?.outcome === "no-password-stub") {
+              setError(
+                "Incorrect credentials — this computer's copy of that account has no password on file. " +
+                "The password change never arrived through LAN sync. On the owning computer, " +
+                "check Settings → Connections is syncing, then have the Admin reset the password " +
+                "from Settings → Accounts."
+              );
+            } else if (hint?.outcome === "deactivated") {
+              setError("This account has been deactivated by the Admin.");
+            } else {
+              setError(detail);
+            }
+          } catch {
+            setError(detail);
+          }
+        } else {
+          setError(detail);
+        }
       }  
     } catch (err) {  
       setError(describeAuthError(err, "Cannot connect to PASADA. Open the PASADA program on this computer first, then try again."));

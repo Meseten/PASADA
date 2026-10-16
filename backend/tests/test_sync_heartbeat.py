@@ -430,3 +430,71 @@ def test_last_sync_check_thread_safe_marks(monkeypatch):
     assert not errors
     parsed = datetime.fromisoformat(sync_engine.get_last_sync_check())
     assert parsed.utcoffset() is not None
+
+
+# --- PEER VISIBILITY + LIVE DIAGNOSTICS (Connections card) ---
+def test_get_peer_status_reflects_seen_and_misses():
+    """The Connections card must be able to tell 'the laptop went silent'
+    from 'the laptop answers but pulls keep failing' — per-peer last_seen
+    and miss streak, not just the miss count."""
+    import time as t
+    sync_engine._peer_seen.clear()
+    sync_engine._peer_failures.clear()
+    sync_engine.PEERS.discard("203.0.113.77")
+    try:
+        sync_engine._mark_peer_seen("203.0.113.77")
+        sync_engine.PEERS.add("203.0.113.77")
+        with sync_engine._peer_failures_lock:
+            sync_engine._peer_failures["203.0.113.77"] = 3
+        rows = sync_engine.get_peer_status()
+        row = rows["203.0.113.77"]
+        assert row["registered"] is True
+        assert row["misses"] == 3
+        assert row["last_seen"], "a heard peer must have a last_seen stamp"
+        before = row["last_seen"]
+        t.sleep(0.01)
+        sync_engine._mark_peer_seen("203.0.113.77")
+        assert sync_engine.get_peer_status()["203.0.113.77"]["last_seen"] >= before
+    finally:
+        sync_engine.PEERS.discard("203.0.113.77")
+        sync_engine._peer_seen.pop("203.0.113.77", None)
+        with sync_engine._peer_failures_lock:
+            sync_engine._peer_failures.pop("203.0.113.77", None)
+
+
+def test_sync_diagnostics_reports_exact_failure(client):
+    """The live check must name the failure per peer (timeout/refused/
+    wrong-secret) instead of the background loop's opaque miss counter. With
+    a peer that is up but signature-rejected, the reason is wrong-secret."""
+    from unittest.mock import patch, MagicMock
+    headers = _token(client)
+    sync_engine.PEERS.add("203.0.113.99")
+    try:
+        fake = MagicMock()
+        fake.exceptions = __import__("requests").exceptions
+        fake.get = MagicMock(
+            side_effect=__import__("requests").exceptions.ConnectionError("boom"))
+        with patch("main.requests", fake):
+            res = client.post("/system/sync-diagnostics", headers=headers)
+        assert res.status_code == 200, res.text
+        results = res.json()["results"]
+        match = [r for r in results if r["peer"] == "203.0.113.99"]
+        assert match, "the live check must report the visible peer"
+        assert match[0]["ok"] is False
+        assert match[0]["reason"] in ("refused", "timeout", "error")
+
+        # Wrong cluster secret on the other side answers 403; the check must
+        # call it out by name instead of just "failed".
+        rejected = MagicMock(status_code=403)
+        fake.get = MagicMock(return_value=rejected)
+        with patch("main.requests", fake):
+            res = client.post("/system/sync-diagnostics", headers=headers)
+        match = [r for r in res.json()["results"] if r["peer"] == "203.0.113.99"]
+        assert match[0]["reason"] == "wrong-secret"
+    finally:
+        sync_engine.PEERS.discard("203.0.113.99")
+
+
+def test_sync_diagnostics_requires_admin(client):
+    res = client.post("/system/sync-diagnostics")
+    assert res.status_code in (401, 403)

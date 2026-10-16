@@ -700,3 +700,45 @@ def test_refresh_db_healing():
     response = client.post("/admin/refresh-db", headers=headers)
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+
+# --- LOGIN HINT: WHY a correct-looking password fails on this machine ---
+def test_login_hint_outcomes():
+    """The hint endpoint tells the login screen WHY sign-in failed so the
+    message can point at sync instead of blaming the password. Outcomes are
+    exactly the four states a stuck office can be in."""
+    # Unknown account: never created or never synced onto this computer.
+    r = client.get("/login/hint", params={"username": "GHOST CLERK"})
+    assert r.status_code == 200 and r.json()["outcome"] == "unknown-account"
+
+    # No-password stub: the account roamed without a hash (legacy sync), so
+    # NO password would ever verify here.
+    db = TestingSessionLocal()
+    db.add(User(first_name="STUB", last_name="CLERK", username="STUB CLERK",
+                password_hash="SYNCED_NO_PASSWORD", role="Clerk"))
+    db.commit()
+    db.close()
+    r = client.get("/login/hint", params={"username": "STUB CLERK"})
+    assert r.status_code == 200 and r.json()["outcome"] == "no-password-stub"
+
+    # Real hash + wrong probe password: wrong-password on the LOCAL copy.
+    r = client.get("/login/hint", params={"username": "TEST ADMIN"})
+    assert r.status_code == 200 and r.json()["outcome"] == "wrong-password"
+
+
+def test_login_hint_username_case_insensitive():
+    """Login uppercases on submit; the hint must match that behavior."""
+    r = client.get("/login/hint", params={"username": "test admin"})
+    assert r.status_code == 200 and r.json()["outcome"] == "wrong-password"
+
+
+def test_login_hint_survives_corrupt_hash():
+    """A garbage password_hash in the DB must be a diagnosable outcome, not
+    a 500 — this endpoint exists to explain broken accounts."""
+    db = TestingSessionLocal()
+    db.add(User(first_name="CORRUPT", last_name="CLERK", username="CORRUPT CLERK",
+                password_hash="not-a-bcrypt-hash", role="Clerk"))
+    db.commit()
+    db.close()
+    r = client.get("/login/hint", params={"username": "CORRUPT CLERK"})
+    assert r.status_code == 200
+    assert r.json()["outcome"] == "unverifiable-hash"

@@ -169,6 +169,36 @@ PEER_MAX_CONSECUTIVE_FAILURES = 20
 _peer_failures = {}
 _peer_failures_lock = threading.Lock()
 
+# PEER VISIBILITY: when each peer was last actually HEARD (discovery, nudge,
+# or a successful pull). The office uses this to tell "the laptop is off or
+# unplugged" from "the laptop answers but a pull keeps failing" — and to see
+# a machine TS dropped (missed pulls) that later came back. Wall-clock ISO.
+_peer_seen = {}
+_peer_seen_lock = threading.Lock()
+
+def _mark_peer_seen(peer_ip: str):
+    with _peer_seen_lock:
+        _peer_seen[peer_ip] = get_pht_now().replace(tzinfo=None).isoformat()
+
+def get_peer_status():
+    """One row per peer the sync engine knows about for the Connections UI:
+    friendly name, when it was last heard, current pull-miss streak (0 after
+    any success), and whether the registry currently lists it."""
+    with _peer_seen_lock:
+        seen = dict(_peer_seen)
+    with _peer_failures_lock:
+        misses = dict(_peer_failures)
+    rows = {}
+    ips = set(PEERS) | set(seen)
+    for ip in ips:
+        rows[ip] = {
+            "name": PEER_NAMES.get(ip),
+            "last_seen": seen.get(ip),
+            "misses": int(misses.get(ip, 0)),
+            "registered": ip in PEERS,
+        }
+    return rows
+
 # LAST SYNC CHECK: the office should be able to SEE that sharing is alive,
 # not just trust a green light. Every finished pull cycle (nudge woken or
 # the periodic 10-second tick) stamps this moment; Settings > Connections
@@ -282,6 +312,7 @@ def listen_for_peers():
             if nudge_ip is not None:
                 if nudge_ip not in PEERS:
                     PEERS.add(nudge_ip)
+                _mark_peer_seen(nudge_ip)
                 request_sync_cycle()
                 continue
             result = parse_discovery_payload(data, local_ip)
@@ -291,6 +322,7 @@ def listen_for_peers():
                     PEERS.add(peer_ip)
                 # Always refresh the name: the office may rename a machine.
                 PEER_NAMES[peer_ip] = name
+                _mark_peer_seen(peer_ip)
         except Exception:
             pass
 
@@ -390,6 +422,7 @@ def sync_with_peers():
                         # against it forever.
                         with _peer_failures_lock:
                             _peer_failures.pop(peer, None)
+                        _mark_peer_seen(peer)
                         
                         # SYNC ACCOUNTS: the bcrypt password hash now ROAMS with
                         # the account, so a login created on one office computer
