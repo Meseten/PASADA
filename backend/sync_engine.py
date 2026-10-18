@@ -8,6 +8,7 @@ import base64
 import requests
 import os
 import uuid
+import ipaddress
 from database import SessionLocal, FranchiseRecord, get_pht_now, BASE_DIR
 from datetime import datetime, timedelta
 
@@ -21,7 +22,7 @@ def force_log(msg):
         pass
 
 BROADCAST_PORT = 54321
-API_PORT = 43888
+API_PORT = int(os.environ.get("PASADA_API_PORT", "43888"))
 
 # TEST/LAB OVERRIDES: two PASADA instances can run side by side on ONE PC
 # (Linux loopback aliases like 127.0.0.2/127.0.0.3 are separate NICs). The
@@ -39,9 +40,33 @@ SYNC_PORT = int(os.environ.get("PASADA_SYNC_PORT", str(BROADCAST_PORT)))
 _SYNC_LOCAL_IP_ENV = os.environ.get("PASADA_SYNC_LOCAL_IP", "")
 
 
+def _local_ipv4_addresses():
+    """Every IPv4 address this machine holds, loopback excluded. A PC can sit
+    on the office LAN on MORE THAN ONE interface (Ethernet + Wi-Fi on the
+    same network is common in small offices); announcements used to go out
+    the one default route only, so peers reached via the other NIC missed
+    every announcement and never learned this machine existed."""
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    found, seen = [], set()
+    for info in infos:
+        ip = info[4][0]
+        if ip.startswith("127.") or ip in seen:
+            continue
+        seen.add(ip)
+        found.append(ip)
+    return found
+
+
 def _sync_destinations():
-    """WHERE broadcasts go: the LAN broadcast address by default, or every
-    pinned target from PASADA_SYNC_TARGETS when the lab override is set."""
+    """WHERE broadcasts go. With the lab override, unicast to every pinned
+    PASADA_SYNC_TARGETS address. In production: the LAN <broadcast> address
+    PLUS each NIC's own subnet broadcast — the OS routes <broadcast> through
+    one default interface only, so the per-NIC copies are what make the
+    announcement reach machines wired to the other NIC. Duplicate copies of
+    the same signed datagram are harmless; peers dedupe via the nonce cache."""
     targets = []
     for item in os.environ.get("PASADA_SYNC_TARGETS", "").split(","):
         item = item.strip()
@@ -49,7 +74,19 @@ def _sync_destinations():
             continue
         ip, _, port = item.partition(":")
         targets.append((ip, int(port) if port else SYNC_PORT))
-    return targets or [("<broadcast>", SYNC_PORT)]
+    if targets:
+        return targets
+    targets = [("<broadcast>", SYNC_PORT)]
+    seen = set()
+    for ip in _local_ipv4_addresses():
+        try:
+            broadcast = str(ipaddress.ip_network(f"{ip}/24", strict=False).broadcast_address)
+        except ValueError:
+            continue
+        if broadcast not in seen:
+            seen.add(broadcast)
+            targets.append((broadcast, SYNC_PORT))
+    return targets
 
 
 def _send_announcement(payload: bytes, udp_socket=None):

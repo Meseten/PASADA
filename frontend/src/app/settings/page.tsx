@@ -109,12 +109,27 @@ export default function Settings() {
   const [keyBusy, setKeyBusy] = useState<"rotate" | "import" | null>(null);
 
   // The Manual key recovery dialog still lives here (its network state is
-  // wired into this page), but the only trigger is in the ADMIN CONSOLE —
-  // dispatched over a window event so no key tools sit in Settings.
+  // wired into this page); the trigger button is in the ADMIN CONSOLE and
+  // navigates here with ?tab=network&keyrecovery=1, which opens the dialog.
+  // (An earlier design fired a window event instead — but no listener is
+  // mounted while the Admin page is open, so the click did nothing.)
   useEffect(() => {
     const open = () => { setRotatedKey(null); setKeyDialogOpen(true); };
     window.addEventListener("pasada:open-key-recovery", open);
     return () => window.removeEventListener("pasada:open-key-recovery", open);
+  }, []);
+
+  // ?tab=network&keyrecovery=1: the Admin Console's Manual key recovery
+  // button lands here. Non-admins must not open it (the endpoints are
+  // admin-only anyway; the flag is cleaned from the URL right after).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get("keyrecovery")) return;
+    try { history.replaceState(null, "", window.location.pathname); } catch { /* private mode */ }
+    if ((localStorage.getItem("pasada_role") || "Clerk") !== "Admin") return;
+    if (params.get("tab")) setActiveTab(params.get("tab") as string);
+    setRotatedKey(null);
+    setKeyDialogOpen(true);
   }, []);
 
   useEffect(() => {

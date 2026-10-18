@@ -28,7 +28,12 @@ PY = os.path.join(BACKEND, "venv", "bin", "python")
 
 IP_A, IP_B = "127.0.0.2", "127.0.0.3"
 SYNC_PORT = 54321
-API_PORT = 43888
+# LAB PORT: PASADA opens its real API on 0.0.0.0:43888 whenever the desktop
+# app is running, and a plain loopback instance CANNOT bind over it — the
+# lab's /health then silently gets answered by the REAL app (with its real
+# accounts), making every later step fail in confusing ways. Default the lab
+# to its own port; PASADA_API_PORT can still pin it explicitly.
+API_PORT = int(os.environ.get("PASADA_API_PORT", "54888"))
 ADMIN_USER = "ADMINLIVE"
 ADMIN_PASS = "LivePair!2026x"
 CLERK_USER = "CLERK_LIVE"
@@ -100,6 +105,7 @@ def start_instance(name, ip):
     env.update({
         "PASADA_DATA_DIR": datadir,
         "PASADA_API_HOST": ip,
+        "PASADA_API_PORT": str(API_PORT),
         "PASADA_SYNC_BIND": f"{ip}:{SYNC_PORT}",
         "PASADA_SYNC_LOCAL_IP": ip,
         "PASADA_SYNC_TARGETS": (f"{IP_B}:{SYNC_PORT}" if name == "A" else f"{IP_A}:{SYNC_PORT}"),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Database, FileUp, History,
   KeyRound, Loader2, MonitorCog, RefreshCw, Server, ShieldCheck, Users, X, XCircle,
@@ -51,6 +52,7 @@ const TICKET_LABELS: Record<string, string> = {
 };
 
 export default function AdminConsole() {
+  const router = useRouter();
   const [role, setRole] = useState<string | null>(null);
   const [adminNeeded, setAdminNeeded] = useState(false);
   const [roleLoaded, setRoleLoaded] = useState(false);
@@ -522,7 +524,11 @@ export default function AdminConsole() {
                     </Button>
                     <p className="text-xs text-muted-foreground font-medium mt-2">Pulls new records from the other computers right away. New and changed accounts already arrive on their own within seconds.</p>
                     <p className="text-xs text-muted-foreground font-medium mt-1">Computers join the sharing group automatically when PASADA is opened on them. Manual key recovery below is only for the rare case the connection check reports a key problem.</p>
-                    <Button variant="outline" size="sm" className="mt-2 font-bold shadow-sm border-border/60" onClick={() => window.dispatchEvent(new Event("pasada:open-key-recovery"))}>
+                    {/* The dialog itself lives on Settings (its network state is
+                        wired into that page), so this button NAVIGATES there and the
+                        ?keyrecovery=1 flag opens the dialog. Dispatching a window
+                        event used to do nothing: no listener is mounted on this page. */}
+                    <Button variant="outline" size="sm" className="mt-2 font-bold shadow-sm border-border/60" onClick={() => router.push("/settings?tab=network&keyrecovery=1")}>
                       <KeyRound size={14} className="mr-1.5" /> Manual key recovery
                     </Button>
                   </div>

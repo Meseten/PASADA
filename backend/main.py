@@ -4196,18 +4196,24 @@ if __name__ == "__main__":
         # zombie scan would kill the first instance listening on 43888 under
         # a different loopback IP. Skip it on purpose when PASADA_SKIP_ZOMBIE_KILL=1.
         if os.environ.get("PASADA_SKIP_ZOMBIE_KILL", "") != "1":
-            force_log("Scanning for zombie processes on Port 43888...")
-            kill_zombie_port(43888)
+            force_log(f"Scanning for zombie processes on Port {sync_engine.API_PORT}...")
+            kill_zombie_port(sync_engine.API_PORT)
         else:
-            force_log("PASADA_SKIP_ZOMBIE_KILL=1: skipping zombie scan on Port 43888.")
-        force_log("Port 43888 is clear. Starting Uvicorn server...")
+            force_log(f"PASADA_SKIP_ZOMBIE_KILL=1: skipping zombie scan on Port {sync_engine.API_PORT}.")
+        force_log(f"Port {sync_engine.API_PORT} is clear. Starting Uvicorn server...")
         # DEPLOYMENT: the API listens on the LAN so the sync engine on other
         # office computers can pull records from this machine. Every pull
         # requires a valid HMAC signature from the cluster secret, so the LAN
         # exposure is authenticated; the app window itself keeps talking to
         # 127.0.0.1. Set PASADA_API_HOST to pin a specific interface.
         api_host = os.environ.get("PASADA_API_HOST", "0.0.0.0")
-        print(f"[Backend] Starting Uvicorn server on http://{api_host}:43888 ...")
+        # LAB OVERRIDE: PASADA_API_PORT moves the whole HTTP API (sync pulls
+        # included — sync_engine.API_PORT reads the same var) so two instances
+        # can run while a REAL copy of PASADA answers on 0.0.0.0:43888; without
+        # it the lab's /health silently hits the real app instead and fails in
+        # confusing ways.
+        api_port = sync_engine.API_PORT
+        print(f"[Backend] Starting Uvicorn server on http://{api_host}:{api_port} ...")
         sys.stdout.flush()
         # log_level="warning" quiets the per-request access-log lines. The
         # login/signup screens poll /health every 1s and the dashboard every
@@ -4217,8 +4223,8 @@ if __name__ == "__main__":
         # to bring the access log back when debugging the wire.
         http_access_log = os.environ.get("PASADA_HTTP_ACCESS_LOG", "") == "1"
         # TELEMETRY: one background watcher thread, fires once on bind.
-        threading.Thread(target=_log_bind_time, args=(api_host, 43888), daemon=True).start()
-        uvicorn.run(app, host=api_host, port=43888, log_level="warning", access_log=http_access_log)
+        threading.Thread(target=_log_bind_time, args=(api_host, api_port), daemon=True).start()
+        uvicorn.run(app, host=api_host, port=api_port, log_level="warning", access_log=http_access_log)
     except Exception as e:
         err_str = traceback.format_exc()
         force_log(f"\n[{datetime.now()}] !!! SERVER EXECUTION FATAL ERROR !!!\n{err_str}")
