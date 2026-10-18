@@ -25,12 +25,14 @@ import {
   Trash2,
   ArrowUpCircle
 } from "lucide-react";
-import OfficeAccounts from "@/components/office-accounts";
+// OfficeAccounts lives in the Admin Console now — having it in Settings too
+// was a duplicate surface for the same data.
 import { API_URL, fetchWithAuth, resolveAutoChangeMotorDate } from "@/lib/api";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import UpdateCard from "./UpdateCard";
 
 // Office-friendly security questions offered as suggestions. Each one stays
@@ -56,7 +58,7 @@ interface RecoveryConfig {
 
 // Must match the version in src-tauri/tauri.conf.json; the updater compares
 // against it to decide whether a new release exists.
-const APP_VERSION = "0.82.1";
+const APP_VERSION = "0.82.7";  // stamped by .github/workflows/release.yml on every push
 
 interface Toast {
   id: number;
@@ -97,6 +99,82 @@ export default function Settings() {
   const [diagResults, setDiagResults] = useState<DiagPeerResult[] | null>(null);
   const [diagCheckedAt, setDiagCheckedAt] = useState<string | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
+  // CLUSTER KEY TOOLS: fingerprint of the key this computer holds, plus the
+  // rotate/import flow (rotate shows the key text ONCE for hand-delivery;
+  // import adopts the exact text delivered from the owning computer).
+  const [clusterFingerprint, setClusterFingerprint] = useState<string | null>(null);
+  const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+  const [keyDialogOpen, setKeyDialogOpen] = useState(false);
+  const [keyImportDraft, setKeyImportDraft] = useState("");
+  const [keyBusy, setKeyBusy] = useState<"rotate" | "import" | null>(null);
+
+  // The Manual key recovery dialog still lives here (its network state is
+  // wired into this page), but the only trigger is in the ADMIN CONSOLE —
+  // dispatched over a window event so no key tools sit in Settings.
+  useEffect(() => {
+    const open = () => { setRotatedKey(null); setKeyDialogOpen(true); };
+    window.addEventListener("pasada:open-key-recovery", open);
+    return () => window.removeEventListener("pasada:open-key-recovery", open);
+  }, []);
+
+  useEffect(() => {
+    // role/isAdmin are declared further down; read the same source directly
+    // to keep this effect above their declaration line.
+    if (activeTab !== "network") return;
+    if ((localStorage.getItem("pasada_role") || "Clerk") !== "Admin") return;
+    fetchWithAuth(`${API_URL}/system/cluster-key`)
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data?.fingerprint) setClusterFingerprint(data.fingerprint); })
+      .catch(() => {});
+  }, [activeTab]);
+
+  const handleRotateKey = async () => {
+    setKeyBusy("rotate");
+    try {
+      const res = await fetchWithAuth(`${API_URL}/system/cluster-key/rotate`, { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.key) {
+        setRotatedKey(data.key);
+        setClusterFingerprint(data.fingerprint);
+        setKeyImportDraft("");
+        showToast("New key minted. Copy it to every other computer now.");
+      } else {
+        showToast(data?.detail || "Key rotation failed.", "error");
+      }
+    } catch {
+      showToast("Key rotation failed.", "error");
+    } finally {
+      setKeyBusy(null);
+    }
+  };
+
+  const handleImportKey = async () => {
+    if (!keyImportDraft.trim()) {
+      showToast("Paste the new key text first.", "error");
+      return;
+    }
+    setKeyBusy("import");
+    try {
+      const res = await fetchWithAuth(`${API_URL}/system/cluster-key/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: keyImportDraft }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        setClusterFingerprint(data.fingerprint ?? null);
+        setKeyImportDraft("");
+        setKeyDialogOpen(false);
+        showToast("Key adopted. Broadcasting with the new key now.");
+      } else {
+        showToast(data?.detail || "Key import failed.", "error");
+      }
+    } catch {
+      showToast("Key import failed.", "error");
+    } finally {
+      setKeyBusy(null);
+    }
+  };
 
   const runSyncDiagnostics = async () => {
     setDiagRunning(true);
@@ -806,13 +884,8 @@ export default function Settings() {
                 </div>
               </div>
 
-              {/* ADMIN ONLY: manage every office account. Registration closes
-                  after the first account exists, and synced accounts can now
-                  be given a password from any computer in the cluster:
-                  this panel is the fix for both. */}
-              {isAdmin && (
-                <OfficeAccounts notify={showToast} title="Manage Office Accounts" blurb="Create accounts for new clerks, reset forgotten passwords, and deactivate accounts of people who left. Deactivated accounts keep their records and history." />
-              )}
+              {/* Account management lives only in the Admin Console now —
+                  having it here too was a duplicate surface for the same data. */}
 
               {/* Bottom: Dedicated Quick PIN Panel */}
               <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">
@@ -1081,9 +1154,9 @@ export default function Settings() {
                                   <span>
                                     {st.registered
                                       ? (st.misses ?? 0) > 0
-                                        ? `active, ${st.misses} missed pull(s) since last success`
-                                        : "active, pulling normally"
-                                      : "dropped from the registry until it broadcasts again"}
+                                      ? `working, but ${st.misses} recent pull(s) failed`
+                                        : "working normally"
+                                      : "not responding — waiting for it to come back"}
                                   </span>
                                 </div>
                                 <div>Last heard: {st.last_seen ? new Date(st.last_seen).toLocaleString() : "never"}</div>
@@ -1106,14 +1179,91 @@ export default function Settings() {
                         </p>
                         {diagResults.map(r => (
                           <div key={r.peer} className={`text-[11px] px-2.5 py-1.5 rounded-md border font-medium ${r.ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-400"}`}>
-                            <p className="font-bold">{r.name || r.peer}: {r.ok ? "reachable, signature OK" : `FAILED — ${r.reason}`}</p>
+                            <p className="font-bold">{r.name || r.peer}: {r.ok ? "connected and trusted" : `FAILED — ${r.reason}`}</p>
                             {r.detail && <p className="opacity-80 mt-0.5 normal-case">{r.detail}</p>}
                           </div>
                         ))}
                       </div>
                     )}
                   </div>
+                  {isAdmin && (
+                    <div className="mt-4 border-t border-border pt-3 space-y-1">
+                      {/* AUTO-PAIRING STATUS ONLY: computers join the sync
+                          cluster by themselves (each copy makes its own
+                          secure "introduction" handshake on first run). The
+                          manual rotate/import tools moved to the Admin
+                          Console as the recovery escape hatch. */}
+                      <p className="text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        Computers join the sharing group <span className="font-bold">automatically</span> — no keys to manage. If the check above ever reports a problem that mentions shared keys, the fix (manual key rotation) is in the Admin Console.
+                      </p>
+                    </div>
+                  )}
                 </div>
+
+      {/* SHARED KEY DIALOG — RECOVERY ESCAPE HATCH. Reachable only from the
+          Admin Console. Normal days never open this: computers pair
+          themselves automatically (PASADA_OFFER / PASADA_JOINBLOB /
+          PASADA_REPLYBLOB handshake, hybrid AES-GCM + RSA-OAEP). This dialog
+          exists for the rare occasion the Admin must forcibly re-key a
+          compromised machine. */}
+      <Dialog open={keyDialogOpen} onOpenChange={setKeyDialogOpen}>
+        <DialogContent className="sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold">Manual key recovery</DialogTitle>
+            <DialogDescription className="space-y-2 text-sm font-normal">
+              <span className="block">
+                The shared key is the private code two office computers use to trust each other for syncing. Computers normally agree on it <span className="font-bold">automatically</span> the moment PASADA is opened on a new machine — you never need to touch this dialog in daily use.
+              </span>
+              <span className="block">
+                Use this only when the connection check reports a key problem on a specific machine (for example after reinstalling Windows on it). Press "New key on this computer", carry the text to the other computer (flash drive or printout), open this same dialog there and paste it. It works right away here; other computers pause syncing until you paste the same text on them too.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          {rotatedKey ? (
+            <div className="space-y-3">
+              <div>
+                <Label className="text-[10px] font-bold text-red-600 uppercase tracking-wider">Show this once — copy it now</Label>
+                <textarea
+                  readOnly
+                  value={rotatedKey}
+                  rows={3}
+                  className="mt-1 w-full text-xs font-mono bg-muted/40 border border-border rounded-md p-2 focus:outline-none"
+                  aria-label="New shared key text (copy this now)"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Give this exact text to the other office computer (print it, use a flash drive, or send a private message). On that computer, open this same dialog and paste the text. This dialog will not show the text again after you close it.
+              </p>
+              <DialogFooter>
+                <Button onClick={() => { setRotatedKey(null); setKeyDialogOpen(false); }} size="sm" className="font-bold">Done — I copied it</Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div>
+                <Button onClick={handleRotateKey} disabled={keyBusy !== null} size="sm" className="font-bold">
+                  {keyBusy === "rotate" ? <Loader2 className="h-4 w-4 animate-spin" /> : "New key on this computer"}
+                </Button>
+                <p className="text-[11px] text-muted-foreground mt-1">Works right away here. Other computers stop syncing until you paste this new text there too.</p>
+              </div>
+              <div className="border-t border-border pt-3">
+                <Label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">I received a key</Label>
+                <Input
+                  value={keyImportDraft}
+                  onChange={(e) => setKeyImportDraft(e.target.value)}
+                  placeholder="Paste the key text you were given"
+                  aria-label="Delivered cluster key text"
+                  className="mt-1 h-9 font-mono text-xs"
+                />
+                <Button onClick={handleImportKey} disabled={keyBusy !== null} size="sm" className="mt-2 font-bold">
+                  {keyBusy === "import" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save the key"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
                 <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1 flex flex-col justify-center">
                   <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">Sharing</p>

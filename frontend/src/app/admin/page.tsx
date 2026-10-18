@@ -521,6 +521,10 @@ export default function AdminConsole() {
                       <RefreshCw size={14} className={syncNowLoading ? "animate-spin mr-1.5" : "mr-1.5"} /> Sync now
                     </Button>
                     <p className="text-xs text-muted-foreground font-medium mt-2">Pulls new records from the other computers right away. New and changed accounts already arrive on their own within seconds.</p>
+                    <p className="text-xs text-muted-foreground font-medium mt-1">Computers join the sharing group automatically when PASADA is opened on them. Manual key recovery below is only for the rare case the connection check reports a key problem.</p>
+                    <Button variant="outline" size="sm" className="mt-2 font-bold shadow-sm border-border/60" onClick={() => window.dispatchEvent(new Event("pasada:open-key-recovery"))}>
+                      <KeyRound size={14} className="mr-1.5" /> Manual key recovery
+                    </Button>
                   </div>
                 </div>
                 <div className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-2 text-sm">

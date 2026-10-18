@@ -323,14 +323,18 @@ export default function InactiveLines() {
                     </div>
                 </div>
                 
-                <div className="flex flex-wrap items-center xl:justify-end gap-3 w-full xl:w-auto md:ml-auto">
+                {/* Two rows by two columns, matching the Activity History page
+                    exactly: top row both dropdowns (Sort / All TODA Routes),
+                    bottom row Export Excel and Search. Same width, same size,
+                    same placement on both pages. */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full xl:w-[42rem] md:ml-auto">
                     {/* SORT BY DROPDOWN */}
                     <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                        <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+                        <ArrowUpDown className="h-4 w-4 text-muted-foreground shrink-0" />
                         <select
                             value={sortBy}
                             onChange={(e) => setSortBy(e.target.value)}
-                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer text-foreground w-full min-w-0"
                         >
                             <option value="ROUTE_ASC">Sort: TODA Route (A Z)</option>
                             <option value="YEAR_NEWEST">Sort: Renewal Year (Newest)</option>
@@ -342,11 +346,11 @@ export default function InactiveLines() {
 
                     {/* FILTER BY TODA ROUTE */}
                     <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                        <Filter className="h-4 w-4 text-muted-foreground" />
+                        <Filter className="h-4 w-4 text-muted-foreground shrink-0" />
                         <select
                             value={routeFilter}
                             onChange={(e) => setRouteFilter(e.target.value)}
-                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer text-foreground w-full min-w-0"
                         >
                             <option value="ALL">All TODA Routes</option>
                             {uniqueRoutes.map(r => (
@@ -355,18 +359,18 @@ export default function InactiveLines() {
                         </select>
                     </div>
 
-                    <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600" data-tip="Downloads the inactive list as an Excel file. Only the records matching the TODA route filter above are included.">
+                    <Button variant="outline" onClick={handleExportInactive} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 rounded-lg font-bold border-border/60 bg-background text-emerald-600 w-full" data-tip="Downloads the inactive list as an Excel file. Only the records matching the TODA route filter above are included.">
                         {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : exportSuccess ? <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" /> : <Download className="mr-2 h-5 w-5" />}
                         Export Excel
                     </Button>
 
-                    <div className="relative w-full md:w-72 group">
+                    <div className="relative group">
                         <Input
                             type="search"
                             placeholder="Search Operator, SBN..."
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
+                            className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium w-full"
                         />
                     </div>
                 </div>

@@ -105,6 +105,7 @@ def run_kmeans_clustering(db: Session, target_route: str):
         
         target_data = df[df['route'] == target_route]
         has_data = not target_data.empty
+        clustered = bool(unique_densities >= 2 and len(df) >= 3)
         
         if target_data.empty:
             severity, fleet_val, pop_val, road_val, density_val = 0, 0, 5000, 5.0, 0
@@ -143,6 +144,11 @@ def run_kmeans_clustering(db: Session, target_route: str):
             "davies_bouldin": round(davies_bouldin_val, 2),
             "calinski_harabasz": round(calinski_harabasz_val, 1),
             "has_demographic_data": has_data,
+            # clustered=False means there were too few routes (or all densities
+            # identical) to group anything — the three scores below are then
+            # 0.0 placeholders, NOT real measurements, so the UI must not
+            # color-grade them.
+            "clustered": clustered,
             "feature_importances": importance_data,
             "historical_trend": [] 
         }]

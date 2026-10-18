@@ -28,3 +28,4 @@ frontend/test-results/
 
 # Coverage artifact
 .coverage
+manual_assets/make_algorithm_handout.py

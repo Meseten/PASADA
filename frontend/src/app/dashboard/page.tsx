@@ -45,6 +45,7 @@ export default function Dashboard() {
     const [stats, setStats] = useState<GlobalStats | null>(null);
     const [activePrediction, setActivePrediction] = useState("");
     const [predictionData, setPredictionData] = useState<any>(null);
+    const [routeInfo, setRouteInfo] = useState<{ population: number | null; road_length_km: number | null } | null>(null);
     const [population, setPopulation] = useState("");
     const [roadLength, setRoadLength] = useState("");
     const [isUpdatingRoute, setIsUpdatingRoute] = useState(false);
@@ -61,6 +62,17 @@ export default function Dashboard() {
     const [downloadedFiles, setDownloadedFiles] = useState<Set<string>>(new Set());
     const [dupModalOpen, setDupModalOpen] = useState(false);
     const [pendingDownload, setPendingDownload] = useState<{name: string, action: () => void} | null>(null);
+
+    // SYNC HEALTH BANNER: the moment the dashboard opens (backend already
+    // reports ready before this route loads), one live check runs against
+    // every visible peer. A failing trusted computer shows a banner with the
+    // exact reason and auto-retries every 5 minutes; a healthy cluster stays
+    // silent — no green noise for the routine case.
+    type SyncDiagResult = { peer: string; name?: string | null; ok: boolean; reason?: string | null; detail?: string };
+    type SyncDiag = { results: SyncDiagResult[]; checked_at?: string };
+    const [syncDiag, setSyncDiag] = useState<SyncDiag | null>(null);
+    const [isSyncAdmin, setIsSyncAdmin] = useState(false);
+    const [syncBannerDismissed, setSyncBannerDismissed] = useState(false);
 
     const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
         const id = Date.now();
@@ -104,6 +116,29 @@ export default function Dashboard() {
         return () => clearInterval(interval);
     }, []);
 
+    useEffect(() => {
+        const role = localStorage.getItem("pasada_role") || "Clerk";
+        setIsSyncAdmin(role === "Admin");
+        if (role !== "Admin") return;
+        let alive = true;
+        let interval: ReturnType<typeof setInterval> | undefined;
+        const runCheck = async () => {
+            try {
+                const res = await fetchWithAuth(`${API_URL}/system/sync-diagnostics`, { method: "POST" });
+                if (alive && res.ok) setSyncDiag(await res.json());
+            } catch {
+                /* a failed probe leaves the previous result (or none) shown */
+            }
+        };
+        // Initial run right after mount; then re-check every 5 minutes so the
+        // banner self-heals (disappears) the moment the peer recovers.
+        runCheck();
+        interval = setInterval(runCheck, 5 * 60 * 1000);
+        return () => { alive = false; if (interval) clearInterval(interval); };
+    }, []);
+
+    const failingPeers = (syncDiag?.results ?? []).filter(r => r.peer !== "this computer" && !r.ok);
+
     const fetchML = async () => {
         if (!activePrediction) return;
         try {
@@ -139,6 +174,7 @@ export default function Dashboard() {
                 if (cancelled || !data) return;
                 setPopulation(data.population != null ? String(data.population) : "");
                 setRoadLength(data.road_length_km != null ? String(data.road_length_km) : "");
+                setRouteInfo(data.exists ? data : null);
             })
             .catch(() => {});
         return () => { cancelled = true };
@@ -170,6 +206,7 @@ export default function Dashboard() {
                         const data = await again.json();
                         setPopulation(data.population != null ? String(data.population) : "");
                         setRoadLength(data.road_length_km != null ? String(data.road_length_km) : "");
+                        setRouteInfo(data.exists ? data : null);
                     }
                 } catch {}
             }
@@ -369,6 +406,30 @@ export default function Dashboard() {
     return (
         <div className="space-y-4 p-4 md:p-6 animate-in fade-in duration-500 bg-background min-h-screen">
             
+            {/* SYNC HEALTH BANNER: shown only when a live auto-check against a
+                trusted computer FAILED (auto-retries every 5 minutes so it
+                clears itself on recovery). Healthy clusters stay silent. */}
+            {isSyncAdmin && !syncBannerDismissed && failingPeers.length > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-start gap-3" role="alert">
+                    <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                        <p className="font-bold text-amber-700 dark:text-amber-400 text-sm">
+                            Sharing problem detected ({failingPeers.length === 1 ? "1 computer" : `${failingPeers.length} computers`})
+                        </p>
+                        {failingPeers.map(r => (
+                            <p key={r.peer} className="text-xs text-amber-700/90 dark:text-amber-400/90 mt-1">
+                                <span className="font-bold">{r.name || r.peer}</span> — {r.reason}{r.detail ? `: ${r.detail}` : ""}
+                            </p>
+                        ))}
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                            Fix: restart PASADA on both computers (they re-pair on their own). If it still fails after a restart, the Admin Console {'>'} Technical has manual key recovery. Rechecking automatically every 5 minutes.
+                        </p>
+                    </div>
+                    <button onClick={() => setSyncBannerDismissed(true)} aria-label="Dismiss sharing problem banner" className="text-amber-600 hover:text-amber-800 shrink-0">
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+            )}
             {/* TODA SUMMARY PREVIEW MODAL */}
             <Dialog open={isSummaryOpen} onOpenChange={setIsSummaryOpen}>
                 <DialogContent className="sm:max-w-[700px] shadow-2xl rounded-2xl max-h-[85vh] overflow-hidden flex flex-col">
@@ -749,6 +810,9 @@ export default function Dashboard() {
                         <button
                             key={toda}
                             onClick={() => setActivePrediction(toda)}
+                            data-tip={routeInfo && activePrediction === toda
+                                ? `${toda} — saved values: population ${routeInfo.population?.toLocaleString() ?? "not set"}, roads ${routeInfo.road_length_km != null ? `${routeInfo.road_length_km} km` : "not set"}`
+                                : `${toda} — click to run the estimate`}
                             className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all border shadow-sm ${
                                 activePrediction === toda
                                     ? "bg-slate-900 text-white border-slate-900 dark:bg-blue-600 dark:text-white dark:border-blue-600"
@@ -776,6 +840,13 @@ export default function Dashboard() {
                         <p className="text-[10px] font-bold opacity-80 mb-2">
                             Current Active Operators
                         </p>
+                        {routeInfo && (routeInfo.population != null || routeInfo.road_length_km != null) && (
+                            <p className="text-[10px] font-semibold opacity-80">
+                                {routeInfo.population != null && `Population ${routeInfo.population.toLocaleString()}`}
+                                {routeInfo.population != null && routeInfo.road_length_km != null && " · "}
+                                {routeInfo.road_length_km != null && `Roads ${routeInfo.road_length_km} km`}
+                            </p>
+                        )}
                         <div
                             className="bg-background/80 backdrop-blur-sm border border-border/50 px-3 py-1 rounded-md text-[10px] font-bold shadow-sm cursor-help"
                             data-tip={predictionData ? `Fullness score: active operators compared against the route's expected capacity. Above 1.0 means the route is carrying more tricycles than its roads and population comfortably support.` : "Run an estimate by choosing a route above."}
@@ -858,6 +929,17 @@ export default function Dashboard() {
 
                 {/* HOW SURE ARE WE: plain-words version of the grouping checks */}
                 {predictionData && (
+            <>
+                {(predictionData.clustered === false) ? (
+                    <div className="mt-4 pt-3 border-t border-border/50 flex items-center gap-2">
+                        <span className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
+                            How sure are we?
+                        </span>
+                        <span className="text-[10px] font-semibold text-muted-foreground">
+                            Not enough routes with different fullness yet — the check runs once more routes are added.
+                        </span>
+                    </div>
+                ) : (
                     <div className="mt-4 pt-3 border-t border-border/50 flex flex-wrap items-center gap-x-4 gap-y-1">
                         <span className="text-[10px] font-black text-muted-foreground uppercase tracking-widest">
                             How sure are we?
@@ -883,6 +965,8 @@ export default function Dashboard() {
                         </span>
                     </div>
                 )}
+            </>
+        )}
             </div>
             
             {/* CUSTOM TOAST CONTAINER */}

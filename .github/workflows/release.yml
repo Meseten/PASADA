@@ -4,7 +4,8 @@ name: Release PASADA
 #
 #   git push origin main    # that's all — every push to main becomes a release
 #
-# The version lives in .github/version.txt (source of truth, currently 0.82.3).
+# The version lives in .github/version.txt (source of truth, currently 0.82.7).
+# A push of main releases PATCH+1 (0.82.7 → 0.82.8); a pushed tag v* releases that tag verbatim.
 # On each push to main the workflow bumps its PATCH number, writes the new
 # version into tauri.conf.json + Cargo.toml + APP_VERSION (settings page),
 # commits the bump with [skip ci] so it never re-triggers, tags v<version>,

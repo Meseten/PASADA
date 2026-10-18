@@ -183,19 +183,18 @@ export default function AuditLogsPage() {
               </div>
           </div>
           
-          {/* Two rows, same layout as the records page: filters on top,
-              export and search under them. */}
-          {/* One flat row, copied from the Inactive page so the controls are
-              the same size and line up the same way instead of staggering
-              across two rows. Wraps naturally on narrow windows. */}
-          <div className="flex flex-wrap items-center xl:justify-end gap-3 w-full xl:w-auto md:ml-auto" data-tour="tour-logs-filters">
+          {/* Two rows by two columns, matching the Inactive page exactly:
+              top row both dropdowns (All TODA Routes, All Actions), bottom row
+              Export Excel and Search logs. Fixed container width so the two
+              pages line up identically. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full xl:w-[42rem] md:ml-auto" data-tour="tour-logs-filters">
                   {/* FILTER BY TODA ROUTE */}
                   <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                      <Filter className="h-4 w-4 text-muted-foreground" />
+                      <Filter className="h-4 w-4 text-muted-foreground shrink-0" />
                       <select
                           value={routeFilter}
                           onChange={(e) => setRouteFilter(e.target.value)}
-                          className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                          className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer text-foreground w-full min-w-0"
                       >
                           <option value="ALL">All TODA Routes</option>
                           <option value="SYSTEM">System (non-TODA)</option>
@@ -211,11 +210,11 @@ export default function AuditLogsPage() {
                   </div>
 
                   <div className="flex items-center gap-1.5 bg-background border border-border/60 rounded-lg px-3 h-11 shadow-sm">
-                        <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+                        <ArrowUpDown className="h-4 w-4 text-muted-foreground shrink-0" />
                         <select
                             value={actionFilter}
                             onChange={(e) => setActionFilter(e.target.value)}
-                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer pr-2 text-foreground"
+                            className="bg-transparent text-sm font-bold focus:outline-none cursor-pointer text-foreground w-full min-w-0"
                         >
                             <option value="ALL">All Actions</option>
                             {availableActions.map(a => (
@@ -224,18 +223,18 @@ export default function AuditLogsPage() {
                         </select>
                   </div>
 
-                  <Button variant="outline" onClick={handleExportLogs} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 px-6 rounded-lg font-bold border-border/60 bg-background text-emerald-600" data-tip="Downloads every log entry matching the filters above as an Excel file, not just this page.">
+                  <Button variant="outline" onClick={handleExportLogs} disabled={isExporting} className="shadow-sm hover:shadow-md transition-all duration-300 h-11 rounded-lg font-bold border-border/60 bg-background text-emerald-600 w-full" data-tip="Downloads every log entry matching the filters above as an Excel file, not just this page.">
                       {isExporting ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Download className="mr-2 h-5 w-5" />}
                       Export Excel
                   </Button>
 
-                  <div className="relative w-full md:w-72 group">
+                  <div className="relative group">
                       <Input
                           type="search"
                           placeholder="Search logs..."
                           value={search}
                           onChange={(e) => setSearch(e.target.value)}
-                          className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium"
+                          className="h-11 bg-card border-border/50 focus:bg-background rounded-lg shadow-sm font-medium w-full"
                       />
                   </div>
           </div>

@@ -4,8 +4,10 @@ import time
 import hmac
 import hashlib
 import secrets
+import base64
 import requests
 import os
+import uuid
 from database import SessionLocal, FranchiseRecord, get_pht_now, BASE_DIR
 from datetime import datetime, timedelta
 
@@ -20,6 +22,54 @@ def force_log(msg):
 
 BROADCAST_PORT = 54321
 API_PORT = 43888
+
+# TEST/LAB OVERRIDES: two PASADA instances can run side by side on ONE PC
+# (Linux loopback aliases like 127.0.0.2/127.0.0.3 are separate NICs). The
+# engine still has its production defaults unless these env vars are set:
+#   PASADA_SYNC_PORT     override the discovery/offer UDP port
+#   PASADA_SYNC_BIND     bind the listener to this "ip[:port]" instead of the
+#                        wildcard, so two instances on one PC each own an NIC
+#   PASADA_SYNC_TARGETS  comma-separated "ip[:port]" list; broadcasts
+#                        (discovery, offer, nudge) are unicast to these
+#                        instead of LAN <broadcast>
+#   PASADA_SYNC_LOCAL_IP override get_local_ip(): the worked-out LAN address
+#                        for this machine, since loopback aliases break the
+#                        routing-table guesswork it does by default
+SYNC_PORT = int(os.environ.get("PASADA_SYNC_PORT", str(BROADCAST_PORT)))
+_SYNC_LOCAL_IP_ENV = os.environ.get("PASADA_SYNC_LOCAL_IP", "")
+
+
+def _sync_destinations():
+    """WHERE broadcasts go: the LAN broadcast address by default, or every
+    pinned target from PASADA_SYNC_TARGETS when the lab override is set."""
+    targets = []
+    for item in os.environ.get("PASADA_SYNC_TARGETS", "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ip, _, port = item.partition(":")
+        targets.append((ip, int(port) if port else SYNC_PORT))
+    return targets or [("<broadcast>", SYNC_PORT)]
+
+
+def _send_announcement(payload: bytes, udp_socket=None):
+    """One helper for every periodic announcement (discovery / offer / nudge):
+    LAN broadcast normally, unicast to pinned targets under the lab override.
+    Best effort: a failed send only costs seconds of latency, never data —
+    the 10-second cycle re-reaches every peer by itself."""
+    for dest in _sync_destinations():
+        try:
+            if udp_socket is not None:
+                udp_socket.sendto(payload, dest)
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    sock.sendto(payload, dest)
+                finally:
+                    sock.close()
+        except OSError:
+            pass
+
 PEERS = set()
 
 # FRIENDLY COMPUTER NAMES: each machine broadcasts the name of the ACCOUNT
@@ -53,10 +103,274 @@ if os.path.exists(CLUSTER_SECRET_PATH):
     with open(CLUSTER_SECRET_PATH, "r") as f:
         CLUSTER_SECRET = f.read().strip()
 else:
-    import uuid
     CLUSTER_SECRET = str(uuid.uuid4())
     with open(CLUSTER_SECRET_PATH, "w") as f:
         f.write(CLUSTER_SECRET)
+
+# =============================================================================
+# AUTO-PAIRING: a fresh install joins the office cluster BY ITSELF.
+# =============================================================================
+# The office should not have to know a "shared key" exists. Every machine
+# generates a long-term PAIRING KEY PAIR on first run (pasada_pairing.pem).
+# Discovery now twinned with a signed OFFER datagram (PASADA_OFFER) that
+# carries the machine's PUBLIC half. A machine that has never been paired
+# answers with a CHALLENGE encrypted to that public key; the offerer
+# decrypts with its private half and replies with the CLUSTER SECRET
+# encrypted the same way. The secret itself therefore only ever travels
+# encrypted to the one joining machine, never on the wire in readable form
+# and never broadcast.
+#
+# Safety rails, deliberate:
+#   - A machine that already HAS a key and peers ignores offers. Pairing is
+#     only for machines that would otherwise never sync.
+#   - The OFFERER answers a challenge from a machine it has not yet
+#     registered as a peer (throttled once per minute per machine). Not
+#     restricted to fresh clusters: the third, fourth, fifth computer must
+#     join too, whenever it appears. Stricter sites turn pairing off with
+#     the Admin opt-out flag (auto_pairing_off.flag); recovery for a
+#     deliberately rotated machine then goes through the manual tools.
+#   - Offers are signed by the OFFERER's pairing key (self-evident identity:
+#     the challenge can only be answered by the holder of the private half),
+#     and challenges/replies are single-use, time-boxed datagrams like the
+#     discovery/nudge family. No replay of a captured reply can be used
+#     twice, and a reply is useless to anyone except its named recipient
+#     because its recipient must hold the private half of the challenge.
+#
+# The manual rotate/import tools remain for the recovery case (an Admin
+# resetting a compromised machine), but no normal user action needs them.
+PAIRING_KEY_PATH = os.path.join(BASE_DIR, "pasada_pairing.pem")
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    _CRYPTO_OK = True
+except Exception:  # pragma: no cover - the wheel ships with the app
+    _CRYPTO_OK = False
+
+def _load_or_create_pairing_keys():
+    """(private_pem, public_der) for this machine. Generated once, reused
+    forever so a machine keeps its identity across restarts."""
+    if not _CRYPTO_OK:
+        return None, None
+    if os.path.exists(PAIRING_KEY_PATH):
+        try:
+            with open(PAIRING_KEY_PATH, "rb") as f:
+                priv = serialization.load_pem_private_key(f.read(), password=None)
+            return priv, priv.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+        except Exception:
+            pass  # corrupted file: fall through and regenerate
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = priv.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption())
+    with open(PAIRING_KEY_PATH, "wb") as f:
+        f.write(pem)
+    return priv, priv.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo)
+
+_PAIRING_PRIV, _PAIRING_PUB = _load_or_create_pairing_keys()
+
+def _has_working_pairing() -> bool:
+    return _CRYPTO_OK and _PAIRING_PRIV is not None
+
+# These mirror the discovery/nudge freshness model. Offers repeat every
+# broadcast tick; the nonce cache makes a captured one single-use.
+def build_offer_payload(local_ip: str, now: float = None) -> bytes:
+    """PASADA_OFFER:<ver>:<ip>:<timestamp>:<nonce>:<b64 pubkey>:<name>:<hmac(pvk)>.
+
+    Signed BY the pairing private key. Anyone hearing it can verify identity
+    with the enclosed public half — that is the point: the offer's receiver
+    must know WHOSE key to encrypt its challenge to."""
+    if not _has_working_pairing():
+        return None
+    if now is None:
+        now = time.time()
+    timestamp = str(int(now))
+    nonce = secrets.token_hex(8)
+    pub_b64 = base64.b64encode(_PAIRING_PUB).decode('ascii')
+    body = f"PASADA_OFFER:{DISCOVERY_PROTOCOL_VERSION}:{local_ip}:{timestamp}:{nonce}:{pub_b64}:{COMPUTER_NAME}".encode('utf-8')
+    sig = _PAIRING_PRIV.sign(body, asym_padding.PKCS1v15(), hashes.SHA256())
+    return body + b":" + base64.b64encode(sig)
+
+
+def parse_offer_payload(data: bytes, local_ip: str, now: float = None):
+    """Return (sender_ip, sender_pub_der, sender_name) for a fresh valid offer,
+    else None."""
+    if not _has_working_pairing():
+        return None
+    if now is None:
+        now = time.time()
+    try:
+        text = data.decode('utf-8')
+        head, sig_b64 = text.rsplit(":", 1)
+        parts = head.split(":")
+        if len(parts) != 7 or parts[0] != "PASADA_OFFER":
+            return None
+        if parts[1] != str(DISCOVERY_PROTOCOL_VERSION):
+            return None
+        _, _, peer_ip, timestamp, nonce, pub_b64, name = parts
+        pub = serialization.load_der_public_key(base64.b64decode(pub_b64))
+        pub.verify(base64.b64decode(sig_b64), head.encode('utf-8'),
+                   asym_padding.PKCS1v15(), hashes.SHA256())
+        age = abs(now - float(timestamp))
+        if age > BROADCAST_MAX_AGE_SECONDS:
+            return None
+        if not _broadcast_nonce_seen(nonce, now):
+            return None
+        if peer_ip == local_ip or not name.strip():
+            return None
+        return peer_ip, pub.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo), name
+    except Exception:
+        return None
+
+
+def build_join_challenge(recipient_pub_der: bytes, local_ip: str, now: float = None):
+    """(payload, nonce) — a challenge addressed to ONE offerer.
+
+    Hybrid envelope: a fresh AES-256-GCM key encrypts the request body
+    (which carries the JOINER'S OWN PUBLIC KEY, so the offerer's reply can
+    be encrypted back to us alone), and RSA-OAEP wraps only the AES key.
+    Nothing readable crosses the wire except to the holder of the private
+    half of the offered key."""
+    if not _has_working_pairing():
+        return None, None
+    if now is None:
+        now = time.time()
+    timestamp = str(int(now))
+    nonce = secrets.token_hex(8)
+    body = (f"PASADA_JOIN:{DISCOVERY_PROTOCOL_VERSION}:{local_ip}:{timestamp}:{nonce}:"
+            f"SECRET-REQUEST:"
+            f"{base64.b64encode(_PAIRING_PUB).decode('ascii')}").encode('utf-8')
+    aes_key = AESGCM.generate_key(bit_length=256)
+    aes_nonce = secrets.token_bytes(12)
+    ct = AESGCM(aes_key).encrypt(aes_nonce, body, None)
+    recipient = serialization.load_der_public_key(recipient_pub_der)
+    wrapped = recipient.encrypt(
+        aes_key, asym_padding.OAEP(
+            mgf=asym_padding.MGF1(hashes.SHA256()),
+            algorithm=hashes.SHA256(), label=None))
+    envelope = f"{base64.b64encode(wrapped).decode('ascii')}." \
+               f"{base64.b64encode(aes_nonce).decode('ascii')}." \
+               f"{base64.b64encode(ct).decode('ascii')}"
+    return f"PASADA_JOINBLOB:{timestamp}:{nonce}:{envelope}".encode('utf-8'), nonce
+
+
+def parse_join_challenge(data: bytes, local_ip: str, now: float = None):
+    """Offerer side. Opens the hybrid envelope with our private half; returns
+    (joiner_ip, joiner_pub_der, plain_body) when addressed to us and fresh,
+    else None."""
+    if not _has_working_pairing():
+        return None
+    if now is None:
+        now = time.time()
+    try:
+        text = data.decode('utf-8')
+        parts = text.split(":", 3)
+        if len(parts) != 4 or parts[0] != "PASADA_JOINBLOB":
+            return None
+        _, timestamp, nonce, envelope = parts
+        if abs(now - float(timestamp)) > BROADCAST_MAX_AGE_SECONDS:
+            return None
+        wrapped_b64, aes_nonce_b64, ct_b64 = envelope.split(".")
+        aes_key = _PAIRING_PRIV.decrypt(
+            base64.b64decode(wrapped_b64), asym_padding.OAEP(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(), label=None))
+        body = AESGCM(aes_key).decrypt(
+            base64.b64decode(aes_nonce_b64), base64.b64decode(ct_b64), None).decode('utf-8')
+        jparts = body.split(":")
+        if len(jparts) != 7 or jparts[0] != "PASADA_JOIN":
+            return None
+        if jparts[1] != str(DISCOVERY_PROTOCOL_VERSION):
+            return None
+        _, _, joiner_ip, jts, jnonce, marker, joiner_pub_b64 = jparts
+        if marker != "SECRET-REQUEST":
+            return None
+        if abs(now - float(jts)) > BROADCAST_MAX_AGE_SECONDS or joiner_ip == local_ip:
+            return None
+        joiner_pub = serialization.load_der_public_key(base64.b64decode(joiner_pub_b64))
+        return joiner_ip, joiner_pub.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo), body
+    except Exception:
+        return None
+
+
+def build_join_reply(plaintext: bytes, recipient_pub_der: bytes):
+    """Hybrid-encrypt the secret-bearing reply to the JOINER's public key.
+    Same envelope shape as the challenge: RSA wraps the AES key, AES-GCM
+    carries the secret."""
+    if not _has_working_pairing():
+        return None
+    aes_key = AESGCM.generate_key(bit_length=256)
+    aes_nonce = secrets.token_bytes(12)
+    ct = AESGCM(aes_key).encrypt(aes_nonce, plaintext, None)
+    recipient = serialization.load_der_public_key(recipient_pub_der)
+    wrapped = recipient.encrypt(
+        aes_key, asym_padding.OAEP(
+            mgf=asym_padding.MGF1(hashes.SHA256()),
+            algorithm=hashes.SHA256(), label=None))
+    envelope = f"{base64.b64encode(wrapped).decode('ascii')}." \
+               f"{base64.b64encode(aes_nonce).decode('ascii')}." \
+               f"{base64.b64encode(ct).decode('ascii')}"
+    return f"PASADA_REPLYBLOB:{envelope}".encode('utf-8')
+
+
+def parse_join_reply(data: bytes):
+    """Joiner side: open with OUR private half; return the plaintext secret
+    bytes, else None."""
+    if not _has_working_pairing():
+        return None
+    try:
+        text = data.decode('utf-8')
+        if not text.startswith("PASADA_REPLYBLOB:"):
+            return None
+        wrapped_b64, aes_nonce_b64, ct_b64 = text.split(":", 1)[1].split(".")
+        aes_key = _PAIRING_PRIV.decrypt(
+            base64.b64decode(wrapped_b64), asym_padding.OAEP(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(), label=None))
+        return AESGCM(aes_key).decrypt(
+            base64.b64decode(aes_nonce_b64), base64.b64decode(ct_b64), None)
+    except Exception:
+        return None
+
+
+# AUTO-PAIR SWITCH: ON by default (the office asked for computers that join
+# by themselves). An Admin can turn it off from the Admin Console; while off
+# this machine neither offers nor requests, and recovery goes back to the
+# manual rotate/import tools.
+PAIRING_OPTOUT_PATH = os.path.join(BASE_DIR, "auto_pairing_off.flag")
+
+def auto_pairing_enabled() -> bool:
+    return not os.path.exists(PAIRING_OPTOUT_PATH)
+
+# Rate limit: at most one SECRET released to a given joiner per minute, and
+# adopt at most one reply attempt per offerer per minute, so a hostile LAN
+# cannot flush either side with datagrams.
+_reply_throttle = {}
+_challenge_throttle = {}
+_throttle_lock = threading.Lock()
+
+# Friendly record of machines that joined by themselves, shown in the
+# Connections UI so the office can SEE pairing worked (newest first, max 5).
+_auto_pair_events = []
+
+def record_auto_pair_event(msg: str):
+    stamp = get_pht_now().strftime('%Y-%m-%d %H:%M:%S')
+    _auto_pair_events.insert(0, f"{stamp}  {msg}")
+    del _auto_pair_events[5:]
+    force_log(f"AUTO-PAIR: {msg}")
+
+def get_auto_pair_events():
+    return list(_auto_pair_events)
 
 # Signatures older than this are refused, so a captured broadcast cannot be
 # replayed to sneak a fake peer onto the list. Broadcasts repeat every 10s,
@@ -182,7 +496,7 @@ def _mark_peer_seen(peer_ip: str):
 
 def get_peer_status():
     """One row per peer the sync engine knows about for the Connections UI:
-    friendly name, when it was last heard, current pull-miss streak (0 after
+    friendly name, when it was last HEARD, current pull-miss streak (0 after
     any success), and whether the registry currently lists it."""
     with _peer_seen_lock:
         seen = dict(_peer_seen)
@@ -198,6 +512,61 @@ def get_peer_status():
             "registered": ip in PEERS,
         }
     return rows
+
+
+# CLUSTER KEY LIFECYCLE. Sync never puts the secret on the wire, but the
+# office OWNS the key. When the live check reports "wrong cluster secret"
+# (two computers holding two different keys), the Admin can:
+#   ROTATE - mint a fresh key on this computer (written to cluster_secret.key,
+#            fingerprint shown, the secret itself shown ONCE for hand-over), and
+#   IMPORT - paste the exact key text into every other computer
+#            (hand-delivered: printed, flash drive, or private message).
+# The fingerprint is an HMAC keyed by the secret itself, so it cannot be
+# reversed to the key — its only job is letting two computers confirm they
+# hold the SAME key without ever displaying it. Any rotate/import clears the
+# peer registry so the next broadcast is signed by the NEW key and no stale
+# expectation from the old one lingers.
+def cluster_secret_fingerprint() -> str:
+    """Non-reversible fingerprint of the current key. Same key = same
+    fingerprint; one differing character = a different fingerprint."""
+    return hmac.new(
+        CLUSTER_SECRET.encode('utf-8'), b"PASADA-FINGERPRINT", hashlib.sha256
+    ).hexdigest()[:16].upper()
+
+
+def _adopt_cluster_secret(key: str):
+    """Make the new key live: persist to disk, sign with it immediately, and
+    forget every peer learned under the old key (their next broadcast,
+    signed with the matching copy, re-registers them)."""
+    global CLUSTER_SECRET
+    CLUSTER_SECRET = key
+    with open(CLUSTER_SECRET_PATH, "w") as f:
+        f.write(key)
+    PEERS.clear()
+    PEER_NAMES.clear()
+    with _peer_failures_lock:
+        _peer_failures.clear()
+    with _peer_seen_lock:
+        _peer_seen.clear()
+
+
+def rotate_cluster_secret() -> str:
+    """Mint and adopt a fresh cluster key, returning it ONCE so the Admin
+    can hand-deliver it to the office's other computers."""
+    _adopt_cluster_secret(str(uuid.uuid4()))
+    return CLUSTER_SECRET
+
+
+def import_cluster_secret(raw: str):
+    """Adopt hand-delivered key text as the cluster key. Returns the adopted
+    key, or None when the text does not look like a key. Format checking is
+    deliberately loose: what makes it THE key is holding the exact same copy
+    on the giving and the receiving computer, not a format."""
+    key = "".join(raw.split())
+    if not 32 <= len(key) <= 200:
+        return None
+    _adopt_cluster_secret(key)
+    return key
 
 # LAST SYNC CHECK: the office should be able to SEE that sharing is alive,
 # not just trust a green light. Every finished pull cycle (nudge woken or
@@ -255,11 +624,10 @@ def parse_nudge_payload(data: bytes, local_ip: str, now: float = None):
 def broadcast_nudge():
     """Send one signed wake-up datagram. Best effort: a failed broadcast only
     costs seconds, the next pull cycle catches up anyway."""
-    udp_socket = None
     try:
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        udp_socket.sendto(build_nudge_payload(get_local_ip()), ('<broadcast>', BROADCAST_PORT))
+        _send_announcement(build_nudge_payload(get_local_ip()), udp_socket)
     except OSError:
         pass
     finally:
@@ -273,6 +641,8 @@ def notify_users_changed():
     broadcast_nudge()
 
 def get_local_ip():
+    if _SYNC_LOCAL_IP_ENV:
+        return _SYNC_LOCAL_IP_ENV
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('10.255.255.255', 1))
@@ -284,27 +654,120 @@ def get_local_ip():
     return IP
 
 def broadcast_presence():
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     local_ip = get_local_ip()
-    
+
     while True:
         try:
             # SIGNED BROADCAST: proves membership without revealing the secret.
-            udp_socket.sendto(build_discovery_payload(local_ip), ('<broadcast>', BROADCAST_PORT))
+            _send_announcement(build_discovery_payload(local_ip), udp_socket)
+            # PAIRING OFFER: advertised alongside discovery so a fresh install
+            # can find this machine and ask for the cluster secret. Cheap
+            # (one datagram), signed by our pairing key, and only meaningful
+            # to machines that have no key of their own yet. Sent only while
+            # this machine trusts itself to onboard strangers (pairing on)
+            # and is still effectively solo or open — the listener refuses
+            # challenges once the cluster is formed.
+            if auto_pairing_enabled():
+                offer = build_offer_payload(local_ip)
+                if offer:
+                    _send_announcement(offer, udp_socket)
         except Exception:
             pass
         time.sleep(10)
 
+def _send_unicast(payload: bytes, dest_ip: str):
+    """One-off socket: replies go straight to the joining machine rather
+    than broadcast, so the encrypted secret is readable by exactly the one
+    NIC it was encrypted for."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(payload, (dest_ip, BROADCAST_PORT))
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+def _handle_offer(peer_ip: str, peer_pub_der: bytes, name: str, local_ip: str):
+    """Joiner side of auto-pairing: this machine has no cluster peers yet, so
+    a heard offer is our path in. Send ONE throttled encrypted challenge."""
+    if PEERS or not auto_pairing_enabled():
+        return  # already paired, or pairing is off: offers are noise
+    now = time.time()
+    with _throttle_lock:
+        last = _challenge_throttle.get(peer_ip, 0)
+        if now - last < 60:
+            return
+        _challenge_throttle[peer_ip] = now
+    payload, _nonce = build_join_challenge(peer_pub_der, local_ip)
+    if payload:
+        _send_unicast(payload, peer_ip)
+        record_auto_pair_event(f"Asked {name or peer_ip} to share the office cluster key.")
+
+def _maybe_send_secret(joiner_ip: str, joiner_pub_der: bytes, name: str, local_ip: str):
+    """Offerer side: hand the cluster secret to a machine we have NOT yet
+    registered as a peer, ONCE per minute per machine. The throttle is the
+    spam guard; the reply itself only decrypts for the machine it was
+    encrypted to. A joiner already in PEERS needs no secret — it has one."""
+    if joiner_ip in PEERS or not auto_pairing_enabled():
+        return
+    now = time.time()
+    with _throttle_lock:
+        last = _reply_throttle.get(joiner_ip, 0)
+        if now - last < 60:
+            return
+        _reply_throttle[joiner_ip] = now
+    reply = build_join_reply(b"PASADA_SECRET:" + CLUSTER_SECRET.encode('utf-8'), joiner_pub_der)
+    if reply:
+        _send_unicast(reply, joiner_ip)
+        record_auto_pair_event(f"Shared the office cluster key with {name or joiner_ip}.")
+
 def listen_for_peers():
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    udp_socket.bind(('', BROADCAST_PORT))
+    # LAB OVERRIDE: pin the listener to one loopback NIC so two instances on
+    # one PC do not fight over one wildcard socket.
+    bind_ip, _, bind_port = os.environ.get("PASADA_SYNC_BIND", "").partition(":")
+    udp_socket.bind((bind_ip or '', int(bind_port or SYNC_PORT)))
     local_ip = get_local_ip()
 
     while True:
         try:
-            data, addr = udp_socket.recvfrom(1024)
+            data, addr = udp_socket.recvfrom(4096)
+            # OFFERS/CHALLENGES/REPLIES share the port; dispatch on the
+            # visible prefix first so legacy packets take the same path as
+            # before and old builds ignore these new ones silently.
+            if data.startswith(b"PASADA_OFFER:"):
+                if auto_pairing_enabled():
+                    offer = parse_offer_payload(data, local_ip)
+                    if offer:
+                        peer_ip, peer_pub, name = offer
+                        _handle_offer(peer_ip, peer_pub, name, local_ip)
+                continue
+            if data.startswith(b"PASADA_JOINBLOB:"):
+                if auto_pairing_enabled():
+                    opened = parse_join_challenge(data, local_ip)
+                    if opened:
+                        joiner_ip, joiner_pub, body = opened
+                        # Name lookup: the joiner also broadcast its discovery
+                        # with its friendly name; fall back to the IP.
+                        _maybe_send_secret(joiner_ip, joiner_pub,
+                                           PEER_NAMES.get(joiner_ip), local_ip)
+                continue
+            if data.startswith(b"PASADA_REPLYBLOB:"):
+                if auto_pairing_enabled() and not PEERS:
+                    # Only a machine that still has no key-family peers may
+                    # adopt; a formed cluster ignores replies outright.
+                    sender = addr[0] if addr else None
+                    plaintext = parse_join_reply(data)
+                    if plaintext and plaintext.startswith(b"PASADA_SECRET:"):
+                        candidate = plaintext[len(b"PASADA_SECRET:"):]
+                        if 16 <= len(candidate) <= 256:
+                            _adopt_cluster_secret(candidate.decode('utf-8'))
+                            record_auto_pair_event(
+                                f"Joined the office cluster (key received from {PEER_NAMES.get(sender) or sender}).")
+                continue
             # NUDGE FIRST: it shares the port with discovery and a nudge from
             # a peer we have not heard from yet must still wake the pull loop
             # (and register the sender, exactly as a discovery would).
@@ -323,8 +786,24 @@ def listen_for_peers():
                 # Always refresh the name: the office may rename a machine.
                 PEER_NAMES[peer_ip] = name
                 _mark_peer_seen(peer_ip)
-        except Exception:
-            pass
+        except Exception as e:
+            _log_listener_drop_once(addr, e)
+
+# LISTENER DROP VISIBILITY: a handler erroring on every datagram used to be
+# invisible (bare `except: pass`), which once cost a full lab session to find.
+# Log the FIRST drop per exception type per 60 seconds — one line per
+# pathology, never a flood.
+_listener_drop_throttle = {}
+
+def _log_listener_drop_once(addr, e):
+    kind = type(e).__name__
+    now = time.time()
+    last = _listener_drop_throttle.get(kind, 0)
+    if now - last < 60 and last:
+        return
+    _listener_drop_throttle[kind] = now
+    force_log(f"[SYNC-LISTEN] dropped datagram from {addr[0] if addr else '?'}: "
+              f"{kind}: {e} (further drops of this kind stay quiet for 60s)")
 
 def _merge_incoming_users(db, incoming_users):
     """Merge accounts pulled from a peer into this machine's database.
@@ -374,15 +853,39 @@ def _merge_incoming_users(db, incoming_users):
                 existing_user.is_deactivated = incoming_flag
 
 
+# POISONED-ROW VISIBILITY: a pull row whose timestamp cannot even be parsed
+# is merged anyway (by-design tolerance) and stamped with the local now —
+# that fallback used to be invisible, so an office sending degraded data
+# looked "successful". Count such rows and log at most once per 15 minutes
+# with the total seen since the last line. NOT a crash: data still flows.
+_poison_rows = {"t": 0.0, "n": 0}
+
+def _note_poison_row():
+    _poison_rows["n"] += 1
+    now = time.time()
+    if _poison_rows["t"] == 0 or now - _poison_rows["t"] >= 900:
+        force_log(f"[SYNC] {_poison_rows['n']} incoming row(s) had unreadable "
+                  "timestamps; merged with this machine's local time.")
+        _poison_rows["t"] = now
+        _poison_rows["n"] = 0
+
 def sync_with_peers():
     while True:
         # HEARTBEAT-AWARE WAIT: sleep up to 10 seconds, but a signed nudge
-        # from any peer wakes this loop at once for an immediate pull. Clear
+        # from any peer wakes this pull loop at once for an immediate pull. Clear
         # BEFORE the cycle so a nudge that arrives while we are pulling still
         # wins one more quick pass after it.
         _wake_pull_loop.wait(timeout=10)
         _wake_pull_loop.clear()
-        db = SessionLocal()
+        try:
+            db = SessionLocal()
+        except Exception as e:
+            # A dead session factory must not kill the loop silently: the
+            # pull loop otherwise exists without ever attempting a pull and
+            # without a single line explaining why.
+            force_log(f"[SYNC] SessionLocal failed: {type(e).__name__}: {e}")
+            time.sleep(5)
+            continue
         try:
             latest_record = db.query(FranchiseRecord).order_by(FranchiseRecord.updated_at.desc()).first()
             # SKEW GUARD: look back a little further than the newest local
@@ -415,6 +918,12 @@ def sync_with_peers():
                         },
                         timeout=5,
                     )
+                    if not response.ok:
+                        # A refused pull (bad signature, clock skew) is a
+                        # REAL failure: count the miss and log the streak
+                        # like any network error instead of silently
+                        # pulling nothing forever.
+                        raise RuntimeError(f"peer answered {response.status_code}")
                     if response.ok:
                         incoming_data = response.json()
                         # A pull that reaches a working peer clears its miss
@@ -454,6 +963,7 @@ def sync_with_peers():
                                     # Same poison tolerance as below: a row we
                                     # cannot even timestamp still arrives with
                                     # a local now instead of killing the pull.
+                                    _note_poison_row()
                                     new_rec.updated_at = get_pht_now().replace(tzinfo=None)
                                 db.add(new_rec)
                             else:

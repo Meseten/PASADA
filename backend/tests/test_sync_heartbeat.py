@@ -498,3 +498,53 @@ def test_sync_diagnostics_reports_exact_failure(client):
 def test_sync_diagnostics_requires_admin(client):
     res = client.post("/system/sync-diagnostics")
     assert res.status_code in (401, 403)
+
+
+# --- CLUSTER KEY ROTATION / IMPORT ---
+def test_cluster_key_fingerprint_is_stable_and_display_safe():
+    """Same secret = same fingerprint; the fingerprint must never contain the
+    key text itself (reverse lookup impossible)."""
+    fp = sync_engine.cluster_secret_fingerprint()
+    assert len(fp) == 16
+    assert fp == sync_engine.cluster_secret_fingerprint()
+    assert sync_engine.CLUSTER_SECRET not in fp
+
+
+def test_rotate_and_import_key_roundtrip(client):
+    """Rotate mints+adopts a fresh key and returns its text ONCE. Importing
+    the exact text adopts it and clears stale peers. Garbage is refused, and
+    the adopted key persists to cluster_secret.key."""
+    headers = _token(client)
+    secret_file = sync_engine.CLUSTER_SECRET_PATH
+    original = sync_engine.CLUSTER_SECRET
+    try:
+        res = client.post("/system/cluster-key/rotate", headers=headers)
+        assert res.status_code == 200, res.text
+        data = res.json()
+        rotated = data["key"]
+        assert rotated and rotated != original
+        assert sync_engine.CLUSTER_SECRET == rotated, "rotation must adopt live"
+        with open(secret_file) as f:
+            assert f.read().strip() == rotated, "rotation must persist to disk"
+
+        # Registries were cleared; an admin cannot see a stale peer expectation.
+        assert sync_engine.PEERS == set()
+
+        # Garbage import = 400, no state change.
+        bad = client.post("/system/cluster-key/import", headers=headers, json={"key": "short"})
+        assert bad.status_code == 400
+
+        # Hand-deliver: a DIFFERENT computer adopts the rotated text.
+        res = client.post("/system/cluster-key/import", headers=headers, json={"key": rotated})
+        assert res.status_code == 200, res.text
+        assert sync_engine.CLUSTER_SECRET == "".join(rotated.split())
+        with open(secret_file) as f:
+            assert f.read().strip() == "".join(rotated.split())
+    finally:
+        sync_engine._adopt_cluster_secret(original)
+
+
+def test_cluster_key_endpoints_require_admin(client):
+    assert client.get("/system/cluster-key").status_code in (401, 403)
+    assert client.post("/system/cluster-key/rotate").status_code in (401, 403)
+    assert client.post("/system/cluster-key/import", json={"key": "x" * 40}).status_code in (401, 403)

@@ -58,10 +58,12 @@ from openpyxl.utils import get_column_letter
 # --- CORE SETTINGS & LOGGING ---
 from database import BASE_DIR, SessionLocal, User, FranchiseRecord, AuditLog, SystemSettings, RouteData, ApprovalTicket, get_pht_now
 from ml_engine import run_kmeans_clustering, invalidate_ml_cache
+from route_seed_data import ALIASES as _ROUTE_ALIASES
+import route_seed_data
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
 import sync_engine
-from sync_engine import start_lan_sync, get_local_ip, PEERS, CLUSTER_SECRET, get_last_sync_check
+from sync_engine import start_lan_sync, get_local_ip, PEERS, get_last_sync_check, cluster_secret_fingerprint, rotate_cluster_secret, import_cluster_secret
 from pydantic import BaseModel, Field
 
 # BOOT TELEMETRY: captured after the heavy imports (fastapi, sqlalchemy,
@@ -195,6 +197,18 @@ LIFECYCLE_START_ISO = get_pht_now().isoformat()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ROUTE FACTS: make sure every known Naic TODA route has its verified
+    # census population and road length on first launch. Idempotent and
+    # silent about rows the office has already corrected (office values win).
+    try:
+        from route_seed import seed_route_facts
+        seed_db = SessionLocal()
+        try:
+            seed_route_facts(seed_db)
+        finally:
+            seed_db.close()
+    except Exception as e:
+        force_log(f"Route fact seeding deferred: {e}")
     threading.Thread(target=automated_background_tasks, daemon=True).start()
     def safe_sync():
         try:
@@ -392,12 +406,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # --- CENTRALIZED BUSINESS LOGIC HELPERS ---
 
 def alias_route(route: str) -> str:
-    """Silently redirects NCTODA to NPTODA to prevent duplicate route creation."""
+    """Silently redirects spelling variants to one canonical route name to prevent
+    duplicate route creation. NCTODA->NPTODA was the original rule; the rest come
+    from route_seed_data.ALIASES (older spellings like DOMSA/DOMSATODA now redirect
+    to the office-confirmed DOMMSATODA, and short forms the clerks type)."""
     if not route: return ""
     r = route.strip().upper()
     if r == "NCTODA":
         return "NPTODA"
-    return r
+    return route_seed_data.ALIASES.get(r, r)
 
 def _active_admins(db: Session) -> list:
     """Admin accounts that can actually act: role Admin AND not deactivated.
@@ -2085,6 +2102,52 @@ def get_network_status(current_user: User = Depends(get_current_user)):
         "peer_status": sync_engine.get_peer_status(),
     }
 
+# --- CLUSTER KEY ROTATION / IMPORT (Connections card) ---
+# The live check can now NAME the fault "the two computers hold different
+# cluster secrets"; these endpoints let the Admin fix it without reinstalling:
+# rotate mints a fresh key here (returned once, never logged), every other
+# computer then IMPORTs the same text by hand. AUTH MODEL: Admin-only, since
+# whoever can set the key controls who joins the cluster. The key text is
+# accepted back ONLY in the moment of rotation/import and is never persisted
+# in logs, audit entries, or responses beyond the rotate response itself.
+@app.get("/system/cluster-key")
+def get_cluster_key_status(current_user: User = Depends(get_current_user)):
+    """Fingerprint of the key this computer holds — display-safe (it cannot
+    be reversed to the key). Two computers showing the same fingerprint hold
+    the same key."""
+    require_admin(current_user)
+    return {"fingerprint": cluster_secret_fingerprint()}
+
+@app.post("/system/cluster-key/rotate")
+def rotate_cluster_key(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Mint a fresh cluster key, adopt it live, and return its text ONCE so
+    the Admin can hand-deliver it to the office's other computers."""
+    require_admin(current_user)
+    new_key = rotate_cluster_secret()
+    log_action(db, get_full_name(current_user), "CLUSTER_KEY_ROTATE", "0", "SYSTEM",
+               f"Rotated the cluster key (new fingerprint {cluster_secret_fingerprint()}). "
+               "Other computers must import the new key text.")
+    # Single delivery: the only response that ever carries the key text.
+    return {"status": "success", "key": new_key,
+            "fingerprint": cluster_secret_fingerprint(),
+            "message": "New key minted. Import this exact text on every other office computer now."}
+
+@app.post("/system/cluster-key/import")
+def import_cluster_key(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Adopt a hand-delivered cluster key. Succeeds only with the EXACT text
+    the owning computer produced."""
+    require_admin(current_user)
+    raw = str(payload.get("key", ""))
+    if not raw.strip():
+        raise HTTPException(status_code=400, detail="Paste the new key text first.")
+    adopted = import_cluster_secret(raw)
+    if adopted is None:
+        raise HTTPException(status_code=400, detail="That text does not look like a PASADA cluster key (32–200 characters). Copy it exactly from the Rotate computer.")
+    log_action(db, get_full_name(current_user), "CLUSTER_KEY_IMPORT", "0", "SYSTEM",
+               f"Imported a cluster key (fingerprint {cluster_secret_fingerprint()}).")
+    return {"status": "success", "fingerprint": cluster_secret_fingerprint(),
+            "message": "Key adopted. This computer now broadcasts with the new key."}
+
 @app.post("/system/sync-diagnostics")
 def sync_diagnostics(current_user: User = Depends(get_current_user)):
     """LIVE CONNECTION CHECK (Connections card > "Test computers now").
@@ -2096,6 +2159,13 @@ def sync_diagnostics(current_user: User = Depends(get_current_user)):
     local state changes hands, and the audit log records who ran it."""
     require_admin(current_user)
     results = []
+    # SELF-ID first: a fingerprint line even when NO peer responds, so the
+    # Admin starting rotation knows which side of the mismatch they are on.
+    results.append({"peer": "this computer", "name": sync_engine.COMPUTER_NAME,
+                    "last_seen": None, "ok": True, "reason": None,
+                    "counts": None,
+                    "detail": f"This computer's key fingerprint: {cluster_secret_fingerprint()}. "
+                              "Check that the other computer shows the same fingerprint."})
     for peer in list(PEERS):
         ts = str(int(time.time()))
         nonce = secrets.token_hex(8)
@@ -2118,16 +2188,16 @@ def sync_diagnostics(current_user: User = Depends(get_current_user)):
             )
         except requests.exceptions.Timeout:
             entry.update({"ok": False, "reason": "timeout",
-                          "detail": "No answer within 5 seconds — the other computer may be asleep, offline, or a firewall is dropping the connection."})
+                          "detail": "No answer within 5 seconds. The other computer may be turned off, asleep, or blocked in the firewall."})
         except requests.exceptions.ConnectionError as e:
             entry.update({"ok": False, "reason": "refused",
-                          "detail": f"Connection refused/unreachable — the PASADA service on {peer} is not reachable on port {sync_engine.API_PORT} ({type(e).__name__})."})
+                          "detail": f"PASADA is not answering on {peer} (port {sync_engine.API_PORT}). Open PASADA on that computer, or check its firewall."})
         except Exception as e:
             entry.update({"ok": False, "reason": "error", "detail": f"{type(e).__name__}: {e}"})
         else:
             if response.status_code == 403:
                 entry.update({"ok": False, "reason": "wrong-secret",
-                              "detail": "Signature rejected (403): the two computers hold different cluster secrets. Reinstall PASADA on both, or copy cluster_secret.key from the working computer's data folder."})
+                              "detail": "The two computers hold different shared keys, so they will not sync each other. Normally PASADA pairs computers by itself: turn PASADA off and on again on BOTH computers (with this one alone at first if the office has several) and they will re-introduce themselves within a minute. If that fails, Admin Console > Technical > Manual key recovery."})
             elif response.status_code == 200:
                 try:
                     payload = response.json()
@@ -2138,10 +2208,10 @@ def sync_diagnostics(current_user: User = Depends(get_current_user)):
                 except Exception:
                     counts = None
                 entry.update({"ok": True, "reason": None, "counts": counts,
-                              "detail": f"Reachable, signature accepted{(' — shared ' + str(counts['users']) + ' account(s), ' + str(counts['records']) + ' record(s)') if counts else '.'}"})
+                              "detail": f"Connected and trusted{(' — sharing ' + str(counts['users']) + ' account(s) and ' + str(counts['records']) + ' record(s)') if counts else '.'}"})
             else:
                 entry.update({"ok": False, "reason": f"http-{response.status_code}",
-                              "detail": f"The other computer answered with HTTP {response.status_code}."})
+                              "detail": f"The other computer answered with an unexpected error (code {response.status_code})."})
         results.append(entry)
     db = SessionLocal()
     try:
@@ -2197,7 +2267,12 @@ def _verify_pull_signature(ts: str, nonce: str, signature: str) -> bool:
     # cluster secret no candidate ever matches.
     for peer in (get_local_ip(), "127.0.0.1", "localhost", "::1"):
         body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
-        expected = hmac.new(CLUSTER_SECRET.encode('utf-8'), body, hashlib.sha256).hexdigest()
+        # LIVE SECRET, not an import-time copy: auto-pairing adoption (and
+        # admin-key rotation) rewrites sync_engine.CLUSTER_SECRET in place,
+        # while a `from sync_engine import CLUSTER_SECRET` binding keeps the
+        # value from module import — pulls signed with the adopted cluster
+        # key would be refused until this process restarted.
+        expected = hmac.new(sync_engine.CLUSTER_SECRET.encode('utf-8'), body, hashlib.sha256).hexdigest()
         if hmac.compare_digest(expected, signature.lower()):
             break
     else:
@@ -2223,7 +2298,13 @@ def sync_pull(since: str, request: Request, db: Session = Depends(get_db)):
     if not _verify_pull_signature(ts, nonce, signature):
         raise HTTPException(status_code=403, detail="Unauthorized cluster request")
         
-    target_time = datetime.fromisoformat(since).replace(tzinfo=None)
+    try:
+        target_time = datetime.fromisoformat(since).replace(tzinfo=None)
+    except ValueError:
+        # An unparseable watermark used to surface as a raw 500 traceback on
+        # this side and a generic miscount on the pull side. Fail honest.
+        raise HTTPException(status_code=422, detail=
+            '"since" must be an ISO timestamp, e.g. since=2000-01-01T00:00:00.')
     records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
     users = db.query(User).all()
     
@@ -4111,8 +4192,14 @@ def _log_bind_time(host, port):
 
 if __name__ == "__main__":
     try:
-        force_log("Scanning for zombie processes on Port 43888...")
-        kill_zombie_port(43888)
+        # SECOND INSTANCE (multi-screen lab / two-machine test harness): the
+        # zombie scan would kill the first instance listening on 43888 under
+        # a different loopback IP. Skip it on purpose when PASADA_SKIP_ZOMBIE_KILL=1.
+        if os.environ.get("PASADA_SKIP_ZOMBIE_KILL", "") != "1":
+            force_log("Scanning for zombie processes on Port 43888...")
+            kill_zombie_port(43888)
+        else:
+            force_log("PASADA_SKIP_ZOMBIE_KILL=1: skipping zombie scan on Port 43888.")
         force_log("Port 43888 is clear. Starting Uvicorn server...")
         # DEPLOYMENT: the API listens on the LAN so the sync engine on other
         # office computers can pull records from this machine. Every pull

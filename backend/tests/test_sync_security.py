@@ -140,3 +140,41 @@ def test_pull_signature_rejects_garbage():
     assert _verify_pull_signature("1", "n", "sig") is False
     assert _verify_pull_signature("not-a-number", "n", "sig") is False
     assert _verify_pull_signature("", "", "") is False
+
+
+def test_pull_endpoint_422_on_malformed_since():
+    # The pull watermark is an ISO timestamp. A malformed one used to
+    # surface as a raw 500 traceback on the serving machine and cost the
+    # caller a generic "pull failed"; it must fail honestly as a 422.
+    import main
+    from unittest.mock import patch, MagicMock
+    from fastapi import HTTPException
+    import pytest
+    request = MagicMock()
+    request.headers = {
+        "x-cluster-timestamp": str(int(time.time())),
+        "x-cluster-nonce": "malformed-since-nonce-1",
+        "x-cluster-signature": "x",
+    }
+    with patch("main._verify_pull_signature", return_value=True):
+        with pytest.raises(HTTPException) as ei:
+            main.sync_pull(since="not-a-date", request=request, db=MagicMock())
+    assert ei.value.status_code == 422
+
+
+def test_pull_endpoint_accepts_valid_since():
+    # The companion: a well-formed watermark parses instead of erroring,
+    # so the 422 above can only ever mean genuinely bad input.
+    import main
+    from unittest.mock import patch, MagicMock
+    request = MagicMock()
+    request.headers = {
+        "x-cluster-timestamp": str(int(time.time())),
+        "x-cluster-nonce": "valid-since-nonce-1",
+        "x-cluster-signature": "x",
+    }
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = []
+    with patch("main._verify_pull_signature", return_value=True):
+        body = main.sync_pull(since="2000-01-01T00:00:00", request=request, db=db)
+    assert "records" in body and "users" in body
