@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield, X, CheckCircle2, XCircle } from "lucide-react";
+import { ArchiveX, Search, AlertTriangle, Loader2, Download, Eye, FileText, Printer, ArrowUpDown, Filter, Shield, X, CheckCircle2, XCircle, Undo2, ChevronUp, ChevronDown } from "lucide-react";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +51,19 @@ export default function InactiveLines() {
     const [isViewOpen, setIsViewOpen] = useState(false);
     const [viewMember, setViewMember] = useState<FranchiseRecord | null>(null);
 
+    // DELETED RECORDS (trash bin). Every record deleted here lands in
+    // /api/operators/deleted and stays recoverable until restored. This UI is
+    // what used to be missing: the backend could restore records and even
+    // file restore tickets, but no screen exposed either path, so a record
+    // deleted yesterday (after closing the app) was unreachable from the UI.
+    const [deletedRecords, setDeletedRecords] = useState<FranchiseRecord[]>([]);
+    const [deletedOpen, setDeletedOpen] = useState(false);
+    const [deletedLoading, setDeletedLoading] = useState(false);
+    const [deletedLoaded, setDeletedLoaded] = useState(false);
+    const [restoringId, setRestoringId] = useState<string | null>(null);
+    const [filingRestore, setFilingRestore] = useState(false);
+    const [isAdmin, setIsAdmin] = useState(false);
+
     const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
@@ -87,6 +101,10 @@ export default function InactiveLines() {
     useEffect(() => {
         setCurrentPage(1);
     }, [search, routeFilter, sortBy]);
+
+    useEffect(() => {
+        setIsAdmin((localStorage.getItem("pasada_role") || "") === "Admin");
+    }, []);
 
     const uniqueRoutes = Array.from(new Set(records.map(r => r.route))).sort();
 
@@ -144,6 +162,111 @@ export default function InactiveLines() {
     const handleOpenView = (member: FranchiseRecord) => {
         setViewMember(member);
         setIsViewOpen(true);
+    };
+
+    const fetchDeleted = useCallback(async () => {
+        setDeletedLoading(true);
+        try {
+            const res = await fetchWithAuth(`${API_URL}/api/operators/deleted`);
+            if (res.ok) setDeletedRecords(await res.json());
+            else showToast("Failed to load deleted records.", "error");
+        } catch {
+            showToast("Network error while loading deleted records.", "error");
+        } finally {
+            setDeletedLoading(false);
+            setDeletedLoaded(true);
+        }
+    }, [showToast]);
+
+    const toggleDeleted = () => {
+        const next = !deletedOpen;
+        setDeletedOpen(next);
+        // Fetch the trash bin the first time it is shown, not on every page
+        // load — the list is usually empty and the extra request is noise.
+        if (next && !deletedLoaded) fetchDeleted();
+    };
+
+    const handleRestoreOne = async (record: FranchiseRecord) => {
+        setRestoringId(record.id);
+        try {
+            const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(record.id)}/restore`, { method: "POST" });
+            if (res.ok) {
+                showToast(`Operator ${record.sbn_no} restored. It is back on its TODA page.`, "success");
+                await Promise.all([fetchDeleted(), fetchInactive()]);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                showToast(err.detail || "Failed to restore this record.", "error");
+            }
+        } catch {
+            showToast("Network error while trying to restore.", "error");
+        } finally {
+            setRestoringId(null);
+        }
+    };
+
+    // Bring back EVERY deleted record. Single-key rule (2026-10-14): the Admin
+    // executes directly and types a written reason that goes into the audit
+    // log; a Clerk files a restore ticket that waits on the Admin page.
+    // Both roles hit the same /api/restore-records/ticket endpoint — the
+    // backend branches on the role and enforces the reason requirement.
+    const handleRequestRestoreAll = async () => {
+        const role = localStorage.getItem("pasada_role") || "";
+        if (role === "Admin") {
+            const typed = await confirmDialog({
+                mode: "prompt",
+                title: "Reason required",
+                message: `This restores ALL ${deletedRecords.length} deleted record(s) right away, and the reason is written into the audit log.`,
+                fieldNote: "Shown in Activity History next to the change.",
+            });
+            if (typeof typed !== "string" || !typed.trim()) return;
+            setFilingRestore(true);
+            try {
+                const res = await fetchWithAuth(`${API_URL}/api/restore-records/ticket`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ all: true, override_reason: typed.trim() }),
+                    cache: "no-store",
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast(data.message || "Restored all deleted records.", "success");
+                    await Promise.all([fetchDeleted(), fetchInactive()]);
+                } else {
+                    showToast(data.detail || "Failed to restore the records.", "error");
+                }
+            } catch {
+                showToast("Network error while restoring.", "error");
+            } finally {
+                setFilingRestore(false);
+            }
+            return;
+        }
+        const ok = await confirmDialog({
+            mode: "confirm",
+            title: "File restore request",
+            message: `Sends the Admin a request to bring back ALL ${deletedRecords.length} deleted record(s). Nothing is restored until the Admin approves it on the Admin page.`,
+            confirmLabel: "File the request",
+        });
+        if (!ok) return;
+        setFilingRestore(true);
+        try {
+            const res = await fetchWithAuth(`${API_URL}/api/restore-records/ticket`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ all: true }),
+                cache: "no-store",
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok) {
+                showToast(data.message || "Restore request sent to the Admin for approval.", "success");
+            } else {
+                showToast(data.detail || "Failed to file the restore request.", "error");
+            }
+        } catch {
+            showToast("Network error while filing the restore request.", "error");
+        } finally {
+            setFilingRestore(false);
+        }
     };
 
     const executeExport = async () => {
@@ -491,6 +614,84 @@ export default function InactiveLines() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+
+            {/* DELETED RECORDS (TRASH BIN) — recover accidental deletions.
+                The record banks live on /api/operators/deleted; the Admin
+                restores everything directly with a written reason, a Clerk
+                files one restore ticket that waits on the Admin page. */}
+            <div className="bg-card shadow-sm border border-border/60 rounded-2xl overflow-hidden">
+                <div className="flex flex-wrap items-center gap-2 p-4 border-b border-border/60 bg-muted/10">
+                    <ArchiveX className="h-5 w-5 text-muted-foreground shrink-0" />
+                    <h2 className="text-base font-black text-foreground">Deleted records</h2>
+                    <Badge variant="outline" className="font-bold">{deletedRecords.length} recoverable</Badge>
+                    <div className="ml-auto flex items-center gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleRequestRestoreAll}
+                            disabled={filingRestore || deletedLoading || deletedRecords.length === 0}
+                            className="h-9 px-3 font-bold text-blue-600 border-border/60 shadow-sm"
+                            data-tip={isAdmin
+                                ? "Brings back every deleted record right away. You must type a reason that goes into the audit log."
+                                : "Sends the Admin a request to bring back every deleted record. Nothing happens until it is approved."}
+                        >
+                            {filingRestore ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Undo2 className="mr-1 h-4 w-4" />}
+                            {isAdmin ? "Restore all…" : "File restore request"}
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={toggleDeleted} className="h-9 px-3 font-bold border-border/60">
+                            {deletedOpen ? "Hide" : "Show"}
+                            {deletedOpen ? <ChevronUp className="ml-1 h-4 w-4" /> : <ChevronDown className="ml-1 h-4 w-4" />}
+                        </Button>
+                    </div>
+                </div>
+                {deletedOpen && (
+                    deletedLoading ? (
+                        <div className="flex items-center justify-center py-10 text-muted-foreground font-medium">
+                            <Loader2 className="h-5 w-5 mr-2 animate-spin" /> Loading deleted records…
+                        </div>
+                    ) : deletedRecords.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                            <CheckCircle2 className="h-8 w-8 mb-2 text-emerald-500 opacity-60" />
+                            <span className="font-medium">Nothing is in the trash bin. Deleted operators will appear here.</span>
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <Table>
+                                <TableHeader className="bg-muted/20 border-b border-border/60">
+                                    <TableRow className="hover:bg-transparent">
+                                        <TableHead className="font-bold text-muted-foreground w-[160px] pl-6 h-12">SBN No.</TableHead>
+                                        <TableHead className="font-bold text-muted-foreground">Operator Name</TableHead>
+                                        <TableHead className="font-bold text-muted-foreground">TODA Line</TableHead>
+                                        <TableHead className="text-center font-bold text-muted-foreground w-[140px]">Actions</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {deletedRecords.map((record) => (
+                                        <TableRow key={record.id} className="hover:bg-muted/30 transition-colors">
+                                            <TableCell className="font-mono font-bold pl-6 text-[13px]">{record.sbn_no}</TableCell>
+                                            <TableCell className="font-bold">{record.operator_name || "VACANT SLOT"}</TableCell>
+                                            <TableCell><Badge variant="secondary" className="font-bold">{record.route}</Badge></TableCell>
+                                            <TableCell className="text-center">
+                                                <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() => handleRestoreOne(record)}
+                                                    disabled={restoringId === record.id}
+                                                    className="h-8 px-3 font-bold text-blue-600 border-border/60"
+                                                    data-tip="Puts this operator record back on its TODA page immediately."
+                                                >
+                                                    {restoringId === record.id ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Undo2 className="mr-1 h-4 w-4" />}
+                                                    Restore
+                                                </Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        </div>
+                    )
+                )}
+            </div>
 
             <div className="bg-card shadow-sm border border-border/60 rounded-2xl overflow-hidden">
                 {renderPagination('top')}

@@ -13,8 +13,15 @@
 ; exactly one correct rule, even if the install path changed.
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; NOTE ON QUOTING: the strings below are delimited with single quotes, so
+  ; double quote characters inside them are literal text — exactly what netsh
+  ; needs around values that contain spaces (the rule names and the install
+  ; path). Do NOT mix in the NSIS $\" escape: combining it with literal quotes
+  ; produces doubled "" at the boundaries, and Windows' argument splitter then
+  ; breaks the name apart and netsh fails with no visible message.
   DetailPrint "Allowing PASADA in Windows Firewall (computers must reach each other)..."
-  nsExec::Exec 'netsh advfirewall firewall delete-rule name="$\"PASADA backend sync$\""'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="$\"PASADA backend sync$\"" description="$\"PASADA record sharing between office computers$\"" dir=in action=allow program="$\"$INSTDIR\backend\pasada-backend.exe$\"" enable=yes profile=any'
-  nsExec::Exec 'netsh advfirewall firewall add rule name="$\"PASADA backend sync (UDP)$\"" description="$\"PASADA discovery broadcasts$\"" dir=in action=allow protocol=UDP localport=54321 enable=yes profile=any'
+  nsExec::Exec 'netsh advfirewall firewall delete-rule name="PASADA backend sync"'
+  nsExec::Exec 'netsh advfirewall firewall delete-rule name="PASADA backend sync (UDP)"'
+  nsExec::Exec 'netsh advfirewall firewall add rule name="PASADA backend sync" description="PASADA record sharing between office computers" dir=in action=allow program="$INSTDIR\backend\pasada-backend.exe" enable=yes profile=any'
+  nsExec::Exec 'netsh advfirewall firewall add rule name="PASADA backend sync (UDP)" description="PASADA discovery broadcasts" dir=in action=allow protocol=UDP localport=54321 enable=yes profile=any'
 !macroend

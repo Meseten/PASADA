@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "PASADA",
-  "version": "0.82.9",
+  "version": "0.82.10",
   "identifier": "com.pasada.desktop",
   "build": {
     "frontendDist": "../out",
@@ -34,6 +34,9 @@
     "windows": {
       "nsis": {
         "installerHooks": "./installer-hooks.nsh"
+      },
+      "wix": {
+        "template": "./installer-msi/main.wxs"
       }
     },
     "createUpdaterArtifacts": true,

@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.82.9"
+version = "0.82.10"
 description = "PASADA Municipal Franchise Registry System"
 authors = ["PASADA"]
 license = "MIT"
