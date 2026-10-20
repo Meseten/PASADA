@@ -99,7 +99,12 @@ def _send_announcement(payload: bytes, udp_socket=None):
             if udp_socket is not None:
                 udp_socket.sendto(payload, dest)
             else:
+                # Fallback one-off socket: a broadcast destination raises
+                # EACCES to a socket created without SO_BROADCAST (on Linux
+                # every subnet-broadcast destination does), and a swallowed
+                # EACCES here used to make this whole path a silent no-op.
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 try:
                     sock.sendto(payload, dest)
                 finally:
@@ -660,7 +665,10 @@ def parse_nudge_payload(data: bytes, local_ip: str, now: float = None):
 
 def broadcast_nudge():
     """Send one signed wake-up datagram. Best effort: a failed broadcast only
-    costs seconds, the next pull cycle catches up anyway."""
+    costs seconds, the next pull cycle catches up anyway. (udp_socket is
+    preset to None so even a socket-construction failure cannot make the
+    finally block raise a NameError back into the caller's API route.)"""
+    udp_socket = None
     try:
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

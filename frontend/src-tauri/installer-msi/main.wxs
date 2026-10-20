@@ -387,47 +387,39 @@
           never told about, so a machine installed with the .msi used to sit on
           "Connected computers: none yet" forever. The -setup.exe (NSIS)
           installer adds the same two rules via installer-hooks.nsh; this chain
-          keeps the .msi equivalent: four deferred netsh commands running as
-          LocalSystem (Impersonate=no), each fed through CustomActionData so
-          [INSTALLDIR] is resolved on the real target machine. Rules are
-          deleted first so reinstalls and updates never accumulate duplicates.
-          Return="ignore": if netsh fails for any reason the install itself
-          must still complete.
-        -->
-        <CustomAction Id="PasadaFwSetDelProg" Property="PasadaFwDelProg"
-          Value="[System64Folder]netsh.exe advfirewall firewall delete-rule name=&quot;PASADA backend sync&quot;"
-          Execute="immediate" />
-        <CustomAction Id="PasadaFwSetDelUdp" Property="PasadaFwDelUdp"
-          Value="[System64Folder]netsh.exe advfirewall firewall delete-rule name=&quot;PASADA backend sync (UDP)&quot;"
-          Execute="immediate" />
-        <CustomAction Id="PasadaFwSetAddProg" Property="PasadaFwAddProg"
-          Value="[System64Folder]netsh.exe advfirewall firewall add rule name=&quot;PASADA backend sync&quot; description=&quot;PASADA record sharing between office computers&quot; dir=in action=allow program=&quot;[INSTALLDIR]backend\pasada-backend.exe&quot; enable=yes profile=any"
-          Execute="immediate" />
-        <CustomAction Id="PasadaFwSetAddUdp" Property="PasadaFwAddUdp"
-          Value="[System64Folder]netsh.exe advfirewall firewall add rule name=&quot;PASADA backend sync (UDP)&quot; description=&quot;PASADA discovery broadcasts&quot; dir=in action=allow protocol=UDP localport=54321 enable=yes profile=any"
-          Execute="immediate" />
+          is the .msi equivalent.
 
-        <!-- Type 50: run the EXE whose command line is stored in the property
-             named by the CA id itself — in deferred context that property is
-             the CustomActionData filled in by the matching Set... action. -->
-        <CustomAction Id="PasadaFwDelProg" Impersonate="no" Execute="deferred" Return="ignore"
-          Property="PasadaFwDelProg" />
-        <CustomAction Id="PasadaFwDelUdp" Impersonate="no" Execute="deferred" Return="ignore"
-          Property="PasadaFwDelUdp" />
-        <CustomAction Id="PasadaFwAddProg" Impersonate="no" Execute="deferred" Return="ignore"
-          Property="PasadaFwAddProg" />
-        <CustomAction Id="PasadaFwAddUdp" Impersonate="no" Execute="deferred" Return="ignore"
-          Property="PasadaFwAddUdp" />
+          IMPLEMENTATION NOTE (2026-10-20): the first attempt used deferred
+          CustomActions with a bare Property= attribute; WiX 3.14 rejects that
+          markup with CNDL0044, and the tauri CLI logs candle's error only at
+          debug level, so CI just printed "failed to run candle.exe" with no
+          visible reason. The netsh commands therefore run as IMMEDIATE
+          ExeCommand actions scheduled AFTER InstallFiles: immediate actions
+          see the FINAL [INSTALLDIR] of the real target machine, so no
+          CustomActionData relay is needed, and being scheduled inside the
+          install transaction the elevation is already held for the rule. Each
+          rule is deleted before being added so reinstalls and updates never
+          accumulate duplicates. Return="ignore" keeps the install itself
+          alive even if netsh fails for any reason.
+        -->
+        <CustomAction Id="PasadaFwDelProg"
+          Directory="INSTALLDIR" Execute="immediate" Return="ignore"
+          ExeCommand="[System64Folder]netsh.exe advfirewall firewall delete-rule name=&quot;PASADA backend sync&quot;" />
+        <CustomAction Id="PasadaFwDelUdp"
+          Directory="INSTALLDIR" Execute="immediate" Return="ignore"
+          ExeCommand="[System64Folder]netsh.exe advfirewall firewall delete-rule name=&quot;PASADA backend sync (UDP)&quot;" />
+        <CustomAction Id="PasadaFwAddProg"
+          Directory="INSTALLDIR" Execute="immediate" Return="ignore"
+          ExeCommand="[System64Folder]netsh.exe advfirewall firewall add rule name=&quot;PASADA backend sync&quot; description=&quot;PASADA record sharing between office computers&quot; dir=in action=allow program=&quot;[INSTALLDIR]backend\pasada-backend.exe&quot; enable=yes profile=any" />
+        <CustomAction Id="PasadaFwAddUdp"
+          Directory="INSTALLDIR" Execute="immediate" Return="ignore"
+          ExeCommand="[System64Folder]netsh.exe advfirewall firewall add rule name=&quot;PASADA backend sync (UDP)&quot; description=&quot;PASADA discovery broadcasts&quot; dir=in action=allow protocol=UDP localport=54321 enable=yes profile=any" />
 
         <InstallExecuteSequence>
-          <Custom Action="PasadaFwSetDelProg" After="InstallFiles">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwDelProg" After="PasadaFwSetDelProg">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwSetDelUdp" After="PasadaFwDelProg">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwDelUdp" After="PasadaFwSetDelUdp">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwSetAddProg" After="PasadaFwDelUdp">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwAddProg" After="PasadaFwSetAddProg">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwSetAddUdp" After="PasadaFwAddProg">NOT REMOVE="ALL"</Custom>
-          <Custom Action="PasadaFwAddUdp" After="PasadaFwSetAddUdp">NOT REMOVE="ALL"</Custom>
+          <Custom Action="PasadaFwDelProg" After="InstallFiles">NOT (REMOVE="ALL")</Custom>
+          <Custom Action="PasadaFwDelUdp" After="PasadaFwDelProg">NOT (REMOVE="ALL")</Custom>
+          <Custom Action="PasadaFwAddProg" After="PasadaFwDelUdp">NOT (REMOVE="ALL")</Custom>
+          <Custom Action="PasadaFwAddUdp" After="PasadaFwAddProg">NOT (REMOVE="ALL")</Custom>
         </InstallExecuteSequence>
     </Product>
 </Wix>

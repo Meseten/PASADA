@@ -133,7 +133,11 @@ jobs:
         run: |
           cd frontend
           npm install
-          npm run tauri build
+          # --verbose: tauri-bundler logs candle/light output at debug level
+          # only. Without this flag a WiX compile error surfaces as the bare
+          # message "failed to run ...\candle.exe" with the real CNDL error
+          # swallowed (cost the v0.82.10 release build its full diagnosis).
+          npm run tauri build -- --verbose
 
       - name: Prepare release assets
         shell: bash
