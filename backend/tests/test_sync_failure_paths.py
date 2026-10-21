@@ -154,13 +154,17 @@ def test_failures_are_pruned_and_reappearance_works(memory_office, monkeypatch):
     listener_thread.start()
     time.sleep(0.3)  # let the listener bind before the first datagram
     try:
+        # The listener binds the engine's CONFIGURED port (PASADA_SYNC_PORT
+        # env, default 54321) — never a hardcoded copy of the constant here.
+        bind_ip, _, bind_port = (os.environ.get("PASADA_SYNC_BIND", "")).partition(":")
+        listen_port = int(bind_port) if bind_port else sync_engine.SYNC_PORT
         for _ in range(40):
             if "192.168.50.20" in sync_engine.PEERS:
                 break
             sender = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
             sender.sendto(
                 sync_engine.build_discovery_payload("192.168.50.20"),
-                ("127.0.0.1", sync_engine.BROADCAST_PORT))
+                (bind_ip or "127.0.0.1", listen_port))
             sender.close()
             time.sleep(0.1)
     finally:

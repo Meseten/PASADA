@@ -21,6 +21,26 @@ def force_log(msg):
     except OSError:
         pass
 
+# STALE-PACKET VISIBILITY: every signed datagram carries a timestamp and one
+# older than BROADCAST_MAX_AGE_SECONDS is refused. A computer whose clock is
+# MORE THAN FIVE MINUTES off from the rest of the office used to fail this
+# check on every packet — indistinguishable on the log from total silence.
+# One crash-log line per packet KIND per 60 seconds says so, with the age.
+_stale_drop_throttle = {}
+
+
+def _log_stale_packet(kind: str, peer_ip: str, age: float):
+    """Throttled: once per minute per kind, never a flood."""
+    now = time.time()
+    last = _stale_drop_throttle.get(kind, 0)
+    if now - last < 60 and last:
+        return
+    _stale_drop_throttle[kind] = now
+    force_log(f"[SYNC-LISTEN] {kind} datagram from {peer_ip} refused as old: "
+              f"timestamp is {int(age)}s off (limit {BROADCAST_MAX_AGE_SECONDS}s). "
+              "A computer clock off by more than 5 minutes drops every packet — "
+              "check this computer's date/time settings.")
+
 BROADCAST_PORT = 54321
 API_PORT = int(os.environ.get("PASADA_API_PORT", "43888"))
 
@@ -261,6 +281,7 @@ def parse_offer_payload(data: bytes, local_ip: str, now: float = None):
                    asym_padding.PKCS1v15(), hashes.SHA256())
         age = abs(now - float(timestamp))
         if age > BROADCAST_MAX_AGE_SECONDS:
+            _log_stale_packet("pairing offer", peer_ip, age)
             return None
         if not _broadcast_nonce_seen(nonce, now):
             return None
@@ -318,7 +339,9 @@ def parse_join_challenge(data: bytes, local_ip: str, now: float = None):
         if len(parts) != 4 or parts[0] != "PASADA_JOINBLOB":
             return None
         _, timestamp, nonce, envelope = parts
-        if abs(now - float(timestamp)) > BROADCAST_MAX_AGE_SECONDS:
+        outer_age = abs(now - float(timestamp))
+        if outer_age > BROADCAST_MAX_AGE_SECONDS:
+            _log_stale_packet("pairing challenge", "?", outer_age)
             return None
         wrapped_b64, aes_nonce_b64, ct_b64 = envelope.split(".")
         aes_key = _PAIRING_PRIV.decrypt(
@@ -335,7 +358,11 @@ def parse_join_challenge(data: bytes, local_ip: str, now: float = None):
         _, _, joiner_ip, jts, jnonce, marker, joiner_pub_b64 = jparts
         if marker != "SECRET-REQUEST":
             return None
-        if abs(now - float(jts)) > BROADCAST_MAX_AGE_SECONDS or joiner_ip == local_ip:
+        inner_age = abs(now - float(jts))
+        if inner_age > BROADCAST_MAX_AGE_SECONDS:
+            _log_stale_packet("pairing challenge", joiner_ip, inner_age)
+            return None
+        if joiner_ip == local_ip:
             return None
         joiner_pub = serialization.load_der_public_key(base64.b64decode(joiner_pub_b64))
         return joiner_ip, joiner_pub.public_bytes(
@@ -393,6 +420,26 @@ PAIRING_OPTOUT_PATH = os.path.join(BASE_DIR, "auto_pairing_off.flag")
 
 def auto_pairing_enabled() -> bool:
     return not os.path.exists(PAIRING_OPTOUT_PATH)
+
+
+def _peers_all_failing() -> bool:
+    """True when the peer registry is de facto DEAD: empty (nothing paired
+    yet) or every registered peer at/over the consecutive-failure drop
+    threshold (no pull has succeeded in a long while).
+
+    The pairing gates use this instead of a bare `not PEERS`: a machine
+    holding one stale/ghost peer entry used to refuse challenges and replies
+    indefinitely, even though every pull to that peer was failing — the
+    registry only really emptied PEER_MAX_CONSECUTIVE_FAILURES cycles (~200s)
+    later. A formed cluster with at least one WORKING peer still stays
+    protected from re-keying exactly as before."""
+    if not PEERS:
+        return True
+    with _peer_failures_lock:
+        return all(
+            _peer_failures.get(ip, 0) >= PEER_MAX_CONSECUTIVE_FAILURES
+            for ip in PEERS
+        )
 
 # Rate limit: at most one SECRET released to a given joiner per minute, and
 # adopt at most one reply attempt per offerer per minute, so a hostile LAN
@@ -482,6 +529,7 @@ def parse_discovery_payload(data: bytes, local_ip: str, now: float = None):
             return None
         age = abs(now - float(timestamp))
         if age > BROADCAST_MAX_AGE_SECONDS:
+            _log_stale_packet("discovery", peer_ip, age)
             return None
         if not _broadcast_nonce_seen(nonce, now):
             return None
@@ -654,6 +702,7 @@ def parse_nudge_payload(data: bytes, local_ip: str, now: float = None):
             return None
         age = abs(now - float(timestamp))
         if age > BROADCAST_MAX_AGE_SECONDS:
+            _log_stale_packet("nudge", peer_ip, age)
             return None
         if not _broadcast_nonce_seen(nonce, now):
             return None
@@ -693,7 +742,11 @@ def get_local_ip():
         s.connect(('10.255.255.255', 1))
         IP = s.getsockname()[0]
     except Exception:
-        IP = '127.0.0.1'
+        # No default route for the trick: fall back to any real LAN address
+        # this machine holds before stranding itself on loopback, where it
+        # would sign every datagram with an IP no office computer can reach.
+        lan = _local_ipv4_addresses()
+        IP = lan[0] if lan else '127.0.0.1'
     finally:
         s.close()
     return IP
@@ -728,17 +781,53 @@ def _send_unicast(payload: bytes, dest_ip: str):
     NIC it was encrypted for."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.sendto(payload, (dest_ip, BROADCAST_PORT))
+        # The PEER's discovery/offer port, not the hardcoded constant: in a
+        # lab (PASADA_SYNC_PORT override) or any future port change the
+        # reply must land where the other instance is actually listening.
+        sock.sendto(payload, (dest_ip, SYNC_PORT))
     except OSError:
         pass
     finally:
         sock.close()
 
+# PAIRING SALVO SIZES: UDP unicast frames are silently droppable (office
+# Wi-Fi, AP isolation, driver rates), and one lost handshake datagram used to
+# delay pairing by a whole throttle minute. The challenge fires a short
+# salvo; the secret-bearing reply fires a longer one because it is the LAST
+# chance — a lost reply leaves the joiner with no key at all.
+_CHALLENGE_ATTEMPTS = 2
+_CHALLENGE_GAP_SECONDS = 2.0
+_REPLY_ATTEMPTS = 3
+_REPLY_GAP_SECONDS = 2.0
+
+# [PASADA-SYNC] EVENT LOG: pairing packets are invisible by design — nothing
+# releases key material — so a stuck handshake must be diagnosable from the
+# crash log text alone. Each event kind is logged at most once per 60 s per
+# peer/host key, so a busy listener cannot flood the file.
+_sync_log_throttle = {}
+
+
+def _log_sync_throttled(key: str, msg: str):
+    now = time.time()
+    last = _sync_log_throttle.get(key, 0)
+    if now - last < 60 and last:
+        return
+    _sync_log_throttle[key] = now
+    force_log(f"[PASADA-SYNC] {msg}")
+
 def _handle_offer(peer_ip: str, peer_pub_der: bytes, name: str, local_ip: str):
-    """Joiner side of auto-pairing: this machine has no cluster peers yet, so
-    a heard offer is our path in. Send ONE throttled encrypted challenge."""
-    if PEERS or not auto_pairing_enabled():
-        return  # already paired, or pairing is off: offers are noise
+    """Joiner side of auto-pairing: this machine has no WORKING cluster
+    peers, so a heard offer is our path in. Answer with ONE throttled salvo
+    of encrypted challenges. (A registry of entirely failing peers no
+    longer blinds us: see _peers_all_failing.)"""
+    if not auto_pairing_enabled() or not _peers_all_failing():
+        reason = ("auto-pairing is switched OFF on this computer"
+                  if not auto_pairing_enabled() else
+                  "this computer already has working peer(s); a formed cluster "
+                  "never re-keys itself from a stranger's offer")
+        _log_sync_throttled(f"offer-ignore:{peer_ip}",
+                            f"offer from {name or peer_ip} IGNORED ({reason}).")
+        return
     now = time.time()
     with _throttle_lock:
         last = _challenge_throttle.get(peer_ip, 0)
@@ -747,8 +836,17 @@ def _handle_offer(peer_ip: str, peer_pub_der: bytes, name: str, local_ip: str):
         _challenge_throttle[peer_ip] = now
     payload, _nonce = build_join_challenge(peer_pub_der, local_ip)
     if payload:
-        _send_unicast(payload, peer_ip)
+        for attempt in range(_CHALLENGE_ATTEMPTS):
+            _send_unicast(payload, peer_ip)
+            if attempt + 1 < _CHALLENGE_ATTEMPTS:
+                # Brief gap so the retransmits cover transient loss without
+                # looking like a flood to any packet logger.
+                time.sleep(_CHALLENGE_GAP_SECONDS)
         record_auto_pair_event(f"Asked {name or peer_ip} to share the office cluster key.")
+        _log_sync_throttled(f"ask:{peer_ip}",
+                            f"offer from {name or peer_ip} HEARD: pairing challenge sent "
+                            f"({_CHALLENGE_ATTEMPTS} datagram(s)) to {peer_ip}. "
+                            "We re-ask every minute until we hold the cluster key.")
 
 def _maybe_send_secret(joiner_ip: str, joiner_pub_der: bytes, name: str, local_ip: str):
     """Offerer side: hand the cluster secret to a machine we have NOT yet
@@ -757,16 +855,30 @@ def _maybe_send_secret(joiner_ip: str, joiner_pub_der: bytes, name: str, local_i
     encrypted to. A joiner already in PEERS needs no secret — it has one."""
     if joiner_ip in PEERS or not auto_pairing_enabled():
         return
+    reply_throttle_title = f"cluster key not handed to {joiner_ip}"  # pragma: no cover (naming only)
     now = time.time()
     with _throttle_lock:
         last = _reply_throttle.get(joiner_ip, 0)
         if now - last < 60:
             return
         _reply_throttle[joiner_ip] = now
-    reply = build_join_reply(b"PASADA_SECRET:" + CLUSTER_SECRET.encode('utf-8'), joiner_pub_der)
-    if reply:
-        _send_unicast(reply, joiner_ip)
+    sent_any = False
+    for attempt in range(_REPLY_ATTEMPTS):
+        # A FRESH envelope each attempt: new AES key and nonce, so a replay
+        # of one captured envelope is never useful and an attacker sees only
+        # more ciphertext of the SAME secret to the SAME key.
+        reply = build_join_reply(b"PASADA_SECRET:" + CLUSTER_SECRET.encode('utf-8'), joiner_pub_der)
+        if reply:
+            sent_any = True
+            _send_unicast(reply, joiner_ip)
+            if attempt + 1 < _REPLY_ATTEMPTS:
+                time.sleep(_REPLY_GAP_SECONDS)
+    if sent_any:
         record_auto_pair_event(f"Shared the office cluster key with {name or joiner_ip}.")
+        _log_sync_throttled(f"share:{joiner_ip}",
+                            f"cluster key shared with {name or joiner_ip}: {_REPLY_ATTEMPTS} encrypted "
+                            "envelope(s) sent. UDP can drop one; the joiner adopts only when "
+                            "an envelope opens with ITS private half.")
 
 def listen_for_peers():
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -795,15 +907,19 @@ def listen_for_peers():
                     opened = parse_join_challenge(data, local_ip)
                     if opened:
                         joiner_ip, joiner_pub, body = opened
+                        _log_sync_throttled(f"challenge:{joiner_ip}",
+                                            f"pairing challenge received from {joiner_ip} "
+                                            "(it wants the office cluster key).")
                         # Name lookup: the joiner also broadcast its discovery
                         # with its friendly name; fall back to the IP.
                         _maybe_send_secret(joiner_ip, joiner_pub,
                                            PEER_NAMES.get(joiner_ip), local_ip)
                 continue
             if data.startswith(b"PASADA_REPLYBLOB:"):
-                if auto_pairing_enabled() and not PEERS:
-                    # Only a machine that still has no key-family peers may
-                    # adopt; a formed cluster ignores replies outright.
+                if auto_pairing_enabled() and _peers_all_failing():
+                    # Only a machine with no WORKING key-family peers may
+                    # adopt; a formed, healthy cluster ignores replies
+                    # outright (see _peers_all_failing for the exact gate).
                     sender = addr[0] if addr else None
                     plaintext = parse_join_reply(data)
                     if plaintext and plaintext.startswith(b"PASADA_SECRET:"):
@@ -812,6 +928,13 @@ def listen_for_peers():
                             _adopt_cluster_secret(candidate.decode('utf-8'))
                             record_auto_pair_event(
                                 f"Joined the office cluster (key received from {PEER_NAMES.get(sender) or sender}).")
+                            # SELF-DIAGNOSIS: the one moment every machine
+                            # fingerprint LEAPS — say the new one loudly so
+                            # two crash logs can be compared instantly.
+                            force_log(
+                                f"[PASADA-SYNC] cluster key ADOPTED from "
+                                f"{PEER_NAMES.get(sender) or sender}; this machine now "
+                                f"holds fingerprint {cluster_secret_fingerprint()}.")
                 continue
             # NUDGE FIRST: it shares the port with discovery and a nudge from
             # a peer we have not heard from yet must still wake the pull loop
@@ -977,6 +1100,14 @@ def sync_with_peers():
                         with _peer_failures_lock:
                             _peer_failures.pop(peer, None)
                         _mark_peer_seen(peer)
+                        # PER-PEER OUTCOME: the log should say when a pull
+                        # WORKED, not only when it burned. Throttled to one
+                        # line per peer per minute.
+                        _log_sync_throttled(
+                            f"pull-ok:{peer}",
+                            f"pull from {peer} OK: "
+                            f"{len(incoming_data.get('records', []))} record(s), "
+                            f"{len(incoming_data.get('users', []))} account(s) received (merged below).")
                         
                         # SYNC ACCOUNTS: the bcrypt password hash now ROAMS with
                         # the account, so a login created on one office computer
@@ -1048,6 +1179,12 @@ def sync_with_peers():
                             drop = True
                         else:
                             drop = False
+                    # EVERY failed pull is told to the log at most once per
+                    # minute per peer (the miss==1 line above carries the
+                    # first failure in full; this throttle covers the rest).
+                    _log_sync_throttled(
+                        f"pull-fail:{peer}",
+                        f"pull from {peer} FAILED (streak {misses}/{PEER_MAX_CONSECUTIVE_FAILURES}): {e}")
                     if drop:
                         force_log(
                             f"[SYNC] {peer} unreachable after "
@@ -1073,7 +1210,27 @@ def _mark_sync_cycle_finished():
     with _last_sync_check_lock:
         _last_sync_check = get_pht_now().isoformat()
 
+def _log_sync_startup():
+    """STARTUP VISIBILITY: one crash-log line that names everything two
+    logs need to be compared against each other — the chosen LAN IP, the
+    auto-pairing switch, pairing-crypto readiness, the machine's key
+    fingerprint, how many peers this copy already knows, and its ports."""
+    try:
+        crypto = ("available" if _has_working_pairing() else
+                  "MISSING — reinstall PASADA on this computer (its cryptography wheel failed to load)")
+        force_log(
+            f"[SYNC] startup: local ip {get_local_ip()}. "
+            f"auto-pairing {'ON' if auto_pairing_enabled() else 'OFF'}. "
+            f"pairing crypto {crypto}. "
+            f"cluster key fingerprint: {cluster_secret_fingerprint()}. "
+            f"known peers: {len(PEERS)}. "
+            f"sync port: {SYNC_PORT}, api port: {API_PORT}"
+        )
+    except Exception:
+        pass
+
 def start_lan_sync():
+    _log_sync_startup()
     threading.Thread(target=broadcast_presence, daemon=True).start()
     threading.Thread(target=listen_for_peers, daemon=True).start()
     threading.Thread(target=sync_with_peers, daemon=True).start()

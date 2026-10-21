@@ -2082,6 +2082,14 @@ def update_route_data(route_name: str, payload: RouteDataUpdate, current_user: U
 
 @app.get("/system/network")
 def get_network_status(current_user: User = Depends(get_current_user)):
+    # TRUST SEMANTICS (Settings > Connections): PEERS is NOT a
+    # "machines we heard anything from" list. An IP enters (and stays in)
+    # this registry ONLY through an HMAC-verified packet — a discovery or
+    # nudge broadcast signed with the SHARED CLUSTER SECRET, or a signed
+    # pull that this machine ACCEPTED. A merely broadcasting machine with a
+    # different key can never appear here, so every name/row the card shows
+    # is a machine that provably holds the office's cluster key. Pull
+    # health per row (miss streak, last heard) rides in peer_status below.
     # FRIENDLY NAMES: shown next to peer IPs in Settings > Connections. Names
     # are display only; trust is the HMAC cluster signature, so a lying name
     # grants nothing. First-seen wins per IP so one machine cannot flap its
@@ -2100,6 +2108,33 @@ def get_network_status(current_user: User = Depends(get_current_user)):
         # Per-peer visibility for the Connections card: name, last heard,
         # pull-miss streak, registry state.
         "peer_status": sync_engine.get_peer_status(),
+    }
+
+@app.get("/api/sync/diagnostics")
+def get_sync_diagnostics(current_user: User = Depends(get_current_user)):
+    """WHY-NOTHING-IS-SYNCING REPORT (Settings > Connections card).
+
+    The Connections card can look "alive" while nothing travels: a machine
+    missing the cryptography entitlement can never pair, a turned-off
+    auto-pairing switch hides the recovery path, an office whose computers
+    hold different cluster keys reads an empty peer list, and a clock more
+    than 5 minutes off refuses every packet. This snapshot names WHICH, so
+    the office sees the reason instead of a dead green light — and the
+    fingerprint lets two logs be compared without ever showing the key.
+    Read-only: the same JWT auth as every other system endpoint; trust is
+    never weakened here."""
+    return {
+        "crypto_ok": bool(sync_engine._CRYPTO_OK),
+        "pairing_enabled": sync_engine.auto_pairing_enabled(),
+        "secret_fingerprint": cluster_secret_fingerprint(),
+        "peers": sorted(PEERS),
+        "peer_status": sync_engine.get_peer_status(),
+        "auto_pair_events": sync_engine.get_auto_pair_events(),
+        "last_sync_check": get_last_sync_check(),
+        "sync_port": sync_engine.SYNC_PORT,
+        "api_port": sync_engine.API_PORT,
+        "local_ip": get_local_ip(),
+        "all_local_ips": sync_engine._local_ipv4_addresses(),
     }
 
 # --- CLUSTER KEY ROTATION / IMPORT (Connections card) ---
@@ -2265,7 +2300,13 @@ def _verify_pull_signature(ts: str, nonce: str, signature: str) -> bool:
     # this same machine (dev, tests). Trying the small candidate list here
     # keeps the wire format unchanged and still fails closed: without the
     # cluster secret no candidate ever matches.
-    for peer in (get_local_ip(), "127.0.0.1", "localhost", "::1"):
+    # MULTIPLE NETWORK CARDS: a PC can sit on the office LAN on more than
+    # one interface; a peer that reaches it through the second NIC signs that
+    # NIC's address. Every local IPv4 is a candidate; the trust check is
+    # unchanged (still the cluster secret over the addressed bytes).
+    candidate_ips = [get_local_ip(), "127.0.0.1", "localhost", "::1"]
+    candidate_ips += [ip for ip in sync_engine._local_ipv4_addresses() if ip not in candidate_ips]
+    for peer in candidate_ips:
         body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
         # LIVE SECRET, not an import-time copy: auto-pairing adoption (and
         # admin-key rotation) rewrites sync_engine.CLUSTER_SECRET in place,
@@ -2305,7 +2346,13 @@ def sync_pull(since: str, request: Request, db: Session = Depends(get_db)):
         # this side and a generic miscount on the pull side. Fail honest.
         raise HTTPException(status_code=422, detail=
             '"since" must be an ISO timestamp, e.g. since=2000-01-01T00:00:00.')
-    records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at > target_time).all()
+    # > vs >=: a record stamped EXACTLY at the watermark sits ON the tie and
+    # was silently skipped by the strict filter every cycle. Rows are merged
+    # idempotently under last-write-wins, so re-sending the boundary row is
+    # cheap and a tie is never lost. (User accounts have no timestamp gate at
+    # all — the whole accounts table rides every pull — so ties on users are
+    # impossible by construction.)
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.updated_at >= target_time).all()
     users = db.query(User).all()
     
     # PASSWORD ROAMING: the cluster is HMAC-trusted (same office LAN, shared

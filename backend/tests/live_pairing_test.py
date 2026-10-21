@@ -221,7 +221,11 @@ def main():
         # --- B's log shows the handshake markers from the engine
         crash = open(os.path.join(DIRS[1], "PASADA_CRASH_LOG.txt")).read()
         assert "AUTO-PAIR" in crash, "engine never logged an auto-pair event on B"
-        print("[PASS] B's engine log carries AUTO-PAIR join markers")
+        assert "[PASADA-SYNC]" in crash, "no [PASADA-SYNC] handshake events in B's log"
+        assert "ADOPTED" in crash and "fingerprint" in crash, \
+            "B's log never records the key adoption with the post-adoption fingerprint"
+        assert "[SYNC] startup:" in crash, "B never logged its startup self-diagnosis line"
+        print("[PASS] B's engine log carries AUTO-PAIR + [PASADA-SYNC] handshake markers and fingerprint ADOPTED")
 
         print("\nALL GREEN: two instances on one PC auto-paired and synced "
               "records + accounts through the real endpoints.")

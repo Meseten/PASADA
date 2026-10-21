@@ -99,6 +99,22 @@ export default function Settings() {
   const [diagResults, setDiagResults] = useState<DiagPeerResult[] | null>(null);
   const [diagCheckedAt, setDiagCheckedAt] = useState<string | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
+  // WHY-NOTHING-IS-SYNCING snapshot (/api/sync/diagnostics): the read-only
+  // engine state that names the reason a silent card is silent — pairing
+  // crypto missing, auto-pair switched off, zero peers, key fingerprint,
+  // and the recent auto-pair events — instead of a green "ON" over nothing.
+  type SyncDiag = {
+    crypto_ok: boolean;
+    pairing_enabled: boolean;
+    secret_fingerprint: string;
+    peers: string[];
+    auto_pair_events: string[];
+    sync_port: number;
+    api_port: number;
+    local_ip: string;
+    all_local_ips: string[];
+  };
+  const [syncDiag, setSyncDiag] = useState<SyncDiag | null>(null);
   // CLUSTER KEY TOOLS: fingerprint of the key this computer holds, plus the
   // rotate/import flow (rotate shows the key text ONCE for hand-delivery;
   // import adopts the exact text delivered from the owning computer).
@@ -299,6 +315,10 @@ export default function Settings() {
             firstLoad = false;
           }
         })
+        .catch(e => console.error(e));
+      fetchWithAuth(`${API_URL}/api/sync/diagnostics`)
+        .then(res => res.json())
+        .then(data => setSyncDiag(data))
         .catch(e => console.error(e));
     };
     loadNetworkInfo();
@@ -1283,8 +1303,8 @@ export default function Settings() {
                 <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner col-span-1 flex flex-col justify-center">
                   <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-4 text-center">Sharing</p>
                   <div
-                    className="w-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center"
-                    data-tip="Sharing is always ON: PASADA announces itself on the network every 10 seconds and pulls new records from computers it trusts."
+                    className={`w-full ${syncDiag && (!syncDiag.crypto_ok || !syncDiag.pairing_enabled) ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400" : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400"} font-bold py-4 rounded-lg shadow-sm flex flex-col items-center justify-center gap-1 text-center border`}
+                    data-tip="Sharing is always ON: PASADA announces itself on the network every 10 seconds and pulls new records from computers it trusts. If the checker below shows a problem, the card stays amber until it is fixed."
                   >
                     <div className="flex items-center gap-2">
                       <RefreshCw className="h-5 w-5 animate-spin" />
@@ -1298,6 +1318,52 @@ export default function Settings() {
                     </p>
                   </div>
                 </div>
+              </div>
+              {/* WHY IS NOTHING SYNCING — engine snapshot. The green card
+                  above used to stay green no matter what; this panel names
+                  the actual blocker: pairing security missing, auto-pair
+                  switched off, no computers found, or different keys. */}
+              <div className="bg-muted/30 border border-border p-6 rounded-xl shadow-inner">
+                <p className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-3">Sync health</p>
+                {!syncDiag ? (
+                  <p className="text-xs font-medium text-muted-foreground">Checking the sync engine...</p>
+                ) : (
+                  <div className="space-y-2">
+                    {!syncDiag.crypto_ok && (
+                      <p className="text-[11px] font-medium bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-400 px-2.5 py-1.5 rounded-md">
+                        <span className="font-bold">This computer cannot join or share: its security library failed to load.</span> Reinstall PASADA on this computer (run the installer again) — without it, no computer can ever pair or sync.
+                      </p>
+                    )}
+                    {!syncDiag.pairing_enabled && (
+                      <p className="text-[11px] font-medium bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 px-2.5 py-1.5 rounded-md">
+                        <span className="font-bold">Automatic pairing was switched off</span> on this computer, so new computers cannot join on their own and key recovery must go through the Admin Console.
+                      </p>
+                    )}
+                    {(syncDiag.peers?.length ?? 0) === 0 && (
+                      <p className="text-[11px] font-medium bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 px-2.5 py-1.5 rounded-md">
+                        <span className="font-bold">No other computers are visible on the network.</span> PASADA announces itself every 10 seconds, so silence usually means the network itself: Windows Firewall, the network set to "Public", a cable, or computer clocks more than 5 minutes apart.
+                      </p>
+                    )}
+                    {(syncDiag.peers?.length ?? 0) > 0 && syncDiag.crypto_ok && syncDiag.pairing_enabled && (
+                      <p className="text-[11px] font-medium bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 px-2.5 py-1.5 rounded-md">
+                        {syncDiag.peers.length} computer(s) found and the engine is healthy. If a specific computer keeps failing, use "Test computers now" above for its exact reason.
+                      </p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-[10px] font-medium text-muted-foreground">
+                      <span className="font-mono">Cluster key fingerprint: <span className="font-bold">{syncDiag.secret_fingerprint}</span> — must be identical on every office computer</span>
+                      <span>Discovery port {syncDiag.sync_port} · Sharing port {syncDiag.api_port}</span>
+                      {syncDiag.all_local_ips?.length > 1 && <span>Multiple network cards: {syncDiag.all_local_ips.join(", ")}</span>}
+                    </div>
+                    {syncDiag.auto_pair_events?.length > 0 && (
+                      <div className="pt-1 border-t border-border">
+                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mt-2 mb-1">Recent introductions</p>
+                        {syncDiag.auto_pair_events.map((ev, i) => (
+                          <p key={i} className="text-[10px] font-medium text-muted-foreground">{ev}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

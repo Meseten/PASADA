@@ -30,8 +30,22 @@ def override_get_db():
     finally:
         db.close()
 
-app.dependency_overrides[get_db] = override_get_db
+# The override is installed by an autouse module fixture BELOW, and removed
+# again at module teardown. It used to be installed at import time with no
+# restore — a permanent leak into every later module in the same pytest
+# process, which silently retargeted test_two_database_sync's "production
+# database" step at this module's disposable test file (no-such-table).
 client = TestClient(app)
+
+@pytest.fixture(scope="module", autouse=True)
+def _use_test_db_and_clean_override():
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    if previous is None:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_and_teardown_db():
