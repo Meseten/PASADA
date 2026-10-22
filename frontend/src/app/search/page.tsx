@@ -41,6 +41,10 @@ interface Toast {
   id: number;
   message: string;
   type: 'success' | 'error';
+  // UNDO AFTER DELETE: the delete toast lives ~10s instead of the usual 4,
+  // with an Undo button that restores the record right away (both the Admin
+  // and the Clerk may do this — the restore endpoint only refuses Viewer).
+  undo?: () => void;
 }
 
 function GlobalSearchClient() {
@@ -93,12 +97,12 @@ function GlobalSearchClient() {
 
   const currentYear = new Date().getFullYear()
 
-  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success', options?: { undo?: () => void, ttl?: number }) => {
     const id = Date.now()
-    setToasts(prev => [...prev, { id, message, type }])
+    setToasts(prev => [...prev, { id, message, type, undo: options?.undo }])
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id))
-    }, 4000)
+    }, options?.ttl ?? 4000)
   }, [])
 
   const executeDownloadWithGuard = (filename: string, action: () => void) => {
@@ -226,7 +230,23 @@ function GlobalSearchClient() {
       const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.sbn_no)}`, { method: "DELETE" });
       if (res.ok) {
         await fetchGlobalMembers();
-        showToast(`Operator ${member.sbn_no} deleted successfully.`, "success");
+        showToast(`Operator ${member.sbn_no} deleted successfully.`, "success", {
+          ttl: 10_000,
+          undo: async () => {
+            try {
+              const ures = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(member.id)}/restore`, { method: "POST" });
+              if (ures.ok) {
+                await fetchGlobalMembers();
+                showToast(`Operator ${member.sbn_no} restored.`, "success");
+              } else {
+                const uerr = await ures.json().catch(() => ({}));
+                showToast(uerr.detail || "Could not restore the operator.", "error");
+              }
+            } catch {
+              showToast("Network error while trying to restore.", "error");
+            }
+          },
+        });
       } else {
         const err = await res.json();
         showToast(err.detail || "Failed to delete operator.", "error");
@@ -796,6 +816,14 @@ function GlobalSearchClient() {
           <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-800 border-red-200'}`}>
             {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
             <span className="flex-1">{toast.message}</span>
+            {toast.undo && (
+              <button
+                onClick={() => { setToasts(prev => prev.filter(t => t.id !== toast.id)); toast.undo?.(); }}
+                className="mr-1 underline underline-offset-2 hover:opacity-70 shrink-0"
+              >
+                Undo
+              </button>
+            )}
             <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="ml-4 opacity-50 hover:opacity-100 transition-opacity shrink-0"><X className="h-4 w-4" /></button>
           </div>
         ))}

@@ -132,7 +132,12 @@ export default function TodaClient() {
   const [isDeleting, setIsDeleting] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [lastDeletedIds, setLastDeletedIds] = useState<string[]>([])
+  const [lastDeletedIds, setLastDeletedIds] = useState<string[]>([]) // recent deletes, for the Undo banner
+  // RESTORE VIA HISTORY: state for the "Request restore" affordance inside the
+  // per-record History dialog. activeMember is the record the dialog shows;
+  // restoreStatus carries what GET /tickets/for-record/{id} returned for it.
+  const [restoreStatus, setRestoreStatus] = useState<{ is_deleted: boolean; restore_requested: boolean; current_role: string } | null>(null)
+  const [restoreBusy, setRestoreBusy] = useState(false)
   
   const [batchModalOpen, setBatchModalOpen] = useState(false)
   const [batchFilterType, setBatchFilterType] = useState("TODAY_ALL")
@@ -1054,13 +1059,66 @@ export default function TodaClient() {
     setReadyPrintData(null);
   };
 
+  const handleRequestRestore = async () => {
+    if (!activeMember || !restoreStatus?.is_deleted) return;
+    let reason: string | null = "";
+    if (restoreStatus.current_role !== "Admin") {
+      reason = (await confirmDialog({
+        mode: "prompt",
+        title: `Request restore — ${activeMember.sbn_no}`,
+        message: "Tell the Admin why this record should come back. It goes to the Admin console for approval.",
+        fieldNote: "Shown in Activity History next to the restore request.",
+        confirmLabel: "Send request",
+      })) as string | null;
+      if (reason === null) return;
+    } else {
+      reason = (await confirmDialog({
+        mode: "prompt",
+        title: `Restore now — ${activeMember.sbn_no}`,
+        message: "As Admin you can bring the record back immediately. A reason is recorded in the audit log.",
+        confirmLabel: "Restore now",
+      })) as string | null;
+      if (reason === null) return;
+    }
+    setRestoreBusy(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/restore-records/ticket`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_ids: [activeMember.id], override_reason: reason || undefined, reason: reason || undefined }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Request failed");
+      if (data.status === "success") {
+        showToast(data.message || "Record restored.", "success");
+        await fetchMembersAndInfo();
+        setIsHistoryOpen(false);
+      } else {
+        // ticket_filed
+        showToast(data.message || "Restore request sent for approval.", "success");
+      }
+      const st = await fetchWithAuth(`${API_URL}/tickets/for-record/${activeMember.id}`);
+      if (st.ok) setRestoreStatus(await st.json());
+    } catch (e: any) {
+      showToast(e?.detail || e?.message || "Could not file the restore request.", "error");
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
   const handleOpenHistory = async (member: Member) => {
     setActiveMember(member)
     setSpotlightId(member.id)
+    setRestoreStatus(null)
     try {
       const res = await fetchWithAuth(`${API_URL}/logs/record/${member.id}`)
       if (res.ok) setHistoryLogs(await res.json())
       setIsHistoryOpen(true)
+      // CHANGE 1: ask the backend whether this record is deleted and whether a
+      // restore request is already pending for it, so the History dialog can
+      // show the live "Request restore" affordance (or "Restore pending...").
+      const st = await fetchWithAuth(`${API_URL}/tickets/for-record/${member.id}`)
+      if (st.ok) setRestoreStatus(await st.json())
     } catch (error) {
       console.error("Failed to load history", error)
       showToast("Network error while fetching record history.", "error")
@@ -1839,6 +1897,30 @@ export default function TodaClient() {
               <DialogTitle className="text-2xl font-bold flex items-center gap-2"><History className="h-5 w-5 text-blue-600" /> Record History</DialogTitle>
               <DialogDescription className="mt-1">Action history for <span className="font-bold text-foreground">{activeMember?.operator_name || "VACANT"}</span></DialogDescription>
             </DialogHeader>
+            {/* CHANGE 1: RESTORE VIA HISTORY — a deleted record gets its way
+                back from inside its own history. Admin restores directly with
+                a reason; Clerk files a ticket; an open ticket shows "pending". */}
+            {restoreStatus?.is_deleted && (
+              <div className="mt-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-black text-amber-800 dark:text-amber-300">This record is deleted.</p>
+                  <p className="text-xs text-amber-700/80 dark:text-amber-400/80 font-medium mt-0.5">
+                    {restoreStatus.restore_requested
+                      ? "A restore request is already waiting for approval."
+                      : "Bring it back in the registry — or ask the Admin to."}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={restoreBusy || restoreStatus.restore_requested}
+                  onClick={handleRequestRestore}
+                  className="shrink-0 font-bold bg-blue-600 hover:bg-blue-700 text-white border-none shadow-sm"
+                >
+                  {restoreBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  {restoreStatus.restore_requested ? "Restore pending approval" : restoreStatus.current_role === "Admin" ? "Restore now" : "Request Restore"}
+                </Button>
+              </div>
+            )}
           </div>
           <div className="p-6 overflow-y-auto custom-scrollbar">
             <div className="space-y-6">

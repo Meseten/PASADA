@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Database, FileUp, History,
-  KeyRound, Loader2, MonitorCog, RefreshCw, Server, ShieldCheck, Users, X, XCircle,
+  KeyRound, Loader2, MonitorCog, RefreshCw, RotateCcw, Server, ShieldCheck, Users, X, XCircle,
 } from "lucide-react";
 import { API_URL, fetchWithAuth } from "@/lib/api";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -209,6 +209,55 @@ export default function AdminConsole() {
       }
     } catch { showToast("Network error while saving the decision.", "error"); }
     finally { setDecidingId(null); }
+  };
+
+  // RESTORE NOW: the single-key rule (2026-10-14) lets the Admin execute a
+  // record restore DIRECTLY with a mandatory written reason — including one
+  // that is already sitting in the queue (even their own ticket, which the
+  // second-key Approve refuses). It reuses the same /api/restore-records/ticket
+  // endpoint the restore affordances elsewhere call: as Admin it runs the
+  // restore immediately, then the ticket is marked approved so the queue
+  // stays consistent with what actually happened.
+  const restoreTicketNow = async (t: Ticket) => {
+    const recordIds = Array.isArray(t.payload.record_ids) ? (t.payload.record_ids as string[]) : [];
+    if (recordIds.length === 0) { showToast("This ticket has no records to restore.", "error"); return; }
+    const typed = await confirmDialog({
+      mode: "prompt",
+      title: "Restore now",
+      message: "The selected record(s) come back right away — no ticket cycle needed. \nA reason is required and is written into the audit log.",
+      fieldNote: "Shown in Activity History next to the restore.",
+      confirmLabel: "Restore now",
+    });
+    if (typeof typed !== "string" || !typed.trim()) return;
+    setDecidingId(t.id);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/restore-records/ticket`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_ids: recordIds, override_reason: typed.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "The restore could not be done.");
+      // The restore ran; also approve the ticket (note-only approve is refused
+      // for own tickets, and the choice must not depend on who filed it).
+      const ap = await fetchWithAuth(`${API_URL}/admin/tickets/${t.id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: "Restored directly by the Admin." }),
+      });
+      if (!ap.ok) {
+        const apd = await ap.json().catch(() => ({}));
+        // Closing the ticket is cleanup, not the restore itself: if it was
+        // already decided (or refuses), the queue simply keeps the old state.
+        console.warn("Ticket not closed after direct restore:", apd.detail);
+      }
+      showToast(data.message || "Record(s) restored.", "success");
+      await refreshTickets();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "The restore could not be done.", "error");
+    } finally {
+      setDecidingId(null);
+    }
   };
 
   const handleTemplateUpload = async (key: string, file: File) => {
@@ -444,6 +493,12 @@ export default function AdminConsole() {
                       </div>
                       {t.status === "pending" && (
                         <div className="flex items-center gap-2 shrink-0">
+                          {t.ticket_type === "record_restore" && (
+                            <Button size="sm" variant="outline" className="font-bold border-blue-200 text-blue-600 hover:bg-blue-50 dark:border-blue-900 dark:text-blue-300"
+                              disabled={decidingId === t.id} onClick={() => restoreTicketNow(t)}>
+                              <RotateCcw size={14} className="mr-1" /> Restore now
+                            </Button>
+                          )}
                           <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
                             disabled={decidingId === t.id} onClick={() => decideTicket(t.id, true)}>
                             {decidingId === t.id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} className="mr-1" />}

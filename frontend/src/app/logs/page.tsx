@@ -5,8 +5,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { History, ArchiveX, CheckCircle2, XCircle, X, Loader2, Filter, Search, ArrowUpDown, Download } from "lucide-react"
+import { History, ArchiveX, CheckCircle2, XCircle, X, Loader2, Filter, Search, ArrowUpDown, Download, RotateCcw } from "lucide-react"
 import { API_URL, fetchWithAuth } from "@/lib/api"
+import { confirmDialog } from "@/components/ui/confirm-dialog"
 
 interface LogEntry {
   id: string;
@@ -20,6 +21,9 @@ interface LogEntry {
   operator_name?: string;
   field_changed?: string;
   secondary_value?: string;
+  // RAW record id (log target_id before the pretty "SBN (name)" swap):
+  // only the delete rows carry it, and it is what the restore ticket needs.
+  raw_record_id?: string;
 }
 
 interface Toast {
@@ -46,6 +50,12 @@ export default function AuditLogsPage() {
   
   const [availableRoutes, setAvailableRoutes] = useState<string[]>([]);
   const [availableActions, setAvailableActions] = useState<string[]>([]);
+  // RESTORE VIA ACTIVITY LOGS: the button lives on each DELETE_RECORD row.
+  // restoreRequested holds the record ids this session already filed a ticket
+  // for (the row shows "Pending" after that), and serverPending opts out of
+  // issuing it — those are the restore tickets ALREADY waiting in the queue.
+  const [restoreRequested, setRestoreRequested] = useState<Set<string>>(new Set());
+  const [restoreBusy, setRestoreBusy] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(25);
 
@@ -63,6 +73,21 @@ export default function AuditLogsPage() {
             if (data.routes) setAvailableRoutes(data.routes);
             if (data.actions) setAvailableActions(data.actions);
         }).catch(console.error);
+    // Which deleted records are already covered by an open restore ticket?
+    // One fetch over the pending queue (open to any signed-in account) so the
+    // delete rows show "Pending" instead of a button that would just 409.
+    fetchWithAuth(`${API_URL}/admin/tickets?status_filter=pending`)
+        .then(res => res.json())
+        .then((tickets: { ticket_type: string; status: string; payload: { record_ids?: string[] } }[]) => {
+            const ids: string[] = [];
+            for (const t of tickets || []) {
+                if (t.ticket_type === "record_restore" && Array.isArray(t.payload?.record_ids)) {
+                    ids.push(...t.payload.record_ids.map(String));
+                }
+            }
+            setRestoreRequested(new Set(ids));
+        })
+        .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -144,6 +169,44 @@ export default function AuditLogsPage() {
   };
 
   const totalPages = Math.ceil(totalLogs / rowsPerPage);
+
+  // CHANGE 2: the delete row carries the raw record id, so this page can file
+  // the same record_restore ticket the record History dialog files. An Admin
+  // writes a reason (the backend runs the restore immediately and logs it);
+  // a Clerk sees the ticket go to the Admin queue. Rows already covered by an
+  // open ticket show "Pending" and do nothing.
+  const handleRequestRestore = async (log: LogEntry) => {
+    const rid = log.raw_record_id; // the delete rows carry it; checked at the call site
+    if (!rid || restoreRequested.has(rid)) return;
+    const reason = (await confirmDialog({
+      mode: "prompt",
+      title: `Request restore — ${log.target_record}`,
+      message: "Send the record back to the Admin queue for approval. (As Admin, this restores it right away.)",
+      fieldNote: "Shown in Activity History next to the restore request.",
+      confirmLabel: "Send request",
+    })) as string | null;
+    if (reason === null) return;
+    setRestoreBusy(rid);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/restore-records/ticket`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ record_ids: [rid], override_reason: reason, reason }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Request failed");
+      if (data.status === "success") {
+        showToast(data.message || "Record restored.", "success");
+      } else {
+        showToast(data.message || "Restore request sent for approval.", "success");
+        setRestoreRequested(prev => new Set(prev).add(rid));
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Could not file the restore request.", "error");
+    } finally {
+      setRestoreBusy(null);
+    }
+  };
 
   const renderPagination = (position: 'top' | 'bottom') => (
     <div className={`flex flex-col sm:flex-row items-center justify-between px-6 py-4 bg-muted/10 border-border/60 ${position === 'top' ? 'border-b' : 'border-t'}`}>
@@ -325,6 +388,21 @@ export default function AuditLogsPage() {
                         <TableCell className="font-mono text-sm font-bold opacity-90">{log.target_record}</TableCell>
                         <TableCell className="text-sm font-medium text-foreground/80 pr-6 leading-relaxed">
                             {log.details}
+                            {log.action === "DELETE_RECORD" && log.raw_record_id && (
+                                restoreRequested.has(log.raw_record_id) ? (
+                                    <span className="mt-1 block text-[10px] uppercase font-black text-amber-600 dark:text-amber-400 tracking-wide">Restore pending approval</span>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRequestRestore(log)}
+                                        disabled={restoreBusy === log.raw_record_id}
+                                        className="mt-1 inline-flex items-center gap-1 text-[11px] font-black text-blue-600 hover:text-blue-700 dark:text-blue-400 disabled:opacity-50"
+                                    >
+                                        {restoreBusy === log.raw_record_id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                                        Request restore
+                                    </button>
+                                )
+                            )}
                         </TableCell>
                         </TableRow>
                     )

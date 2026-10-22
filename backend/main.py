@@ -1114,6 +1114,36 @@ def _ticket_brief(t: ApprovalTicket) -> dict:
         "result_note": t.result_note,
     }
 
+@app.get("/tickets/for-record/{record_id}")
+def get_record_restore_status(record_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """LIGHTWEIGHT STATUS for the restore affordances (record History dialog,
+    Activity Logs delete rows): is the record currently deleted, and is an
+    open restore ticket already waiting for it? Also answers the shared
+    question the front ends need: WHO is signed in here, because an Admin
+    restores DIRECTLY (with a reason) while a Clerk FILES a ticket."""
+    rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == record_id).first()
+    restore_requested = False
+    if rec:
+        for t in db.query(ApprovalTicket).filter(
+                ApprovalTicket.ticket_type == "record_restore",
+                ApprovalTicket.status == "pending").all():
+            try:
+                ids = json.loads(t.payload_json or "{}").get("record_ids", [])
+            except Exception:
+                ids = []
+            if str(record_id) in [str(i) for i in ids]:
+                restore_requested = True
+                break
+    return {
+        "exists": rec is not None,
+        "record_id": record_id,
+        "sbn_no": rec.sbn_no if rec else None,
+        "route": rec.route if rec else None,
+        "is_deleted": bool(rec.is_deleted) if rec else False,
+        "restore_requested": restore_requested,
+        "current_role": current_user.role,
+    }
+
 @app.get("/admin/tickets")
 def list_tickets(status_filter: str = "pending", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Approval queue for the Admin Console. Clerks also read it to see their
@@ -1213,17 +1243,40 @@ def approve_ticket(ticket_id: str, decision: TicketDecision = None, current_user
     elif ticket.ticket_type == "record_restore":
         record_ids = payload.get("record_ids", [])
         restored = 0
+        already_back = 0
+        restored_routes = set()
         for rid in record_ids:
             rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
             if rec and rec.is_deleted:
                 rec.is_deleted = False
                 rec.updated_at = get_pht_now()
                 restored += 1
+                restored_routes.add(rec.route)
+            elif rec and not rec.is_deleted:
+                already_back += 1
+            # CHANGE: the restore bumps updated_at on purpose — the restored
+            # row re-appears in every office computer's next signed pull
+            # (/api/sync/pull fetches rows with updated_at after the caller's
+            # watermark), so LAN sync carries the restore for free.
         db.commit()
+        for rl in restored_routes:
+            invalidate_ml_cache(rl)
         clear_api_caches()
-        ticket.result_note = f"Restored {restored} record(s)."
-        log_action(db, admin_name, "RESTORE_RECORD", ticket.id, "SYSTEM",
+        ticket.result_note = (
+            f"Restored {restored} record(s)."
+            if restored > 0
+            else ("All records in this request were already back in the registry (restored directly)."
+                  if already_back > 0 else "No restorable record found for this request.")
+        )
+        log_action(db, admin_name, "RESTORE_APPROVED", ticket.id, "SYSTEM",
                    f"Approved ticket: restored {restored} record(s). Requested by {ticket.created_by}.")
+        # PER-RECORD TRAIL: approval lands in each record's own History too,
+        # where the clerk originally pressed "Request restore".
+        for rid in record_ids:
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
+            if rec:
+                log_action(db, admin_name, "RESTORE_APPROVED", rec.id, rec.route,
+                           f"Restore approved by ticket from {ticket.created_by}: record {rec.sbn_no} is back in the registry.")
     elif ticket.ticket_type == "user_deactivate":
         username = str(payload.get("username", ""))
         is_active = bool(payload.get("is_active"))
@@ -1275,9 +1328,47 @@ def reject_ticket(ticket_id: str, decision: TicketDecision = None, current_user:
     ticket.decided_at = get_pht_now()
     ticket.result_note = note
     db.commit()
+    # FULL CHAIN for restore requests: the rejection is logged BOTH as the
+    # generic ticket event AND as RESTORE_REJECTED entries for every record
+    # the request named, so the per-record History and the Activity Logs show
+    # request -> decision for the exact records involved.
+    if ticket.ticket_type == "record_restore":
+        record_ids = json.loads(ticket.payload_json or "{}").get("record_ids", [])
+        for rid in record_ids:
+            rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
+            if rec:
+                log_action(db, get_full_name(current_user), "RESTORE_REJECTED", rec.id, rec.route,
+                           f"Restore request rejected by {get_full_name(current_user)}: {note} (record {rec.sbn_no} stays in the Inactive list.)")
     log_action(db, get_full_name(current_user), "TICKET_REJECTED", ticket.id, "SYSTEM",
                f"Rejected {ticket.ticket_type} ticket from {ticket.created_by}: {note}")
     return {"status": "rejected", "result_note": ticket.result_note}
+
+def _resolve_deleted_record_ids(db: Session, entries: list) -> list:
+    """Accept mixed record ids / SBNs / base SBNs; return canonical ids of
+    records that are CURRENTLY deleted (Year-suffix variants of a base SBN
+    are all included, since one delete row can cover several of them)."""
+    resolved, seen = [], set()
+    for entry in entries:
+        entry = str(entry or "").strip()
+        if not entry:
+            continue
+        rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == entry).first()
+        if rec and rec.is_deleted:
+            if rec.id not in seen:
+                seen.add(rec.id)
+                resolved.append(rec.id)
+            continue
+        clean = normalize_base_sbn(entry)
+        for rec in db.query(FranchiseRecord).filter(
+                ((FranchiseRecord.sbn_no == clean) |
+                 (FranchiseRecord.sbn_no == entry.upper()) |
+                 (FranchiseRecord.sbn_no.like(f"{clean}-%"))) &
+                (FranchiseRecord.is_deleted == True)).all():
+            if rec.id not in seen:
+                seen.add(rec.id)
+                resolved.append(rec.id)
+    return resolved
+
 
 @app.post("/api/restore-records/ticket")
 def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1290,8 +1381,20 @@ def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_
     want_all = bool(payload.get("all"))
     if not want_all and not record_ids:
         raise HTTPException(status_code=400, detail="Nothing to restore: pass record_ids or all=true.")
+
+    require_record_writer(current_user)
     if want_all:
         record_ids = [r.id for r in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()]
+
+    # ENTRIES MAY BE SBNs: the Activity Logs delete rows carry the record's
+    # SBN/base SBN in target_id, and the office writes tickets with what they
+    # see on screen. Resolve every entry — id first, then SBN (including its
+    # year-suffixed forms BAT-002-26) — to the canonical ids of records
+    # CURRENTLY deleted. Unresolvable entries stop the request with an
+    # honest 400 instead of silently restoring nothing.
+    record_ids = _resolve_deleted_record_ids(db, record_ids)
+    if not record_ids:
+        raise HTTPException(status_code=400, detail="No currently deleted record matches those entries (they may already be restored).")
 
     # DIRECT EXECUTION (single-key rule): one written reason for the audit
     # log, then the restore runs.
@@ -1307,10 +1410,13 @@ def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_
                 rec.is_deleted = False
                 rec.updated_at = get_pht_now()
                 restored += 1
+                # PER-RECORD TRAIL: RESTORE_DIRECT lands in the record's own
+                # History, the Activity Logs, and rides the LAN sync via the
+                # updated_at bump below.
+                log_action(db, get_full_name(current_user), "RESTORE_DIRECT", rec.id, rec.route,
+                           f"Restored directly by the Admin (no ticket needed). Reason: {reason}")
         db.commit()
         clear_api_caches()
-        log_action(db, get_full_name(current_user), "RESTORE_RECORD", "0", "SYSTEM",
-                   f"Single-admin override: restored {restored} record(s). Reason: {reason}")
         return {"status": "success", "message": f"Restored {restored} record(s)."}
 
     if db.query(ApprovalTicket).filter(ApprovalTicket.ticket_type == "record_restore",
@@ -1320,14 +1426,25 @@ def file_restore_ticket(payload: dict, current_user: User = Depends(get_current_
         created_by=get_full_name(current_user),
         ticket_type="record_restore",
         payload_json=json.dumps({"record_ids": record_ids}),
-        reason=payload.get("reason"),
+        reason=payload.get("reason") or payload.get("override_reason"),
     )
     db.add(ticket)
     db.commit()
+    # FULL CHAIN IN THE TRAIL: the request itself names each record (id, SBN,
+    # route), so the per-record History cards add a RESTORE_REQUEST entry the
+    # moment the clerk files the request; approval/rejection add theirs later.
     log_action(db, get_full_name(current_user), "TICKET_FILED", ticket.id, "SYSTEM",
                f"Requested approval to restore {len(record_ids)} deleted record(s).")
+    for rid in record_ids:
+        rec = db.query(FranchiseRecord).filter(FranchiseRecord.id == rid).first()
+        if rec:
+            log_action(db, get_full_name(current_user), "RESTORE_REQUEST", rec.id, rec.route,
+                       f"Restore requested for record {rec.sbn_no}.")
+    # The ticket went to the Admin queue, nothing executed yet — tell the
+    # caller so the UI can say "waiting for approval" instead of guessing.
     return {"status": "ticket_filed",
             "message": f"Restore request sent to the Admin for approval ({len(record_ids)} record(s))."}
+
 
 @app.post("/admin/refresh-db")
 def refresh_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -3935,6 +4052,11 @@ def get_audit_logs(
                 val = f"{rec.sbn_no} ({rec.operator_name or 'VACANT'})"
             else:
                 val = "Unknown / Deleted Record"
+            # RAW id for the Activity Logs page: the delete row's "Request restore"
+            # needs the actual record id to file a restore ticket — the pretty
+            # "SBN (name)" display string in target_id/target_record cannot
+            # address a record.
+            log_dict["raw_record_id"] = tid
         else:
             val = tid if tid and tid != "0" else "SYSTEM"
             
