@@ -461,6 +461,318 @@ def record_auto_pair_event(msg: str):
 def get_auto_pair_events():
     return list(_auto_pair_events)
 
+# =====================================================================
+# PIN PAIRING: the manual path into the cluster, for offices where the
+# automatic handshake cannot run (a Windows machine whose crypto wheel
+# failed to load, an AP-isolated network, a stubborn firewall) — or where
+# an Admin simply wants to decide, computer by computer, who gets the key.
+#
+# The HOST arms a 6-digit PIN from the Connections card; the JOINER types
+# the same PIN. The secret then crosses the LAN inside an envelope the
+# JOINER itself rolls: it picks a fresh random salt, derives the AES key
+# as SHA256(pin + salt), and encrypts a fixed marker. The host verifies
+# the PIN (as a hash, constant-time), re-encrypts THE CLUSTER SECRET
+# under the very same pin+salt, and sends the envelope back in a short
+# UDP salvo. Only the machine that typed the PIN can open the reply; a
+# sniffer sees only ciphertext bound to a salt it cannot reuse, and the
+# PIN itself is never part of any wire payload — only its SHA-256 hash
+# is matched. The armed PIN expires after PAIRING_PIN_TTL_SECONDS, and
+# a machine that fails repeatedly is locked out until the PIN is
+# re-armed, so a hostile LAN cannot brute-force it over the wire.
+PAIRING_PIN_TTL_SECONDS = 600            # armed once, good for 10 minutes
+PAIRING_PIN_MAX_ATTEMPTS = 6             # per joining computer per sweep
+_PIN_ATTEMPT_WINDOW_SECONDS = 60
+_set_attempt_lock = threading.Lock()
+
+_pin_pairing = {}      # {"pin": digits, "armed_at": epoch} — volatile only
+_pin_attempts = {}     # {joiner_ip: [attempt epoch, ...]}
+_pending_pin_join = {} # joiner-side {"pin", "salt", "sent_at", "done"}
+_pending_lock = threading.Lock()
+_pin_pair_lock = threading.Lock()
+# A late reply datagram may still adopt this long after the joiner asked.
+_PENDING_PIN_WINDOW_SECONDS = 90
+# Set by _consume_pin_reply when a valid reply adopts; read by the join
+# endpoint right after request_pin_join's salvo window. request_pin_join
+# resets it so a previous session's success cannot leak into the next call.
+_pin_join_success = {"joined": False}
+
+def pin_join_was_successful() -> bool:
+    return bool(_pin_join_success["joined"])
+
+
+def _pin_now() -> float:
+    """Indirection so tests can freeze time."""
+    return time.time()
+
+
+def _pin_fingerprint(pin: str) -> str:
+    return hashlib.sha256(pin.encode('utf-8')).hexdigest()
+
+
+def arm_pairing_pin(pin) -> str:
+    """HOST side: install the join PIN for PAIRING_PIN_TTL_SECONDS.
+    Accepts only exactly six ASCII digits. The digits live in volatile
+    memory (the responder must re-derive the envelope key from them);
+    they are never written to disk and never appear on the wire."""
+    if not isinstance(pin, str):
+        raise TypeError("PIN must be a string")
+    digits = pin.strip()
+    if not digits.isdigit() or len(digits) != 6:
+        raise ValueError("PIN must be exactly six digits (0-9)")
+    with _pin_pair_lock:
+        _pin_pairing.clear()
+        _pin_attempts.clear()
+        _pin_pairing["pin"] = digits
+        _pin_pairing["armed_at"] = _pin_now()
+    record_auto_pair_event(
+        f"Admin armed the join PIN: waiting for another computer for "
+        f"{PAIRING_PIN_TTL_SECONDS // 60} minutes.")
+    return digits
+
+
+def clear_pairing_pin() -> bool:
+    """HOST side: retire the armed PIN early. True when a PIN was armed."""
+    with _pin_pair_lock:
+        was = bool(_pin_pairing)
+        _pin_pairing.clear()
+        _pin_attempts.clear()
+    return was
+
+
+def pin_pairing_status() -> dict:
+    with _pin_pair_lock:
+        armed = bool(_pin_pairing)
+        remaining = 0
+        if armed:
+            remaining = max(0, int(PAIRING_PIN_TTL_SECONDS - (_pin_now() - _pin_pairing["armed_at"])))
+            if remaining == 0:
+                armed = False
+    return {"armed": armed, "expires_in_seconds": remaining if armed else 0}
+
+
+def _pin_attempt_dead_locked(joiner_ip: str) -> bool:
+    """True when this joiner burned its attempts inside the sweep
+    window (and is locked out until entries age out)."""
+    now = _pin_now()
+    marks = [t for t in _pin_attempts.get(joiner_ip, [])
+             if now - t < _PIN_ATTEMPT_WINDOW_SECONDS]
+    _pin_attempts[joiner_ip] = marks
+    return len(marks) >= PAIRING_PIN_MAX_ATTEMPTS
+
+
+def _record_pin_attempt(joiner_ip: str):
+    _pin_attempts.setdefault(joiner_ip, []).append(_pin_now())
+
+
+def _pin_decode(key: bytes, salt: str, ct: bytes):
+    """Open an AESGCM envelope (nonce = salt bytes) or None on any failure."""
+    try:
+        return AESGCM(key).decrypt(salt.encode('utf-8'), ct, None)
+    except Exception:
+        return None
+
+
+def respond_to_pin_join(joiner_ip: str, name: str, pin: str, salt: str, ct: bytes):
+    """HOST side. `pin` is the PIN the Admin armed on THIS machine; the
+    joiner's guess is proven by whether the envelope opens under the key
+    that guess derives. On success re-encrypt the cluster secret under the
+    joiner's envelope key (sha256(pin+salt)). Returns PASADA_PINREPLY:<ct>
+    bytes, or None on every refusal — armed-but-expired PIN, bad salt, bad
+    envelope, and especially a wrong PIN or a joiner over the attempt
+    limit. Wrong-prefixed attempts are recorded and audited so the Admin
+    sees guessing in the log instead of silence."""
+    if not _pin_pairing or not isinstance(pin, str):
+        return None
+    if not _CRYPTO_OK:
+        return None
+    now = _pin_now()
+    armed_at = _pin_pairing.get("armed_at", 0)
+    if now - armed_at > PAIRING_PIN_TTL_SECONDS:
+        _log_sync_throttled("pin:expired", "pin join refused: the armed PIN expired.")
+        return None
+    if not isinstance(salt, str) or not (32 <= len(salt) <= 64) or \
+            not salt or any(c not in "0123456789abcdef" for c in salt):
+        return None
+    if not isinstance(ct, (bytes, bytearray)) or len(ct) < 24 or len(ct) > 4096:
+        return None
+    if _pin_attempt_dead_locked(joiner_ip):
+        _log_sync_throttled(f"pin:locked:{joiner_ip}",
+                            f"pin join from {name or joiner_ip} refused: locked out "
+                            f"after {PAIRING_PIN_MAX_ATTEMPTS} failed attempt(s).")
+        return None
+    cleared = _pin_decode(hashlib.sha256((pin + salt).encode('utf-8')).digest(),
+                          salt, bytes(ct))
+    if cleared != b"PASADA_PINASK":
+        # The joiner's guess failed to open the envelope: either a wrong
+        # PIN, a tampered payload, or a foreign salt — all the same to the
+        # attacker ledger. Record it, audit it, refuse it.
+        _record_pin_attempt(joiner_ip)
+        left = PAIRING_PIN_MAX_ATTEMPTS - len(_pin_attempts.get(joiner_ip, []))
+        _log_sync_throttled(f"pin:wrong:{joiner_ip}",
+                            f"wrong PIN from {name or joiner_ip} ({max(0, left)} try(ies) left this sweep).")
+        return None
+    # Correct pin + valid envelope: release the secret INSIDE a matching
+    # envelope the joiner alone can open. Attempts ledger resets here so a
+    # machine that typed one wrong digit is not left over the limit.
+    _pin_attempts.pop(joiner_ip, None)
+    key = hashlib.sha256((pin + salt).encode('utf-8')).digest()
+    ct_out = AESGCM(key).encrypt(salt.encode('utf-8'),
+                                 b"PASADA_SECRET:" + CLUSTER_SECRET.encode('utf-8'),
+                                 None)
+    record_auto_pair_event(
+        f"Shared the office cluster key with {name or joiner_ip} via PIN.")
+    _log_sync_throttled(f"pin:shared:{joiner_ip}",
+                        f"cluster key handed to {name or joiner_ip} via PIN envelope.")
+    return b"PASADA_PINREPLY:" + ct_out.hex().encode('ascii')
+
+
+def build_pin_join(local_ip: str, name: str, pin: str, salt: str, ct: bytes):
+    """JOINER side: assemble the join datagram. Anything malformed returns
+    None instead of ever putting a half-formed datagram on the wire."""
+    if not (isinstance(pin, str) and pin.isdigit() and len(pin) == 6):
+        return None
+    if not isinstance(salt, str) or not (32 <= len(salt) <= 64):
+        return None
+    if not isinstance(ct, (bytes, bytearray)) or len(ct) < 24:
+        return None
+    try:
+        name_b64 = base64.b64encode(str(name or "PC").encode('utf-8')).decode('ascii')
+    except Exception:
+        return None
+    body = f"PASADA_PINJOIN:{DISCOVERY_PROTOCOL_VERSION}:{local_ip}:{salt}:{ct.hex()}:{name_b64}"
+    return body.encode('utf-8')
+
+
+def parse_pin_join(data: bytes):
+    """HOST listener: split a join datagram into (ip, salt, ct, name).
+    None if the header, counts or hex/base64 fields do not check out."""
+    try:
+        parts = data.decode('utf-8').split(":")
+        if len(parts) != 6 or parts[0] != "PASADA_PINJOIN":
+            return None
+        if parts[1] != str(DISCOVERY_PROTOCOL_VERSION):
+            return None
+        ip, salt, ct_hex, name_b64 = parts[2], parts[3], parts[4], parts[5]
+        ct = bytes.fromhex(ct_hex)
+        name = base64.b64decode(name_b64).decode('utf-8')
+        return (ip, salt, ct, name)
+    except Exception:
+        return None
+
+
+def parse_pin_reply(data: bytes, pin: str, salt: str):
+    """JOINER side: open the host's reply with MY OWN envelope key. Returns
+    the candidate cluster-secret string, or None when anything — replayed
+    envelope, foreign salt, wrong pin, tampering — refuses to open."""
+    if not isinstance(data, (bytes, bytearray)) or not isinstance(pin, str) or not isinstance(salt, str):
+        return None
+    try:
+        if not data.startswith(b"PASADA_PINREPLY:"):
+            return None
+        ct = bytes.fromhex(data[len(b"PASADA_PINREPLY:"):].decode('ascii'))
+        key = hashlib.sha256((pin + salt).encode('utf-8')).digest()
+        plain = _pin_decode(key, salt, ct)
+        if plain is None or not plain.startswith(b"PASADA_SECRET:"):
+            return None
+        candidate = plain[len(b"PASADA_SECRET:"):].decode('utf-8')
+    except Exception:
+        return None
+    if not (16 <= len(candidate) <= 256):
+        return None
+    return candidate
+
+
+def _pin_join_pending_pin(joiner_ip: str, name: str, salt: str, ct: bytes):
+    """HOST-listener helper: run respond_to_pin_join with the PIN the Admin
+    armed (kept in volatile memory only while the window is open)."""
+    with _pin_pair_lock:
+        armed_pin = _pin_pairing.get("pin")
+    if not armed_pin:
+        return None
+    return respond_to_pin_join(joiner_ip, name, armed_pin, salt, ct)
+
+
+def _consume_pin_reply(data: bytes, sender):
+    """JOINER-listener helper: open the reply with MY pending envelope; on
+    success adopt the key, wipe the pending PIN, and wake the waiting API
+    call. Invalid/replayed datagrams are dropped silently."""
+    with _pending_lock:
+        info = dict(_pending_pin_join) if _pending_pin_join else None
+    if not info:
+        return None
+    if _pin_now() - float(info.get("sent_at", 0)) > _PENDING_PIN_WINDOW_SECONDS:
+        return None
+    candidate = parse_pin_reply(data, str(info.get("pin", "")), str(info["salt"]))
+    if not candidate:
+        return None
+    _adopt_cluster_secret(candidate)
+    _pin_join_success["joined"] = True
+    # Pull right away: the joining computer holds the key NOW, so the first
+    # records/users should land within seconds instead of on the next cycle.
+    try:
+        request_sync_cycle()
+    except Exception:
+        pass
+    peer_name = PEER_NAMES.get(sender) if sender else None
+    record_auto_pair_event(
+        f"Joined the office cluster via PIN (key received from {peer_name or sender}).")
+    force_log(
+        f"[PASADA-SYNC] cluster key ADOPTED via PIN from {sender}; this "
+        f"machine now holds fingerprint {cluster_secret_fingerprint()}.")
+    with _pending_lock:
+        if _pending_pin_join.get("salt") == info["salt"]:
+            done = _pending_pin_join.pop("done", None)
+            _pending_pin_join.clear()
+    if done:
+        done.set()
+    return candidate
+
+
+def request_pin_join(pin: str, host_ip: str = None, attempts: int = 3, gap: float = 1.5) -> threading.Event:
+    """JOINER side, called from the API: roll one fresh envelope with the
+    typed PIN and send it — unicast to host_ip when given, otherwise
+    broadcast — while arming the listener to adopt the first valid reply.
+    Returns a done-Event the endpoint can wait on (set when adopted or
+    when the window passes without a reply)."""
+    if not (isinstance(pin, str) and pin.isdigit() and len(pin) == 6):
+        raise ValueError("PIN must be exactly six digits (0-9)")
+    salt = os.urandom(16).hex()
+    key = hashlib.sha256((pin + salt).encode('utf-8')).digest()
+    ct = AESGCM(key).encrypt(salt.encode('utf-8'), b"PASADA_PINASK", None)
+    payload = build_pin_join(get_local_ip(), COMPUTER_NAME, pin, salt, ct)
+    if payload is None:
+        raise ValueError("could not build the join datagram")
+    ev = threading.Event()
+    _pending_pin_join.clear()
+    _pending_pin_join.update({"pin": pin, "salt": salt, "sent_at": _pin_now(), "done": ev})
+    _pin_join_success["joined"] = False
+    record_auto_pair_event(
+        f"Pairing flow started: asking {host_ip or 'the office'} for the "
+        "cluster key with the PIN.")
+
+    def _salvo():
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            if host_ip:
+                _send_unicast(payload, host_ip)
+            else:
+                _send_announcement(payload, udp_socket)
+        except OSError:
+            pass
+        finally:
+            udp_socket.close()
+
+    for attempt in range(max(1, attempts)):
+        threading.Thread(target=_salvo, daemon=True).start()
+        if attempt + 1 < attempts and ev.wait(gap):
+            break  # adopted while waiting to re-send
+    # Keep the pending slot for a while longer so a late reply datagram
+    # still adopts through the listener; the endpoint reports on `ev`.
+    ev.wait(timeout=3.0)
+    return ev
+
+
 # Signatures older than this are refused, so a captured broadcast cannot be
 # replayed to sneak a fake peer onto the list. Broadcasts repeat every 10s,
 # and clocks across one office stay well within a few seconds, so 5 minutes
@@ -754,10 +1066,16 @@ def get_local_ip():
 def broadcast_presence():
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    local_ip = get_local_ip()
 
     while True:
         try:
+            # STALE-IP GUARD: the LAN address is re-read every pass instead of
+            # once at thread start. A machine issued a new DHCP address after
+            # boot used to keep advertising its OLD ip inside every signed
+            # payload, so peers registered the dead address, pulls against it
+            # failed, and the machine was dropped — forever. Re-reading every
+            # pass makes the very next broadcast carry the current address.
+            local_ip = get_local_ip()
             # SIGNED BROADCAST: proves membership without revealing the secret.
             _send_announcement(build_discovery_payload(local_ip), udp_socket)
             # PAIRING OFFER: advertised alongside discovery so a fresh install
@@ -880,13 +1198,44 @@ def _maybe_send_secret(joiner_ip: str, joiner_pub_der: bytes, name: str, local_i
                             "envelope(s) sent. UDP can drop one; the joiner adopts only when "
                             "an envelope opens with ITS private half.")
 
+# LISTENER BIND STATE: whether the datagram listener actually owns its UDP
+# port right now. A bind failure at boot (firewall policy, another PASADA
+# copy, a port race) used to kill the thread before the loop ever ran — and
+# every later diagnostic said the network was broken, not "this machine
+# cannot receive". 'Test computers now' reads this with get_listener_state().
+_LISTENER_STATE = {"bound": False, "error": None, "port": None}
+
+def get_listener_state():
+    return dict(_LISTENER_STATE)
+
 def listen_for_peers():
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # LAB OVERRIDE: pin the listener to one loopback NIC so two instances on
     # one PC do not fight over one wildcard socket.
     bind_ip, _, bind_port = os.environ.get("PASADA_SYNC_BIND", "").partition(":")
-    udp_socket.bind((bind_ip or '', int(bind_port or SYNC_PORT)))
+    port = int(bind_port or SYNC_PORT)
+    _LISTENER_STATE["port"] = port
+    udp_socket = None
+    while udp_socket is None:
+        try:
+            udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_socket.bind((bind_ip or '', port))
+            _LISTENER_STATE.update({"bound": True, "error": None})
+            force_log(f"[SYNC-LISTEN] bound UDP port {port}; discovery offers/challenges "
+                      "and PIN envelopes can be received on this computer.")
+        except OSError as e:
+            # A bind failure must not end sync forever: log it, wait, and
+            # try again — the diagnostics check also reports it so it is
+            # visible in the UI, not only the crash log.
+            udp_socket = None
+            _LISTENER_STATE["error"] = str(e)
+            force_log(f"[SYNC-LISTEN] could not bind UDP port {port}: {e}. "
+                      "PASADA cannot hear discovery broadcasts or PIN envelopes "
+                      "until this is fixed — check the firewall (Linux: ufw allow "
+                      f"{port}/udp; Windows: allow PASADA or the port on UDP "
+                      "through Windows Defender Firewall) and any other running "
+                      "copy of PASADA. Retrying every 5 seconds.")
+            time.sleep(5)
     local_ip = get_local_ip()
 
     while True:
@@ -935,6 +1284,30 @@ def listen_for_peers():
                                 f"[PASADA-SYNC] cluster key ADOPTED from "
                                 f"{PEER_NAMES.get(sender) or sender}; this machine now "
                                 f"holds fingerprint {cluster_secret_fingerprint()}.")
+                continue
+            if data.startswith(b"PASADA_PINJOIN:"):
+                # PIN PAIRING host side: a joining computer rolled an
+                # envelope with an Admin-armed PIN. The responder itself
+                # decides freshness/PIN/lockout; here we just build the
+                # reply salvo and, crucially, NOT answer anything when no
+                # PIN is armed right now.
+                opened = parse_pin_join(data)
+                if opened:
+                    joiner_ip, joiner_salt, joiner_ct, joiner_name = opened
+                    reply = _pin_join_pending_pin(joiner_ip, joiner_name,
+                                                  joiner_salt, joiner_ct)
+                    if reply:
+                        for attempt in range(_REPLY_ATTEMPTS):
+                            _send_unicast(reply, joiner_ip)
+                            if attempt + 1 < _REPLY_ATTEMPTS:
+                                time.sleep(_REPLY_GAP_SECONDS)
+                continue
+            if data.startswith(b"PASADA_PINREPLY:"):
+                # PIN PAIRING joiner side: the key crossed back inside MY
+                # envelope. Adopt the exact same way the automatic handshake
+                # does, then signal the waiting API call.
+                sender_ip = addr[0] if addr else None
+                _consume_pin_reply(data, sender_ip)
                 continue
             # NUDGE FIRST: it shares the port with discovery and a nudge from
             # a peer we have not heard from yet must still wake the pull loop

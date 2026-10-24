@@ -827,6 +827,21 @@ def build():
     ])
     para(doc, "The connection is safe without you doing anything: computers recognize each other with a shared secret, and every transfer between them is signed. A computer that was off for days catches up automatically the next time both are on.")
 
+    h2(doc, "Connect by PIN when automatic pairing fails")
+    para(doc, "If the two computers will not connect on their own — a stubborn firewall, an access point that blocks computer-to-computer traffic, a machine whose security library failed to load — the Admin can join them by hand with a six-digit PIN. The secret still crosses the network encrypted, and the PIN itself never travels.")
+    steps(doc, [
+        "Admin, on PC 1 (the computer holding the registry): open Settings > Computer Settings > the Sharing between computers card.",
+        "Under Pair a computer, press Generate PIN. A six-digit number and a 10-minute countdown appear.",
+        "On PC 2, on the same card, type that PIN in the Join by PIN box and press Join.",
+        "When the join succeeds, both cards show the same short key fingerprint. Compare them: identical fingerprints mean both computers now share the registry.",
+        "PC 2 then pulls the records from PC 1 within seconds.",
+    ])
+    bullets(doc, [
+        "The PIN works for 10 minutes only, and the host computer accepts it only while its own screen shows it armed.",
+        "Repeated wrong guesses are refused and recorded, and the joining computer is locked out until the Admin re-arms a fresh PIN.",
+        "The automatic connection stays ON: the PIN path is only a manual rescue for the times when the automatic one cannot run.",
+    ])
+
     h2(doc, "Step 4: Verify sync end to end")
     para(doc, "Do this the first day, and any time something feels out of date later:")
     steps(doc, [
@@ -844,8 +859,10 @@ def build():
     data_table(doc,
         ["Symptom", "What to do"],
         [
+            ("Test computers now says Cannot receive or names a firewall", "The engine used Test computers now to check itself first and the ports are blocked on this machine. Allow them: on Linux, run sudo ufw allow 43888/tcp and sudo ufw allow 54321/udp; on Windows, run the netsh advfirewall command shown in the result. Then press Test computers now again."),
             ("PC 2 never shows Online", "Both computers must be on the same network. Check the network first, then restart PASADA on PC 2. See Troubleshooting problems 4 and 5."),
             ("Records missing on PC 2", "Confirm PC 1 shows Online. PC 2 pulls from PC 1; if PC 1 is off, PC 2 counts on its last data or shows Offline Mode."),
+            ("The computers refuse to pair automatically", "Join them by PIN: PC 1 presses Generate PIN, PC 2 types it and presses Join (see Connect by PIN above). Both ways install the same security; check both fingerprints agree afterwards."),
             ("Login fails on PC 2", "The account was created on PC 1 but the registry has not reached PC 2 yet. Wait for the first pull to finish, then try again."),
             ("Edit buttons missing on PC 2", "That is the Viewer role. Ask the admin for a Clerk account if that computer needs to enter records."),
             ("Numbers differ between PCs", "Short differences clear in seconds. If not, restart both and check the connected computers list; treat it as Troubleshooting problem 9."),

@@ -9,6 +9,11 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  experimental: {
+    // Marks this upgrade as a security-driven agent upgrade so telemetry
+    // distinguishes patch/security bumps from feature upgrades.
+    agentUpgrade: 'security',
+  },
 }
 
 module.exports = nextConfig

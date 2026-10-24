@@ -79,14 +79,15 @@ The full battery is the first check after any change. All three commands
 must pass before code is considered done.
 
 ```bash
-# Backend: 63 tests (endpoints, sync security, business logic, uploads,
-# performance incl. 50k scale, backup restore, protocol version, migration)
+# Backend: 191 tests (endpoints, PIN pairing, sync security, business logic,
+# uploads, performance incl. 50k scale, backup restore, protocol version,
+# migration, restore flow)
 cd pasada/backend
 source venv/bin/activate
 pytest                        # full suite
 pytest --cov                  # with statement coverage report
 
-# Frontend: 11 vitest unit tests
+# Frontend: 27 vitest unit tests (restore UI, pairing panel, API client, ...)
 export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
 cd ../frontend
 npx vitest run
@@ -187,3 +188,50 @@ Ctrl+C in each terminal.
 - pytest fails on `test_global_stats_at_50k_scale` timing → the machine was
   under load; re-run alone (`pytest tests/test_performance.py -k 50k`). The
   15s threshold tolerates a busy laptop but not a regression.
+- Test computers now reports `Cannot receive on <port>` or names a firewall →
+  allow the sync ports on BOTH machines: Linux `sudo ufw allow 43888/tcp`
+  and `sudo ufw allow 54321/udp`; Windows `netsh advfirewall firewall add
+  rule name="PASADA sync" dir=in action=allow protocol=TCP localport=43888`
+  plus the same rule for UDP 54321. The check first proves this machine can
+  bind and receive on its own ports before probing any peer, so a refused
+  local bind means the port is blocked or already taken — not that the peer
+  is away.
+- A machine's LAN address changed (new DHCP lease) → nothing to do; the
+  broadcast loop re-reads the address every 10 s cycle and the next
+  announcement carries the new IP.
+
+## 9. Rebuilding the Linux sidecar from source
+
+The packaged app runs the compiled engine in
+`frontend/src-tauri/target/release/backend/` (a PyInstaller ONEDIR folder:
+the `pasada-backend` launcher plus `_internal/`). Two gotchas cost a full
+debug session once, so they are written down:
+
+- The module behind `pip install pyinstaller` is **`PyInstaller`** (capital
+  P). On Linux, `python -m pyinstaller` fails with "No module named
+  pyinstaller" even when pip lists the package as installed — use the
+  console script (`pyinstaller ...`) or `python -m PyInstaller`.
+- `backend/venv/bin/activate` carries an absolute `VIRTUAL_ENV` from the
+  machine the venv was first created on. If the project moved, activating
+  still points pip/python at the OLD location's site-packages while the
+  build compiles the source in the current directory. Verify with
+  `pip -V` after activating, or rebuild the venv with `python -m venv venv
+  --clear` when packages look stale.
+
+Build and place (both directions documented):
+
+```bash
+cd pasada/backend
+source venv/bin/activate
+pyinstaller --clean --noconfirm pasada-backend.spec        # ONEDIR, the app's layout
+cp -r dist/pasada-backend/. ../frontend/src-tauri/backend/ # bundle resources
+# The release app runs from target/release/backend/: copy the same folder
+# contents there too when testing the packaged app without a fresh build.
+# Then: cd ../frontend && npm run tauri build
+```
+
+After replacing the binary, restart the app and check
+`PASADA_CRASH_LOG.txt` beside the app for
+`All libraries loaded successfully!` — that line is the crypto wheel
+loading; without it signing and pairing refuse to work and the Connections
+card will show "pairing security missing".

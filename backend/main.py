@@ -63,7 +63,10 @@ import route_seed_data
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
 import sync_engine
-from sync_engine import start_lan_sync, get_local_ip, PEERS, get_last_sync_check, cluster_secret_fingerprint, rotate_cluster_secret, import_cluster_secret
+from sync_engine import (start_lan_sync, get_local_ip, PEERS, get_last_sync_check,
+                         cluster_secret_fingerprint, rotate_cluster_secret, import_cluster_secret,
+                         arm_pairing_pin, clear_pairing_pin, pin_pairing_status,
+                         request_pin_join, pin_join_was_successful)
 from pydantic import BaseModel, Field
 
 # BOOT TELEMETRY: captured after the heavy imports (fastapi, sqlalchemy,
@@ -2300,6 +2303,99 @@ def import_cluster_key(payload: dict, current_user: User = Depends(get_current_u
     return {"status": "success", "fingerprint": cluster_secret_fingerprint(),
             "message": "Key adopted. This computer now broadcasts with the new key."}
 
+# --- PIN PAIRING (Connections card) ---
+# The manual complement to auto-pairing: when the automatic handshake can't
+# run (a Windows machine whose crypto wheel failed to load, AP-isolated
+# Wi-Fi, a stubborn firewall) or the Admin simply wants to admit a new
+# computer BY HAND, the host computer ARMS a 6-digit PIN for ten minutes
+# and the joining computer types that same PIN. The cluster key then crosses
+# the LAN inside an envelope the(joiner itself rolled (AES-GCM under
+# SHA256(pin+salt)), so a sniffer holding neither the salt nor the PIN sees
+# only ciphertext. Same auth model as rotate/import: Admin-only.
+def generate_join_pin() -> str:
+    """Six random digits (leading zeroes allowed) for the (host endpoint."""
+    return "".join(secrets.choice("0123456789") for _ in range(6))
+
+@app.get("/system/pairing-pin/status")
+def pairing_pin_status(current_user: User = Depends(get_current_user)):
+    """Display-safe armed state: no PIN is ever echoed back."""
+    require_admin(current_user)
+    status = pin_pairing_status()
+    status.update({
+        "computer_name": sync_engine.COMPUTER_NAME,
+        "fingerprint": cluster_secret_fingerprint(),
+    })
+    return status
+
+@app.post("/system/pairing-pin/arm")
+def arm_pairing_pin_endpoint(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Arms the Admin-chosen PIN (or a random one when omitted) for ten
+    minutes. Returns the PIN ONCE — it is never stored or logged."""
+    require_admin(current_user)
+    try:
+        if str(payload.get("pin", "")).strip() == "":
+            chosen = generate_join_pin()
+        else:
+            chosen = str(payload["pin"])
+        armed = arm_pairing_pin(chosen)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # AUDIT: names the action, the actor and the expiry — never the digits.
+    log_action(db, get_full_name(current_user), "PIN_PAIRING_ARMED", "0", "SYSTEM",
+               "Armed the manual join PIN (expires in 10 minutes). "
+               "Give the digits to the joining computer.")
+    return {"status": "success", "pin": armed,
+            "expires_in_seconds": pin_pairing_status()["expires_in_seconds"],
+            "message": "PIN armed. Type it on the joining computer within 10 minutes."}
+
+@app.post("/system/pairing-pin/clear")
+def clear_pairing_pin_endpoint(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    cleared = clear_pairing_pin()
+    if cleared:
+        log_action(db, get_full_name(current_user), "PIN_PAIRING_CLEARED", "0", "SYSTEM",
+                   "Cleared the armed join PIN early.")
+    return {"status": "success", "armed": pin_pairing_status()["armed"]}
+
+@app.post("/system/pairing-pin/join")
+def join_via_pin_endpoint(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Joiner computer: an Admin types the host's armed PIN here. Sends the
+    encrypted challenge to the host (direct IP when given, LAN broadcast
+    otherwise) and waits for a valid reply. On adoption the fingerprint is
+    returned so the Admin can confirm both computers now agree."""
+    require_admin(current_user)
+    pin = str(payload.get("pin", "")).strip()
+    host_ip = str(payload.get("host_ip", "") or "").strip()
+    if host_ip:
+        # The typed IP/host goes into a wire payload the sync engine sends —
+        # accept only sane IPv4 literals or hostnames, never arbitrary text
+        # someone could bend the UDP salvo with.
+        import ipaddress as _ipaddress
+        try:
+            if not host_ip.replace(".", "").isdigit():
+                raise ValueError
+            _ipaddress.IPv4Address(host_ip)
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="host_ip must be the other computer's IP address (for example 192.168.1.10).")
+    try:
+        request_pin_join(pin, host_ip or None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    joined = pin_join_was_successful()
+    fingerprint = cluster_secret_fingerprint() if joined else ""
+    log_action(db, get_full_name(current_user), "PIN_PAIRING_JOIN", "0", "SYSTEM",
+               f"Attempted to join the cluster with a shared PIN (host: "
+               f"{host_ip or 'office broadcast'}). "
+               + ("Key adopted (fingerprint " + fingerprint + ")." if joined
+                  else "No reply; the PIN may be wrong, expired, or the host unreachable."))
+    return {"status": "success", "joined": joined, "fingerprint": fingerprint,
+            "message": ("Joined the cluster. Verify that this fingerprint "
+                        "matches on the other computer.") if joined else
+                       ("No reply yet. Make sure the other computer has ARMED "
+                        "a PIN (Connections > Pair a computer) and is on the "
+                        "same network, then try again within 10 minutes.")}
+
 @app.post("/system/sync-diagnostics")
 def sync_diagnostics(current_user: User = Depends(get_current_user)):
     """LIVE CONNECTION CHECK (Connections card > "Test computers now").
@@ -2311,13 +2407,34 @@ def sync_diagnostics(current_user: User = Depends(get_current_user)):
     local state changes hands, and the audit log records who ran it."""
     require_admin(current_user)
     results = []
-    # SELF-ID first: a fingerprint line even when NO peer responds, so the
-    # Admin starting rotation knows which side of the mismatch they are on.
-    results.append({"peer": "this computer", "name": sync_engine.COMPUTER_NAME,
-                    "last_seen": None, "ok": True, "reason": None,
-                    "counts": None,
-                    "detail": f"This computer's key fingerprint: {cluster_secret_fingerprint()}. "
-                              "Check that the other computer shows the same fingerprint."})
+    # SELF CHECK: pocket-money-laptop failure modes named plainly — can this
+    # machine RECEIVE on its own ports before any peer is asked anything?
+    lst = sync_engine.get_listener_state()
+    if lst["error"]:
+        _fw_hint = ("On Linux run: sudo ufw allow " + str(lst["port"]) + "/udp. "
+                    "On Windows run (admin PowerShell): netsh advfirewall firewall "
+                    "add rule name=\"PASADA Sync\" dir=in action=allow protocol=UDP localport="
+                    + str(lst["port"]) + ".")
+        results.append({"peer": "this computer", "name": sync_engine.COMPUTER_NAME,
+                        "last_seen": None, "ok": False, "reason": "bind-failed",
+                        "counts": None,
+                        "detail": f"This machine cannot receive on UDP port {lst['port']} "
+                                  f"({lst['error']}). Discovery broadcasts and PIN envelopes "
+                                  f"arrive but are unheard. {_fw_hint} "
+                                  "Also close any other copy of PASADA on this computer."})
+    else:
+        _fw_hint = ("If this machine rebinding requires it later: Linux — sudo ufw allow "
+                    + str(lst["port"]) + "/udp; Windows — netsh advfirewall firewall "
+                    "add rule name=\"PASADA Sync\" dir=in action=allow protocol=UDP localport="
+                    + str(lst["port"]) + "; the API port " + str(sync_engine.API_PORT)
+                    + " over TCP likewise.")
+        results.append({"peer": "this computer", "name": sync_engine.COMPUTER_NAME,
+                        "last_seen": None, "ok": True, "reason": None,
+                        "counts": None,
+                        "detail": f"This machine receives fine on UDP {lst['port']} and serves the API on TCP {sync_engine.API_PORT}. "
+                                  f"This computer's key fingerprint: {cluster_secret_fingerprint()}. "
+                                  "Check that the other computer shows the same fingerprint. "
+                                  + _fw_hint})
     for peer in list(PEERS):
         ts = str(int(time.time()))
         nonce = secrets.token_hex(8)
@@ -2340,10 +2457,10 @@ def sync_diagnostics(current_user: User = Depends(get_current_user)):
             )
         except requests.exceptions.Timeout:
             entry.update({"ok": False, "reason": "timeout",
-                          "detail": "No answer within 5 seconds. The other computer may be turned off, asleep, or blocked in the firewall."})
+                          "detail": f"No answer within 5 seconds. The other computer may be turned off, asleep, or blocked in the firewall. On that machine allow the ports: Linux — sudo ufw allow {sync_engine.API_PORT}/tcp and sudo ufw allow {sync_engine.SYNC_PORT}/udp; Windows (admin PowerShell) — netsh advfirewall firewall add rule name=\"PASADA API\" dir=in action=allow protocol=TCP localport={sync_engine.API_PORT}, then the same with name=\"PASADA Sync\" protocol=UDP localport={sync_engine.SYNC_PORT}."})
         except requests.exceptions.ConnectionError as e:
             entry.update({"ok": False, "reason": "refused",
-                          "detail": f"PASADA is not answering on {peer} (port {sync_engine.API_PORT}). Open PASADA on that computer, or check its firewall."})
+                          "detail": f"PASADA is not answering on {peer} (port {sync_engine.API_PORT}). Open PASADA on that computer, or allow the port on its firewall: Linux — sudo ufw allow {sync_engine.API_PORT}/tcp; Windows — netsh advfirewall firewall add rule name=\"PASADA API\" dir=in action=allow protocol=TCP localport={sync_engine.API_PORT}."})
         except Exception as e:
             entry.update({"ok": False, "reason": "error", "detail": f"{type(e).__name__}: {e}"})
         else:

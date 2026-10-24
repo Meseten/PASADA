@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { 
   Settings as SettingsIcon, 
   Save, 
@@ -34,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import UpdateCard from "./UpdateCard";
+import PairingPanel from "@/components/sync/PairingPanel";
 
 // Office-friendly security questions offered as suggestions. Each one stays
 // true for years and is easy for the person who set it to remember. The
@@ -298,33 +299,36 @@ export default function Settings() {
       }).catch(e => console.error(e));
   }, [currentYear]);
 
+  // The network loader lives at component scope so other widgets (the PIN
+  // pairing panel) can ask for a refresh right after they change something.
+  const computerNameFilledOnce = useRef(false);
+  const loadNetworkInfo = useCallback(() => {
+    fetchWithAuth(`${API_URL}/system/network`)
+      .then(res => res.json())
+      .then(data => {
+        setNetworkInfo(data);
+        if (!computerNameFilledOnce.current) {
+          setComputerName(data.computer_name || "");
+          setNameDraft(data.computer_name || "");
+          computerNameFilledOnce.current = true;
+        }
+      })
+      .catch(e => console.error(e));
+    fetchWithAuth(`${API_URL}/api/sync/diagnostics`)
+      .then(res => res.json())
+      .then(data => setSyncDiag(data))
+      .catch(e => console.error(e));
+  }, []);
+
   useEffect(() => {
     if (activeTab !== "network") return;
     // Refresh every 10 seconds while the tab is open so the last sync check
     // stamp moves and the office can SEE sharing is alive. The computer name
     // fields only fill on first load so typing is never clobbered.
-    let firstLoad = true;
-    const loadNetworkInfo = () => {
-      fetchWithAuth(`${API_URL}/system/network`)
-        .then(res => res.json())
-        .then(data => {
-          setNetworkInfo(data);
-          if (firstLoad) {
-            setComputerName(data.computer_name || "");
-            setNameDraft(data.computer_name || "");
-            firstLoad = false;
-          }
-        })
-        .catch(e => console.error(e));
-      fetchWithAuth(`${API_URL}/api/sync/diagnostics`)
-        .then(res => res.json())
-        .then(data => setSyncDiag(data))
-        .catch(e => console.error(e));
-    };
     loadNetworkInfo();
     const interval = setInterval(loadNetworkInfo, 10000);
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, [activeTab, loadNetworkInfo]);
 
   const handleSaveComputerName = async () => {
     const name = nameDraft.trim();
@@ -1232,6 +1236,9 @@ export default function Settings() {
                         Computers join the sharing group <span className="font-bold">automatically</span> — no keys to manage. If the check above ever reports a problem that mentions shared keys, the fix (manual key rotation) is in the Admin Console.
                       </p>
                     </div>
+                  )}
+                  {isAdmin && (
+                    <PairingPanel isAdmin={true} onAfterChange={loadNetworkInfo} />
                   )}
                 </div>
 
