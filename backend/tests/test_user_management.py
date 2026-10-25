@@ -304,9 +304,10 @@ def test_sync_merge_follows_deactivation_and_role(client):
     incoming = [
         {"username": "MERGE TARGET", "first_name": "MERGE", "last_name": "TARGET",
          "role": "Admin", "password_hash": pwd_context.hash("newmergepass1"),
-         "is_deactivated": True},
+         "is_deactivated": True, "updated_at": _now_iso()},
         {"username": "MERGE NEW", "first_name": "MERGE", "last_name": "NEW",
-         "role": "Clerk", "password_hash": "SYNCED_NO_PASSWORD", "is_deactivated": True},
+         "role": "Clerk", "password_hash": "SYNCED_NO_PASSWORD", "is_deactivated": True,
+         "updated_at": _now_iso()},
     ]
     db = TestingSessionLocal()
     sync_engine._merge_incoming_users(db, incoming)
@@ -321,6 +322,263 @@ def test_sync_merge_follows_deactivation_and_role(client):
     assert res.status_code == 401
     res = client.post("/token", json={"username": "MERGE NEW", "password": "whatever123"})
     assert res.status_code == 401
+
+def _now_iso():
+    from datetime import datetime
+    return datetime.now().isoformat()
+
+
+def test_sync_merge_ignores_timestampless_peer_roles(client):
+    # ROLE-FLIP FIX (2026-10-24): a peer running an OLD engine sends accounts
+    # without change timestamps. Such a pull must no longer overwrite role,
+    # password hash, or deactivation — that is exactly how an Admin copy on
+    # one computer turned Clerk on another (and vice versa).
+    import sync_engine
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "STABLE TARGET").delete()
+    db.add(User(first_name="STABLE", last_name="TARGET", username="STABLE TARGET",
+                password_hash=pwd_context.hash("stablepass1"), role="Admin"))
+    db.commit()
+    db.close()
+    incoming = [
+        {"username": "STABLE TARGET", "first_name": "STABLE", "last_name": "TARGET",
+         "role": "Clerk", "password_hash": pwd_context.hash("wrongpass12"),
+         "is_deactivated": False},  # no updated_at: cannot win anything
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "STABLE TARGET").first()
+    db.close()
+    assert target.role == "Admin"
+    assert pwd_context.verify("stablepass1", target.password_hash)
+    # The untouched account still signs in with its own password.
+    assert client.post("/token", json={"username": "STABLE TARGET",
+                                       "password": "stablepass1"}).status_code == 200
+
+
+def test_sync_merge_adopts_newer_change_and_last_login(client):
+    # A timestamped change from the owning machine still wins, and the
+    # last sign-in stamp max-merges so "Last seen" agrees everywhere.
+    import sync_engine
+    from datetime import datetime, timedelta
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "NEWER TARGET").delete()
+    db.add(User(first_name="NEWER", last_name="TARGET", username="NEWER TARGET",
+                password_hash=pwd_context.hash("oldpass123"), role="Clerk"))
+    db.commit()
+    db.close()
+    newer = (datetime.now() - timedelta(hours=2)).isoformat()
+    older = (datetime.now() - timedelta(days=1)).isoformat()
+    incoming = [
+        {"username": "NEWER TARGET", "role": "Admin",
+         "password_hash": pwd_context.hash("freshpass12"), "is_deactivated": False,
+         "updated_at": newer, "last_signin_at": older},
+        # A stale-timestamped edit must LOSE: local state stays Admin.
+        {"username": "NEWER TARGET", "role": "Clerk",
+         "password_hash": pwd_context.hash("ghostpass1"), "is_deactivated": True,
+         "updated_at": older},
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "NEWER TARGET").first()
+    db.close()
+    assert target.role == "Admin"
+    assert pwd_context.verify("freshpass12", target.password_hash)
+    assert target.updated_at is not None
+    assert client.post("/token", json={"username": "NEWER TARGET",
+                                       "password": "freshpass12"}).status_code == 200
+
+
+# --- NEW COMPUTER CONNECT SAFETY (2026-10-25) --------------------------
+# A brand-new (or wiped-and-reinstalled) computer joins the LAN and starts
+# pulling. The office machine must never lose data because of it: the peer
+# may only RECEIVE copies; it must not be able to change records on the
+# office machine, and a same-username account it creates must not steer the
+# office's live account. These tests pin those guarantees to real code.
+
+def test_sync_merge_refuses_cross_machine_recreation(client):
+    # A new install re-registered BEN JAMES with its own password and role
+    # (this is how the office saw 'Admin turned Clerk on Windows'). The
+    # account OWNER stamp now locks the owner copy: another machine's
+    # recreation — even timestamped NEWER — may not change role, password,
+    # or deactivation. It may still move the last sign-in stamp.
+    import sync_engine
+    from datetime import datetime, timedelta
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "OWNER TARGET").delete()
+    db.add(User(first_name="OWNER", last_name="TARGET", username="OWNER TARGET",
+                password_hash=pwd_context.hash("ownerpass123"), role="Admin",
+                create_origin="AAAA1111AAAA1111"))
+    db.commit()
+    db.close()
+    later = (datetime.now() + timedelta(minutes=5)).isoformat()
+    incoming = [
+        {"username": "OWNER TARGET", "first_name": "OWNER", "last_name": "TARGET",
+         "role": "Clerk", "password_hash": pwd_context.hash("recreated99"),
+         "is_deactivated": False, "updated_at": later,
+         "create_origin": "BBBB2222BBBB2222"},
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "OWNER TARGET").first()
+    db.close()
+    assert target.role == "Admin"
+    assert pwd_context.verify("ownerpass123", target.password_hash)
+    assert not bool(target.is_deactivated)
+    # The owner still signs in with the owner password; the recreation's
+    # fingerprint did not replace anything.
+    assert client.post("/token", json={"username": "OWNER TARGET",
+                                       "password": "ownerpass123"}).status_code == 200
+
+
+def test_sync_merge_locks_legacy_copy_when_peer_claims_an_origin(client):
+    # Pre-feature installs have no owner stamp on their accounts (None). A
+    # peer RECREATED account always carries its own origin — so to an old
+    # copy, an origin suddenly appearing means 'newly created somewhere else'.
+    # Lock it exactly like the fingerprint mismatch above.
+    import sync_engine
+    from datetime import datetime, timedelta
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "LEGACY TARGET").delete()
+    db.add(User(first_name="LEGACY", last_name="TARGET", username="LEGACY TARGET",
+                password_hash=pwd_context.hash("legacypass1"), role="Admin"))
+    db.commit()
+    db.close()
+    later = (datetime.now() + timedelta(minutes=5)).isoformat()
+    incoming = [
+        {"username": "LEGACY TARGET", "first_name": "LEGACY", "last_name": "TARGET",
+         "role": "Clerk", "password_hash": pwd_context.hash("reinstalled9"),
+         "is_deactivated": True, "updated_at": later,
+         "create_origin": "CCCC3333CCCC3333"},
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "LEGACY TARGET").first()
+    db.close()
+    assert target.role == "Admin"
+    assert pwd_context.verify("legacypass1", target.password_hash)
+    assert not bool(target.is_deactivated)
+
+
+def test_sync_merge_still_adopts_peer_edit_that_keeps_origin(client):
+    # Legitimate edits made on any computer NEVER invent a new owner
+    # fingerprint — they keep the row's (possibly empty) origin. Such a peer
+    # edit must still win on a newer timestamp. (A peer claiming an origin
+    # that this copy never had is tested above: it is a recreation and is
+    # locked out.)
+    import sync_engine
+    from datetime import datetime, timedelta
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "EDIT TARGET").delete()
+    db.add(User(first_name="EDIT", last_name="TARGET", username="EDIT TARGET",
+                password_hash=pwd_context.hash("oldpasswd12"), role="Clerk"))
+    db.commit()
+    db.close()
+    later = (datetime.now() + timedelta(minutes=2)).isoformat()
+    incoming = [
+        {"username": "EDIT TARGET", "first_name": "EDIT", "last_name": "TARGET",
+         "role": "Admin", "password_hash": pwd_context.hash("resetpass1"),
+         "is_deactivated": False, "updated_at": later},
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "EDIT TARGET").first()
+    db.close()
+    assert target.role == "Admin"
+    assert pwd_context.verify("resetpass1", target.password_hash)
+
+
+def test_sync_merge_never_demotes_last_active_admin(client):
+    # Even a timestamped, correctly-owned-looking change must not leave the
+    # office with zero active Admins — nobody could manage accounts after
+    # that. The demotion is refused and the Admin keeps working.
+    import sync_engine
+    from datetime import datetime, timedelta
+    db = TestingSessionLocal()
+    db.query(User).filter(User.username == "LAST ADMIN").delete()
+    # Make the guard's premise real: LAST ADMIN is this machine's ONLY
+    # active Admin during this merge. Earlier module tests may have left
+    # other active Admins behind — stand every one of them down for the
+    # merge and put each back exactly as it was afterwards.
+    standing_down = db.query(User).filter(
+        User.role == "Admin", User.is_deactivated == False).all()
+    saved_state = [(u.username, bool(u.is_deactivated)) for u in standing_down
+                   if u.username != "LAST ADMIN"]
+    for u in standing_down:
+        u.is_deactivated = True
+    db.add(User(first_name="LAST", last_name="ADMIN", username="LAST ADMIN",
+                password_hash=pwd_context.hash("realadmin12"), role="Admin",
+                create_origin="AAAA1111AAAA1111"))
+    db.commit()
+    db.close()
+    later = (datetime.now() + timedelta(minutes=3)).isoformat()
+    incoming = [
+        {"username": "LAST ADMIN", "first_name": "LAST", "last_name": "ADMIN",
+         "role": "Clerk", "password_hash": pwd_context.hash("realadmin12"),
+         "is_deactivated": False, "updated_at": later,
+         "create_origin": "AAAA1111AAAA1111"},
+    ]
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, incoming)
+    db.commit()
+    target = db.query(User).filter(User.username == "LAST ADMIN").first()
+    db.close()
+    assert target.role == "Admin"
+    # The stand-down above is only for this merge: put every other Admin
+    # back exactly as it was so later tests sign in normally.
+    db = TestingSessionLocal()
+    for username, was_active in saved_state:
+        db.query(User).filter(User.username == username).update(
+            {"is_deactivated": False}, synchronize_session=False)
+    db.commit()
+    db.close()
+
+
+def test_pull_of_blank_peer_changes_nothing(client):
+    # A blank install sends an empty pull payload: the office machine reads
+    # nothing new and its records stay exactly as they are (count untouched).
+    from sqlalchemy import func
+    db = TestingSessionLocal()
+    before = db.query(func.count(User.id)).scalar()
+    db.close()
+    import sync_engine
+    db = TestingSessionLocal()
+    sync_engine._merge_incoming_users(db, [])
+    db.commit()
+    after = db.query(func.count(User.id)).scalar()
+    db.close()
+    assert before == after
+
+
+def test_admin_change_role_endpoint(client):
+    headers = _token(client)
+    res = client.put("/users/set-role", headers=headers,
+                     json={"username": "TEMP CLERK", "role": "Admin"})
+    assert res.status_code == 200, res.text
+    db = TestingSessionLocal()
+    promoted = db.query(User).filter(User.username == "TEMP CLERK").first()
+    assert promoted.role == "Admin" and promoted.updated_at is not None
+    db.close()
+    # Demote back, invalid role refused, self-change refused, clerk refused.
+    res = client.put("/users/set-role", headers=headers,
+                     json={"username": "TEMP CLERK", "role": "Clerk"})
+    assert res.status_code == 200
+    res = client.put("/users/set-role", headers=headers,
+                     json={"username": "TEMP CLERK", "role": "Boss"})
+    assert res.status_code == 400
+    my_headers = _token(client)
+    res = client.put("/users/set-role", headers=my_headers,
+                     json={"username": "ADMIN BOSS", "role": "Clerk"})
+    assert res.status_code == 400
+    clerk_headers = _token(client, "TEMP CLERK", "clerkpass123")
+    res = client.put("/users/set-role", headers=clerk_headers,
+                     json={"username": "NICO DUAG", "role": "Admin"})
+    assert res.status_code == 403
 
 # --- FIRST-RUN ADMIN SETUP: password confirmation + bootstrap ---
 # On a truly fresh install there are zero accounts: signup is open, the account

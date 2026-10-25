@@ -62,6 +62,30 @@ security-**answer** hashes (`security_a1_hash` … `a3_hash`) are still stripped
 account recovery stays answerable only on the machine that set the questions.
 Verified by `tests/test_user_management.py::test_password_hash_survives_sync_roundtrip`.
 
+Timestamp-guarded merge (2026-10-24 role-flip fix): every account carries
+`updated_at` (bumped by each endpoint that changes password, role, or
+deactivation) and `last_signin_at` (stamped on every successful sign-in).
+A peer may overwrite password/role/deactivation **only when its `updated_at`
+is strictly newer** than the local copy's; a pull from an old engine that
+sends no timestamp is merged in the gaps it fills — it can never flip a
+local Admin to Clerk or vice versa. `last_signin_at` is max-merged,
+so "Last seen" in Manage Office Accounts agrees on all computers.
+Verified by `tests/test_user_management.py::test_sync_merge_ignores_timestampless_peer_roles`
+and `...::test_sync_merge_adopts_newer_change_and_last_login`.
+
+New-computer protection (2026-10-25): every account also carries
+`create_origin` — the fingerprint of the computer that CREATED it. A
+copy recreated on a new or reinstalled computer has a different origin;
+the merge refuses to let such a copy change role, password, or
+deactivation on any machine holding a copy from the original creation
+(only the sign-in stamp still moves), so a fresh install cannot rewrite
+the office's accounts — it only fills in what is missing. Edits on any
+computer keep the original origin and still sync. A safety stop also
+refuses any merge that would demote a machine's last active Admin.
+Verified by `tests/test_user_management.py::test_recreated_account_from_other_machine_cannot_take_over`.
+Password reset PIN recovery stays answerable only on the computer listed
+as the account's origin (Manage → Cluster).
+
 Legacy behavior (kept here so old release notes make sense): synced accounts
 arrived with a `SYNCED_NO_PASSWORD` placeholder and could not log in anywhere
 but their home computer until an admin reset them.
@@ -72,6 +96,14 @@ but their home computer until an admin reset them.
   delete propagates instead of resurrecting.
 - Last-write-wins on `updated_at` (naive ISO strings, office machines share
   one timezone; clock-skew tolerance is the 300 s freshness window).
+- **Records are matched by SBN first** (2026-10-24 duplicate fix): a pull
+  row whose `id` is unknown but whose `sbn_no` already exists on this
+  machine updates that row in place instead of inserting a twin — this is
+  what once doubled the live count to 12,246 against ~6,123 real records
+  when both computers held copies imported on each. The local row keeps
+  **its own id** even when the peer's copy has a different one, so history
+  entries and approval tickets keep pointing at it. Verified by
+  `tests/test_sync_failure_paths.py::test_same_sbn_from_peer_fuses_instead_of_duplicating`.
 - Unknown fields in an incoming record dict are dropped against the live
   `FranchiseRecord` column set.
 

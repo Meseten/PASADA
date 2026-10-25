@@ -13,6 +13,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import os
+import subprocess
 
 ACCENT = RGBColor(0x1F, 0x3A, 0x5F)   # deep blue for headings + highlights
 BLACK = RGBColor(0x00, 0x00, 0x00)    # every word of body text
@@ -22,7 +23,8 @@ BOX_FILL = "F5F7FA"
 WARN_FILL = "FDF3E7"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.join(HERE, "manual_assets")
+ROOT = os.path.dirname(HERE)          # the pasada repo root
+ASSETS = HERE                          # screenshots live in manual_assets/ itself
 
 FIG = {"n": 0}
 TBL = {"n": 0}
@@ -205,7 +207,7 @@ def build():
     para(doc, "Software Manual Guide", size=24, bold=True, color=BLACK, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=18)
     para(doc, "The complete guide to the franchise registry system for municipal tricycle operators",
          size=12, italic=True, color=BLACK, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=26)
-    logo = os.path.abspath(os.path.join(HERE, "frontend", "public", "TFRU.png"))
+    logo = os.path.abspath(os.path.join(ROOT, "frontend", "public", "TFRU.png"))
     if os.path.exists(logo):
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.add_run().add_picture(logo, width=Mm(34))
@@ -423,6 +425,14 @@ def build():
     ])
     h2(doc, "Editing and renewing")
     para(doc, "Click the pencil icon. Change what needs changing. The rules the system applies are worth knowing: moving the issue date to the current year is a renewal and turns the chip green. Changing only the name is an edit, not a renewal. Changing the motor number also updates the motor date when the auto-date preference is on. Every save is written to the Activity History with your name, the old values, and the new values.")
+    h2(doc, "Undoing a mistake in an edit")
+    para(doc, "Every edit can be undone, not just deletions. Two ways:")
+    bullets(doc, [
+        "Right after saving: the green confirmation message shows an Undo Changes button at its right side. Click it before touching anything else, and the record is put back exactly as it was before that save.",
+        "Any time later: the record's History dialog (the clock icon) lists every change. Each entry that carries saved earlier values has an amber Undo this edit button beside it. Clicking it puts the record back to the values it had right before that entry, no matter how many edits came after.",
+    ])
+    para(doc, "While the undo is running the button shows a spinner and cannot be clicked twice. If the undo cannot happen (for example, the old SBN is now used by another record on the same computer), the message says so in plain words and changes nothing — the record stays exactly as it is. Undo actions themselves are written to the Activity History, so the office can always see what came back.")
+    note_box(doc, "NOTE:", "The Undo Changes button lives inside the confirmation message at the bottom of the screen. If the MTOP preview opened right after the save, close the preview first; the message stays a few seconds and is gone before you can miss it.")
     h2(doc, "Deleting and restoring")
     para(doc, "The trash icon deletes one operator; tick checkboxes and use the delete-selected control for many at once. Deleted records are not destroyed. They move to the deleted list, and the Undo button that appears right after a delete brings records back immediately. Older deletions are restored by the admin (Chapter 9).")
     h2(doc, "Printing certificates")
@@ -557,6 +567,7 @@ def build():
     para(doc, "The Sharing between computers card also has a Sync now button. Sharing runs on its own and new or changed accounts arrive within seconds, but if you want to pull records from the other computers right away (for example after reconnecting a network cable), press it once.")
     h2(doc, "Administrative tab: accounts and templates")
     para(doc, "Office accounts: create an account by typing a first name, last name, password, and role. Reset a password by choosing the account and typing the new one. Both reach every computer in the office within seconds.")
+    para(doc, "Changing a role: in the account table every row's Role column is a dropdown. Pick Clerk, Viewer, or Admin right there, confirm, and the change applies at once and syncs to every office computer within seconds. Two protections are built in: you cannot change the role of the account you are signed in with, and the office always keeps at least one active Admin, so a demotion that would remove the last admin is refused with a plain explanation. The Activity History records who changed whose role, from what to what (Chapter 9 explains what each role may do).")
     para(doc, "The account table under the forms lists every account with its role and status. Active means the account can sign in. Deactivated means it cannot, until an admin clicks Reactivate. The Deactivate button asks for confirmation first, and the button on your own row is disabled: no admin can switch off the account they are signed in with, which guarantees the office always keeps at least one working admin.")
     para(doc, "Document templates: the certificate (MTOP) and the TODA summary are Word files with placeholders like [SBN_NO] and [NAME]. When the LGU amends a form, upload the new .docx here. PASADA checks the file is readable, counts the placeholders, warns if any are missing, keeps the previous file as a .bak beside it, and writes the upload to the audit log. One bad upload can always be undone by restoring the .bak.")
     h2(doc, "Every admin power, in one list")
@@ -587,6 +598,7 @@ def build():
         "The clerk clicks the normal button, for example Delete Entire Route.",
         "PASADA answers immediately: your request was sent to the admin. Nothing has changed yet.",
         "The request becomes a ticket in the admin's Approvals tab, showing who asked, what will happen, and when.",
+        "Optional but encouraged: while filing, you can type a few words describing the problem or the reason. It appears on the ticket, so the admin can decide without chasing you down. Leaving it empty is allowed.",
         "The admin approves (the action runs at once) or rejects with a reason.",
         "Both outcomes land in the Activity History, with names and timestamps.",
     ])
@@ -724,7 +736,14 @@ def build():
     ])
     h2(doc, "11. I see error notes or a crash message")
     para(doc, "The Technical tab keeps the last lines of the error log. This is normal logging, not a breakdown: PASADA writes a note whenever something unusual happens so problems can be traced later. If the app works, ignore old entries. If it misbehaves, the newest lines usually name the exact cause; show them to support.")
-    h2(doc, "12. Updates will not install")
+    h2(doc, "12. I saved a wrong edit (or undid one and want the fix back)")
+    steps(doc, [
+        "Click the clock (History) icon on the record's row.",
+        "Find the entry that carries the values you want back: every entry with an amber Undo this edit button can put the record back to how it was just before that entry.",
+        "Click Undo this edit. The record returns to those values immediately, even if many edits came after.",
+    ])
+    para(doc, "If the message says the old SBN is now used by another record, nothing was changed. Ask the admin to find the other record (search the old SBN) and move or free it first, then undo again.")
+    h2(doc, "13. Updates will not install")
     bullets(doc, [
         "Updates need internet once. Connect, open Settings, and click Install when the prompt appears.",
         "If an install is interrupted, run the app again; it finishes the update before opening.",
@@ -760,6 +779,12 @@ def build():
         "Check the totals on the Dashboard against what the office expects, and against a print of the old Excel masterlist if there is one.",
     ])
     para(doc, "A plain .db file works the same way. Both are admin-only imports; a clerk attempting one sees an access message instead.")
+    h2(doc, "19. I changed someone's role and it did not take effect")
+    bullets(doc, [
+        "Refreshing the list fixes a dropdown that jumped back after being rejected (for example, changing the role of your own row, which is disabled on purpose).",
+        "A demotion that would remove the office's last active Admin is refused; promote or create another Admin first, then demote.",
+        "Role changes reach the other computers within seconds; a computer that is offline applies the change the moment it reconnects.",
+    ])
     h2(doc, "Still stuck?")
     para(doc, "Collect four things before asking for help: what you clicked, what appeared on screen, the time it happened, and the newest lines from the Technical tab's Error notes. With those four, almost any PASADA problem can be found and fixed quickly.")
 
@@ -890,6 +915,8 @@ def build():
             ("Template", "The Word document (.docx) with placeholders that certificates are printed from."),
             ("Soft delete", "A delete that keeps the record recoverable in the deleted list."),
             ("Deactivated account", "An account switched off by the admin. It cannot sign in anywhere, but its records and history are kept. Reactivating restores sign-in."),
+            ("Role", "What an account may do: Clerk creates and edits records; Admin does everything a clerk can, plus accounts and approvals; Viewer can look and print only."),
+            ("Undo an edit", "One click that puts a record back to exactly the values it had before a given edit. Offered right after saving and inside the record's History dialog."),
             ("One-time admin setup", "The panel that makes the first admin when an office has none. It closes forever once an admin exists."),
             ("Viewer account", "A read-only account. It can open, search, and print everything but cannot change records, meant for a second office computer that only looks things up."),
             ("Nightly backup ZIP", "The automatic backup PASADA makes each night: a .zip file with the whole registry (.db) inside. It can be imported on another computer to rebuild the records."),
@@ -898,15 +925,20 @@ def build():
 
     out_docx = os.path.join(HERE, "PASADA_Software_Manual_Guide.docx")
     doc.save(out_docx)
-    # Keep the tracked copy in manual_assets and the shipped copy at the repo
-    # root in sync; the root PDF is what office staff receive.
-    out_pdf = os.path.abspath(os.path.join(HERE, "..", "PASADA_Software_Manual_Guide.pdf"))
+    # The printed copy office staff receive: LibreOffice renders the same
+    # document to PDF at the repo root (A4, Arial stays Arial).
+    out_pdf = os.path.abspath(os.path.join(ROOT, "PASADA_Software_Manual_Guide.pdf"))
     if os.path.exists(out_pdf):
         try:
             os.remove(out_pdf)
         except OSError:
             pass
+    subprocess.run([
+        "soffice", "--headless", "--convert-to", "pdf", "--outdir", ROOT,
+        out_docx,
+    ], check=True)
     print(f"saved {out_docx} with {FIG['n']} figures, {TBL['n']} tables")
+    print(f"saved {out_pdf}")
 
 
 if __name__ == "__main__":

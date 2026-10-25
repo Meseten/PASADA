@@ -59,7 +59,7 @@ interface RecoveryConfig {
 
 // Must match the version in src-tauri/tauri.conf.json; the updater compares
 // against it to decide whether a new release exists.
-const APP_VERSION = "0.82.7";  // stamped by .github/workflows/release.yml on every push
+const APP_VERSION = "0.82.14";  // stamped by .github/workflows/release.yml on every push
 
 interface Toast {
   id: number;

@@ -145,3 +145,25 @@ Liveliness: dials ENERGY 1 / RHYTHM 1 / MOTION 1 are deliberate for a government
 - `npm test` (vitest): all unit tests pass.
 - `pytest` (backend): all endpoint/business-logic/performance tests pass.
 - Click-through (live server, recorded via accessibility tree): theme toggle -> dark to light, aria-label and tooltip update; Connection pill -> Online state with tooltip; records page -> records/row-actions/tour-add anchors present, 55 tooltips live, status badge shows its plain-words description; Settings -> Guide card and Connections tooltips verified; tutorial -> auto-starts with 9 page-appropriate steps, sidebar popovers open to the right, full-width sections open below, closes cleanly and does not reappear; backend host/CORS changes verified by code inspection and the passing pytest suite (the packaged sidecar was not relaunched, since the office's live instance was running).
+
+## 11. Multi-PC deployment pass, October 24-25, 2026
+
+Review after the office connected real Windows and Linux machines and hit
+duplicated, reverted, and role-flipped data. Every fix below has a test named
+after it in the backend suite (205 tests passing at the end of the pass).
+
+| Finding | Fix |
+|---------|-----|
+| User merging was a no-op at runtime: everything below an early `return` in `_merge_incoming_users` sat inside `_active_admin_count` at unreachable indentation, so no incoming account was ever merged (the "refuse" tests passed vacuously). | The function body was restructured into real merge logic; the four user-merge adoption tests now exercise the actual merge. `tests/test_user_management.py` wording updated to match the real behavior. |
+| A freshly wiped Windows machine that joined the cluster could overwrite existing accounts (role flips, auto-promotions such as a Clerk becoming Admin on sign-in) because the pull merge trusted any peer row that had a timestamp. | Every local account now carries `create_origin` (the fingerprint of the computer that created it). A reinstalled computer re-signing up with the same username produces a copy with a different origin, which the merge refuses to let steer role, password, or deactivation on any machine holding a copy from the original creation; it only fills in what is missing, so a clean reinstall stays blank instead of rewriting the office's accounts. Edits made on any computer keep the original origin and still propagate. Plus a last-admin stop: no merge can demote a machine's only active Admin. Verified by `tests/test_user_management.py::test_recreated_account_from_other_machine_cannot_take_over` and `...::test_bootstrapped_admin_keeps_bias_over_timestampless_peer`. _Note_: password reset PIN recovery stays answerable only on the computer that created the account (listed in Manage -> Cluster); if an office re-installs that creator machine, the new local install re-seeds origin and accounts on OTHER machines arrive as origin-locked copies. |
+| Same-SBN records stacked twice (12,246 rows vs ~6,123 real records) when two computers each held an imported copy. Pull rows now fuse into the local row by SBN. | Verified by `tests/test_sync_failure_paths.py::test_same_sbn_from_peer_fuses_instead_of_duplicating`. |
+| Edits were irreversible - undo existed for deletes only. | Every record edit saves its full pre-edit values in the audit entry (`before_values`). Undo appears (a) as an Undo Changes button inside the success toast right after a save, and (b) as an Undo this edit button on each eligible entry in the record History dialog. The server refuses an undo when the old SBN is now used by another record, and says so in plain words. Backend: `PUT /api/operators/{id}/revert/{log_id}`; tests: `tests/test_edit_undo.py` (6) and frontend `TodaClient.edit-undo.test.tsx` (3). |
+| No UI to change account roles; roles were fixed at creation. | Role changes land in Manage Office Accounts as a dropdown on each account row (`PUT /users/set-role`). Self-change and last-active-admin demotion are refused. Audit-logged as `CHANGE_ROLE`, syncs to every computer. |
+| Restore/rename tickets existed as endpoints only, no UI, no way for clerks to say why. | Ticket filing UI carries an optional free-text reason; Admin rejections are the same. Covered in the manual, Chapter 9. |
+
+### Verification evidence for this pass
+
+- `pytest`: 205 passed (441 s, backend venv on this Linux machine).
+- `npm test` (vitest): 30 passed (6 files), including the new edit-undo tests.
+- `npm audit`: 0 vulnerabilities after a lockfile regeneration with npm 11
+  (the intake pass had found 9 advisories, all in dev-only tooling).

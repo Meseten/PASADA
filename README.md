@@ -182,6 +182,9 @@ PASADA is a desktop app for a government office, so its security assumptions are
 - **Promotion keeps every clerk power:** when a Clerk becomes the Admin through the one-time bootstrap, the same account keeps creating, editing, renewing, printing, and exporting exactly as before; the admin doors simply open on top. Verified by `test_admin_console.py`.
 - **Database import and Full Restore are Admin only:** both the merge import and the Full Restore of a `.db` backup file refuse non-Admin accounts. (The full-restore gate was added after a full endpoint audit; previously any signed-in account could replace the registry.)
 - **Wrong-password lockout:** 5 failed attempts lock the account for 15 minutes, and the lock survives a restart. If the office "tried everything," the lockout is usually what they are hitting — wait it out or have the Admin reset the password.
+- **Roles never flip between computers (2026-10-24):** every role, password, and deactivation change carries a timestamp, and a peer can only overwrite an account when its change is newer — an old-engine neighbour can no longer turn your Admin into a Clerk (or vice versa). Sign-in stamps max-merge so "Last seen" matches everywhere.
+- **Records are one row per SBN (2026-10-24):** a synced record whose SBN already exists here updates the existing row instead of stacking a second one, and keeps this machine's row id so History and approval tickets stay linked.
+- **Role changes are a table action:** an Admin changes any other account's role Admin⇄Clerk straight in Manage Office Accounts (self-change is refused; the last active Admin cannot be demoted). It syncs within seconds and is audit-logged as `CHANGE_ROLE`.
 - **The Quick PIN** is stored only as a SHA-256 hash on the device, and the audit log records who changed what, when.
 - **Updates are signed:** the Tauri updater verifies the release signature before installing anything.
 

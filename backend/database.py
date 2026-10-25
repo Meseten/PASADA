@@ -1,6 +1,6 @@
 # 25010 Characteristic: Reliability
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, event
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, Float, event
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import inspect, text
@@ -81,6 +81,25 @@ class User(Base):
     # sign-in is blocked. Default 0 (active) so the schema upgrade leaves every
     # existing account exactly as it was.
     is_deactivated = Column(Boolean, default=False, nullable=True)
+    # ACCOUNT EDIT TIMESTAMP (2026-10-24 role-flip fix): records WHEN this
+    # account's password, role, or deactivation last changed. Older installs
+    # have no timestamps, so every machine's pull won and roles ping-ponged
+    # between computers ("Admin turned Clerk, Clerk turned Admin"). Merges
+    # now only adopt a peer's change when its timestamp is newer.
+    updated_at = Column(DateTime, nullable=True)
+    # LAST SIGN-IN: roams with the account so "Last seen" agrees on every
+    # computer (it used to be per-machine audit history only, which showed
+    # "Never" for accounts that sign in on another computer).
+    last_signin_at = Column(DateTime, nullable=True)
+    # ACCOUNT OWNER (2026-10-25): machine fingerprint of the computer where
+    # this account was CREATED. When a new or reinstalled computer registers
+    # the same username, its fresh copy carries a different fingerprint, so
+    # the pull merge REFUSES to let it overwrite an owner machine's live copy
+    # (role, password, deactivation). A newly connected computer therefore
+    # cannot change the office's existing accounts — it can only receive
+    # them. Edits made on any computer keep the original fingerprint and
+    # still propagate to everyone.
+    create_origin = Column(String, nullable=True)
     # ACCOUNT RECOVERY: three office-friendly security questions answered at
     # signup or from Settings. Only the bcrypt hash of each answer is stored,
     # never the text, and the hashes never leave this machine through sync.
@@ -128,6 +147,12 @@ class AuditLog(Base):
     new_value = Column(String, nullable=True)
     secondary_value = Column(String, nullable=True)
     ip_or_source = Column(String, nullable=True)
+    # EDIT SNAPSHOT (2026-10-25): every record edit stores the record's full
+    # pre-edit values here as JSON text, so any edit — plain edit, change
+    # motor, or renewal — can be undone button-by-button from the record's
+    # History (and from the success toast right after saving). Plain text
+    # JSON on purpose: no new table, heals on old databases, syncs as-is.
+    before_values = Column(Text, nullable=True)
 
 class SystemSettings(Base):
     __tablename__ = "system_settings"

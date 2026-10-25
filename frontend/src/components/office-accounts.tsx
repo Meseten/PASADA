@@ -202,6 +202,42 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
     }
   };
 
+  const handleSetRole = async (target: ManagedUser, newRole: string) => {
+    if (newRole === target.role) return;
+    const verb = newRole === "Admin" ? "promote to Admin" : "demote to Clerk";
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: `${verb}: ${target.full_name}`,
+      message: newRole === "Admin"
+        ? "An Admin manages accounts, restores deleted records, and approves tickets. Make sure you trust this account first."
+        : "A Clerk fills out registration forms and cannot manage accounts or approve restorations.",
+      confirmLabel: verb === "promote to Admin" ? "Make Admin" : "Make Clerk",
+    });
+    if (!ok) {
+      loadUsers(); // revert the select back to the account's real role
+      return;
+    }
+    setUsersLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/users/set-role`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: target.username, role: newRole }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        notify(data.message || "Role updated. It syncs to the other computers.", "success");
+      } else {
+        notify(data.detail || "Could not change the role.", "error");
+      }
+    } catch {
+      notify("Network error while changing the role.", "error");
+    } finally {
+      setUsersLoading(false);
+      loadUsers();
+    }
+  };
+
   return (
     <div className="bg-muted/15 border border-border p-6 md:p-8 rounded-2xl space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border pb-4">
@@ -357,7 +393,22 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
             {users.map((u) => (
               <tr key={u.username} className={`border-t border-border ${u.is_deactivated ? "opacity-60" : ""}`}>
                 <td className="px-4 py-2.5 font-bold">{u.full_name}</td>
-                <td className="px-4 py-2.5">{u.role}</td>
+                <td className="px-4 py-2.5">
+                  {u.username === myUsername ? (
+                    <span title="You created the office with this account; it keeps you from locking yourself out.">{u.role} (you)</span>
+                  ) : (
+                    <select
+                      value={u.role}
+                      disabled={usersLoading || u.is_deactivated}
+                      aria-label={`Change role of ${u.full_name}`}
+                      onChange={(e) => handleSetRole(u, e.target.value)}
+                      className="rounded-lg border border-border bg-background px-2 py-1.5 font-bold text-xs cursor-pointer disabled:opacity-40"
+                    >
+                      <option value="Admin">Admin</option>
+                      <option value="Clerk">Clerk</option>
+                    </select>
+                  )}
+                </td>
                 <td className="px-4 py-2.5 text-muted-foreground font-medium text-xs">{fmtWhen(u.last_login)}</td>
                 <td className="px-4 py-2.5">
                   {u.has_password ? (

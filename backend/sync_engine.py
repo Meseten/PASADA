@@ -928,6 +928,26 @@ def get_peer_status():
 # hold the SAME key without ever displaying it. Any rotate/import clears the
 # peer registry so the next broadcast is signed by the NEW key and no stale
 # expectation from the old one lingers.
+def machine_fingerprint() -> str:
+    """Stable identity for THIS computer, used as the account-owner stamp.
+    SHA-256 of the machine's long-term pairing public key: generated once,
+    reused forever (survives restarts), and unique — two computers can never
+    share one. Falls back to the saved computer name when pairing crypto is
+    missing, purely so ownership bookkeeping still has something stable."""
+    try:
+        if _PAIRING_PUB:
+            return hashlib.sha256(bytes(_PAIRING_PUB)).hexdigest()[:16].upper()
+    except Exception:
+        pass
+    seed = b""
+    try:
+        with open(COMPUTER_NAME_PATH, "rb") as f:
+            seed = f.read()
+    except OSError:
+        pass
+    return hashlib.sha256(seed or b"PASADA").hexdigest()[:16].upper()
+
+
 def cluster_secret_fingerprint() -> str:
     """Non-reversible fingerprint of the current key. Same key = same
     fingerprint; one differing character = a different fingerprint."""
@@ -1346,6 +1366,17 @@ def _log_listener_drop_once(addr, e):
     force_log(f"[SYNC-LISTEN] dropped datagram from {addr[0] if addr else '?'}: "
               f"{kind}: {e} (further drops of this kind stay quiet for 60s)")
 
+def _active_admin_count(db, exclude: str = None) -> int:
+    """How many OTHER accounts are active Admins right now (active = role
+    Admin and not deactivated). Excludes the account being judged so the
+    caller can ask 'would someone else still run the office?'"""
+    from database import User
+    q = db.query(User).filter(User.role == "Admin", User.is_deactivated == False)
+    if exclude:
+        q = q.filter(User.username != exclude)
+    return q.count()
+
+
 def _merge_incoming_users(db, incoming_users):
     """Merge accounts pulled from a peer into this machine's database.
 
@@ -1355,43 +1386,118 @@ def _merge_incoming_users(db, incoming_users):
     deactivation changes so every computer agrees on who can sign in.
     Security-answer hashes are never part of the payload, so recovery stays
     on the machine that set the questions.
+
+    ROLE-FLIP FIX (2026-10-24): role, password-hash, and deactivation
+    changes now carry a timestamp (users.updated_at, bumped by every
+    endpoint that changes them). A peer may only overwrite those fields
+    when its change is strictly newer than this machine's, so the newest
+    change wins exactly once, everywhere — instead of whichever machine
+    pulled last overwriting the other and Admin/Clerk ping-ponging between
+    computers. A last sign-in stamp (users.last_signin_at) is max-merged
+    so "Last seen" agrees on every computer.
+    NEW-COMPUTER PROTECTION (2026-10-25): every account carries the
+    machine fingerprint of the computer that CREATED it
+    (users.create_origin). A new or reinstalled computer that re-registers
+    the SAME username produces a copy with a DIFFERENT origin — the merge
+    refuses to adopt its role/password/deactivation over an existing copy,
+    so a fresh install can never rewrite the office's accounts (it only
+    fills in what is missing). Edits made on any computer keep the
+    original origin and still propagate. Plus a safety stop: a peer
+    change can never demote this machine's LAST active Admin to Clerk.
     """
     from database import User
+
+    def _parse_ts(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+        except (ValueError, TypeError):
+            return None
+
     for u_item in incoming_users:
+        incoming_updated = _parse_ts(u_item.get('updated_at'))
+        incoming_role = u_item.get('role')
+        incoming_hash = u_item.get('password_hash') or ""
+        incoming_flag = bool(u_item.get('is_deactivated'))
+        incoming_login = _parse_ts(u_item.get('last_signin_at'))
+        incoming_origin = u_item.get('create_origin') or None
         existing_user = db.query(User).filter(User.username == u_item['username']).first()
         if not existing_user:
-            new_user = User(
+            db.add(User(
                 first_name=u_item.get('first_name'),
                 last_name=u_item.get('last_name'),
                 username=u_item.get('username'),
-                role=u_item.get('role'),
-                password_hash=u_item.get('password_hash') or "SYNCED_NO_PASSWORD",
-                is_deactivated=bool(u_item.get('is_deactivated'))
-            )
-            db.add(new_user)
-        else:
-            incoming_hash = u_item.get('password_hash') or ""
-            stale_stub = existing_user.password_hash == "SYNCED_NO_PASSWORD"
-            different_real_hash = (
-                incoming_hash
-                and incoming_hash != "SYNCED_NO_PASSWORD"
-                and existing_user.password_hash != incoming_hash
-            )
-            if stale_stub or different_real_hash:
-                # Fill the legacy stub, and follow a password change made on
-                # the owning machine so the account stays usable everywhere.
+                role=incoming_role,
+                password_hash=incoming_hash or "SYNCED_NO_PASSWORD",
+                is_deactivated=incoming_flag,
+                updated_at=incoming_updated,
+                last_signin_at=incoming_login,
+                create_origin=incoming_origin,
+            ))
+            continue
+
+        # SIGN-IN STAMP: never regresses. Whoever last saw this person sign
+        # in has the truth, independent of any password/role edit timing.
+        current_login = getattr(existing_user, 'last_signin_at', None)
+        if incoming_login and (current_login is None or incoming_login > current_login):
+            existing_user.last_signin_at = incoming_login
+
+        existing_updated = getattr(existing_user, 'updated_at', None)
+        local_origin = getattr(existing_user, 'create_origin', None)
+        # OWNER LOCK: a different machine's copy (a recreated account on a new
+        # install) can never steer this one, even when its timestamp is
+        # newer. A row with no local origin is still locked the moment the
+        # peer claims an origin — a legitimate peer EDIT of a legacy copy
+        # always keeps the row's origin empty, so an origin suddenly
+        # appearing means the account was newly created somewhere else.
+        origin_locked = (
+            (local_origin is not None and incoming_origin is not None
+             and local_origin != incoming_origin)
+            or (local_origin is None and incoming_origin is not None)
+        )
+        if origin_locked:
+            # Only the sign-in stamp may move; everything that decides
+            # who can sign in stays exactly as the owner machine wrote it.
+            _log_sync_throttled(
+                f"origin-lock:{u_item['username']}",
+                f"ignored an account change for {u_item['username']} "
+                f"created on another computer (this copy's owner is "
+                f"{'unknown' if local_origin is None else local_origin[:8]}); "
+                "role, password and deactivation stayed unchanged.")
+        peer_wins = (not origin_locked) and incoming_updated is not None and (
+            existing_updated is None or incoming_updated > existing_updated)
+        if peer_wins:
+            # LAST-ADMIN STOP: a merge must never demote this office's only
+            # active Admin — that would lock everyone out of Manage Accounts.
+            if (incoming_role == 'Clerk' and existing_user.role == 'Admin'
+                    and not bool(existing_user.is_deactivated)
+                    and _active_admin_count(db, exclude=existing_user.username) == 0):
+                _log_sync_throttled(
+                    f"last-admin:{u_item['username']}",
+                    f"refused a peer demotion of {u_item['username']}: it is "
+                    "this machine's last active Admin.")
+                continue
+            if incoming_hash and incoming_hash != "SYNCED_NO_PASSWORD" \
+                    and existing_user.password_hash != incoming_hash:
+                # A password change made on the owning machine arrives with a
+                # newer timestamp: adopt it so the account stays usable here.
                 existing_user.password_hash = incoming_hash
-            incoming_role = u_item.get('role')
             if incoming_role in ('Admin', 'Clerk') and existing_user.role != incoming_role:
-                # Follow a role change made on the owning machine (admin
-                # bootstrap or an admin promoting an account) so every
-                # computer agrees on who the admins are.
+                # Adopt a newer role (promotion, bootstrap, or demotion made
+                # on a peer) — but only because the timestamp proves peer_wins.
                 existing_user.role = incoming_role
-            incoming_flag = bool(u_item.get('is_deactivated'))
             if bool(existing_user.is_deactivated) != incoming_flag:
-                # Deactivation travels with the account so a deactivated
-                # clerk cannot dodge it by signing in on another computer.
                 existing_user.is_deactivated = incoming_flag
+            if incoming_updated is not None:
+                existing_user.updated_at = incoming_updated
+        elif not origin_locked and existing_user.password_hash == "SYNCED_NO_PASSWORD" \
+                and incoming_hash and incoming_hash != "SYNCED_NO_PASSWORD":
+            # Legacy stub: adopt the real hash even without a newer timestamp
+            # — without it the account can never sign in here at all.
+            existing_user.password_hash = incoming_hash
+            existing_user.updated_at = incoming_updated or existing_user.updated_at
 
 
 # POISONED-ROW VISIBILITY: a pull row whose timestamp cannot even be parsed
@@ -1501,7 +1607,20 @@ def sync_with_peers():
                         for item in incoming_data.get('records', []):
                             clean_item = {k: v for k, v in item.items() if k in valid_keys}
                             existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == clean_item['id']).first()
-                            
+                            if not existing:
+                                # DUPLICATE-ON-RECONNECT FIX (2026-10-24): the registry's
+                                # business key is the SBN, not the row id. When both
+                                # ended up holding one record (imported on each machine,
+                                # or synced before this identity rule existed), the ids
+                                # differed and every pull used to insert a SECOND row —
+                                # doubling the live count (12,246 seen against ~6,123
+                                # real). Match by SBN first and update that row in
+                                # place, so a peer's copy fuses into ours instead of
+                                # stacking a twin next to it.
+                                peer_sbn = clean_item.get('sbn_no')
+                                if peer_sbn:
+                                    existing = db.query(FranchiseRecord).filter(
+                                        FranchiseRecord.sbn_no == peer_sbn).first()
                             if not existing:
                                 new_rec = FranchiseRecord(**clean_item)
                                 try:
@@ -1529,6 +1648,14 @@ def sync_with_peers():
                                 
                                 if incoming_time > existing_time:
                                     for key, value in clean_item.items():
+                                        if key == 'id':
+                                            # KEEP THIS MACHINE'S ROW ID: history
+                                            # entries, approval tickets, and other
+                                            # references point at it. When the row was
+                                            # matched by SBN the peer's id would
+                                            # otherwise overwrite it and sever those
+                                            # links.
+                                            continue
                                         if key in ['issue_date', 'valid_until', 'updated_at']:
                                             if value: setattr(existing, key, datetime.fromisoformat(value).replace(tzinfo=None))
                                         else:

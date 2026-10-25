@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, AlertTriangle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe, Edit3, Save } from "lucide-react"
+import { History, FileSignature, Edit, Printer, Search, PlusCircle, CheckCircle, XCircle, AlertCircle, AlertTriangle, ArchiveX, Loader2, Filter, Calendar, FileText, Download, Trash2, CheckSquare, Eye, Shield, RefreshCw, ArrowUpDown, X, CheckCircle2, Globe, Edit3, Save, Undo2 } from "lucide-react"
 import { API_URL, fetchWithAuth, resolveAutoChangeMotorDate } from "@/lib/api"
 import { confirmDialog } from "@/components/ui/confirm-dialog"
 
@@ -35,6 +35,10 @@ interface LogEntry {
   clerk_name: string;
   action: string;
   details: string;
+  // EDIT UNDO: entries that changed a record carry the full "before" values
+  // (JSON text) so one button can put the record back. Empty on other kinds
+  // of entries and on old logs saved before this existed.
+  before_values?: string | null;
 }
 
 interface RouteInfo {
@@ -47,6 +51,9 @@ interface Toast {
   id: number;
   message: string;
   type: 'success' | 'error';
+  // UNDO-ON-SAVE: an optional one-click action inside the toast, e.g.
+  // "Undo Changes" right after an edit is saved.
+  action?: { label: string; onClick: () => void };
 }
 
 const KNOWN_ROUTES = [
@@ -198,9 +205,9 @@ export default function TodaClient() {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success', action?: { label: string; onClick: () => void }) => {
     const id = Date.now()
-    setToasts(prev => [...prev, { id, message, type }])
+    setToasts(prev => [...prev, { id, message, type, action }])
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id))
     }, 4000)
@@ -279,6 +286,39 @@ export default function TodaClient() {
       setIsLoading(false);
     }
   }, [safeRouteName, showToast])
+
+  // UNDO AN EDIT — one shared action used by the success toast right after a
+  // save AND by the per-entry button inside Record History. The server holds
+  // the saved "before" values for that edit; this only points at its log id
+  // and refreshes the list afterwards.
+  const [revertingLogId, setRevertingLogId] = useState<string | null>(null)
+  const handleRevertEdit = useCallback(async (recordId: string, logId: string) => {
+    setRevertingLogId(logId);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/api/operators/${encodeURIComponent(recordId)}/revert/${encodeURIComponent(logId)}`, { method: "PUT" });
+      // Read the body whatever the answer: refusals carry the plain-words
+      // reason (e.g. "this SBN is now used by another record") and that is
+      // exactly what the toast should say.
+      let data: any = null;
+      try { data = await res.json(); } catch { /* empty body is fine */ }
+      if (res.ok) {
+        showToast(data?.message || "Edit undone. The record is back to its values before that change.", "success");
+        await fetchMembersAndInfo();
+        // Keep the open History dialog honest: reload its entries so the
+        // undone edit is followed by a visible "undid the edit" entry.
+        try {
+          const hres = await fetchWithAuth(`${API_URL}/logs/record/${encodeURIComponent(recordId)}`);
+          if (hres.ok) setHistoryLogs(await hres.json());
+        } catch { /* History refresh is best-effort */ }
+      } else {
+        showToast(data?.detail || "Could not undo that edit.", "error");
+      }
+    } catch {
+      showToast("Network error while trying to undo the edit.", "error");
+    } finally {
+      setRevertingLogId(null);
+    }
+  }, [fetchMembersAndInfo, showToast])
 
   useEffect(() => {
     const initialLoadId = window.setTimeout(() => {
@@ -1193,8 +1233,28 @@ export default function TodaClient() {
         const showPreviewPref = localStorage.getItem("pasada_show_save_preview");
         const shouldShowPreview = showPreviewPref === null || showPreviewPref === "true";
 
+        // UNDO-ON-SAVE: right after a successful EDIT, the toast offers a
+        // one-click "Undo Changes". The server already saved the record's
+        // pre-edit values inside the audit entry this edit just wrote, so we
+        // only need the newest entry that carries one. Never blocks the save
+        // flow — if the lookup fails the toast simply appears without it.
+        let undoAction: { label: string; onClick: () => void } | undefined = undefined;
+        if (!isAdd && formData.id) {
+            try {
+                const hres = await fetchWithAuth(`${API_URL}/logs/record/${encodeURIComponent(formData.id)}`);
+                if (hres.ok) {
+                    const logs: Array<{ id: string; before_values?: string | null }> = await hres.json();
+                    const latestUndoable = logs.find(l => l.before_values);
+                    if (latestUndoable) {
+                        const targetId = formData.id, targetLog = latestUndoable.id;
+                        undoAction = { label: "Undo Changes", onClick: () => { void handleRevertEdit(targetId, targetLog); } };
+                    }
+                }
+            } catch { /* toast without undo */ }
+        }
+
         if (shouldShowPreview) {
-            showToast(`Record ${isAdd ? "added" : "updated"}. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success");
+            showToast(`Record ${isAdd ? "added" : "updated"}. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success", undoAction);
             
             if (refreshedList && refreshedList.length > 0) {
                 const savedRecord = refreshedList.find(m => m.sbn_no === returnedSBN);
@@ -1204,7 +1264,7 @@ export default function TodaClient() {
                 }
             }
         } else {
-            showToast(`Saved SBN: ${returnedSBN}`, "success");
+            showToast(`Saved SBN: ${returnedSBN}`, "success", undoAction);
         }
         
       } else {
@@ -1939,6 +1999,24 @@ export default function TodaClient() {
                   <div className="mt-2.5 bg-muted/30 p-3 rounded-lg text-sm border border-border/40 text-foreground/80 leading-relaxed shadow-sm font-medium">
                     {log.details}
                   </div>
+                  {/* UNDO PER EDIT: every entry that changed the record saved
+                      its own "before" values on the server, so each one can be
+                      undone on its own. Plain words, clear colors, no jargon. */}
+                  {log.before_values && activeMember && (
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={revertingLogId === log.id}
+                        onClick={() => { void handleRevertEdit(activeMember.id, log.id); }}
+                        className="h-8 text-xs font-bold border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40 hover:text-amber-800 dark:hover:text-amber-200"
+                      >
+                        {revertingLogId === log.id ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5 mr-1.5" />}
+                        Undo this edit
+                      </Button>
+                      <span className="text-[11px] text-muted-foreground font-medium text-right">Puts the record back to its values before this entry.</span>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2252,6 +2330,11 @@ export default function TodaClient() {
           <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg border text-sm font-bold animate-in slide-in-from-right-8 fade-in duration-300 ${toast.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-800 border-red-200'}`}>
             {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5 text-emerald-500 shrink-0" /> : <XCircle className="h-5 w-5 text-red-500 shrink-0" />}
             <span className="flex-1">{toast.message}</span>
+            {toast.action && (
+              <button onClick={toast.action.onClick} className="ml-2 font-black underline underline-offset-2 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 rounded px-2 py-1 transition-colors shrink-0">
+                {toast.action.label}
+              </button>
+            )}
             <button onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))} className="ml-4 opacity-50 hover:opacity-100 transition-opacity shrink-0"><X className="h-4 w-4" /></button>
           </div>
         ))}

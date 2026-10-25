@@ -193,3 +193,54 @@ def test_success_resets_the_failure_counter(memory_office, monkeypatch):
         "a successful pull must reset the miss streak")
     assert "192.168.50.20" in sync_engine.PEERS, (
         "a flaky peer must not be pruned while it succeeds between misses")
+
+
+def test_same_sbn_from_peer_fuses_instead_of_duplicating(memory_office, monkeypatch):
+    # 2026-10-24 duplicate fix: both computers can end up holding the SAME
+    # record under DIFFERENT row ids (two offline imports, or a sync that ran
+    # before the SBN identity rule existed). The pull used to insert the
+    # peer's copy as a second row — that is how the live count reached 12,246
+    # against ~6,123 real records. Now a peer row whose SBN already exists on
+    # this machine updates that row in place under last-write-wins.
+    MemSession = sync_engine.SessionLocal
+    db = MemSession()
+    local_stamp = datetime.now(PHT).replace(tzinfo=None)
+    peer_stamp = local_stamp + timedelta(minutes=5)
+    db.add(sync_engine.FranchiseRecord(
+        id="aaaaaaaa-1111-1111-1111-111111111111",
+        route="SALOG", operator_name="LOCAL COPY", sbn_no="090-2026-777",
+        updated_at=local_stamp))
+    db.commit()
+    db.close()
+
+    peer_payload = {
+        "records": [{
+            "id": "bbbbbbbb-2222-2222-2222-222222222222",
+            "sbn_no": "090-2026-777",
+            "route": "SALOG",
+            "operator_name": "PEER EDIT",
+            "is_deleted": False,
+            "issue_date": None,
+            "valid_until": None,
+            "updated_at": peer_stamp.isoformat(),
+        }],
+        "users": [],
+    }
+
+    def fake_get(url, headers=None, timeout=None):
+        return FakeResponse(peer_payload)
+
+    monkeypatch.setattr(sync_engine.requests, "get", fake_get)
+    run_one_pass(monkeypatch)
+
+    db = MemSession()
+    try:
+        rows = db.query(sync_engine.FranchiseRecord).filter(
+            sync_engine.FranchiseRecord.sbn_no == "090-2026-777").all()
+        assert len(rows) == 1, (
+            "a peer copy of an SBN this machine already holds must fuse into "
+            "the existing row, not stack a second one")
+        assert rows[0].id == "aaaaaaaa-1111-1111-1111-111111111111"
+        assert rows[0].operator_name == "PEER EDIT"
+    finally:
+        db.close()

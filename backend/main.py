@@ -488,24 +488,24 @@ def attach_status(record: FranchiseRecord):
 def log_action(db: Optional[Session], clerk_name: str, action: str, target_id: str, target_route: str, details: str,
                operator_name: Optional[str] = None, sbn_no: Optional[str] = None, field_changed: Optional[str] = None,
                old_value: Optional[str] = None, new_value: Optional[str] = None, secondary_value: Optional[str] = None, 
-               ip_or_source: Optional[str] = None):
+               ip_or_source: Optional[str] = None, before_values: Optional[dict] = None):
     if db is None:
         # Some admin actions (template upload) run outside the request's DB
         # session; open our own so the audit trail never depends on the caller.
         db = SessionLocal()
         try:
             _write_audit(db, clerk_name, action, target_id, target_route, details, operator_name,
-                         sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source)
+                         sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source, before_values)
         finally:
             db.close()
         return
     _write_audit(db, clerk_name, action, target_id, target_route, details, operator_name,
-                 sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source)
+                 sbn_no, field_changed, old_value, new_value, secondary_value, ip_or_source, before_values)
 
 def _write_audit(db: Session, clerk_name: str, action: str, target_id: str, target_route: str, details: str,
                  operator_name: Optional[str] = None, sbn_no: Optional[str] = None, field_changed: Optional[str] = None,
                  old_value: Optional[str] = None, new_value: Optional[str] = None, secondary_value: Optional[str] = None,
-                 ip_or_source: Optional[str] = None):
+                 ip_or_source: Optional[str] = None, before_values: Optional[dict] = None):
     new_log = AuditLog(
         clerk_name=clerk_name, 
         action=action, 
@@ -518,7 +518,8 @@ def _write_audit(db: Session, clerk_name: str, action: str, target_id: str, targ
         old_value=old_value,
         new_value=new_value,
         secondary_value=secondary_value,
-        ip_or_source=ip_or_source
+        ip_or_source=ip_or_source,
+        before_values=json.dumps(before_values, ensure_ascii=False) if before_values else None
     )
     db.add(new_log)
     db.commit()
@@ -962,6 +963,8 @@ def delete_entire_route(route_name: str, override_reason: str = "", current_user
             created_by=get_full_name(current_user),
             ticket_type="route_delete",
             payload_json=json.dumps({"route": route_to_delete}),
+            # OPTIONAL TICKET NOTE: why the whole line should be removed.
+            reason=(override_reason or "").strip() or None,
         )
         db.add(ticket)
         db.commit()
@@ -1005,6 +1008,81 @@ def restore_single_operator(record_id: str, current_user: User = Depends(get_cur
     log_action(db, get_full_name(current_user), "RESTORE_RECORD", record.id, record.route, f"Restored operator record {record.sbn_no}.")
     return {"message": "Operator restored successfully."}
 
+@app.put("/api/operators/{record_id}/revert/{log_id}")
+def revert_to_edit_snapshot(record_id: str, log_id: str, current_user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    """UNDO AN EDIT.
+
+    Puts a record back to the values it had before one edit, exactly as the
+    edit's audit row recorded them. Works for every kind of edit — plain
+    edit, change motor, or renewal — because each one saved its own
+    before_values snapshot in the audit log it wrote. Admins, clerks and
+    viewers follow the same write gate as every other record change.
+
+    Guards so an undo can never damage anything: the snapshot must belong
+    to this record, and the SBN the snapshot wants to restore must not
+    belong to a different record by now (reverted SBN years can be re-used
+    by later uploads). On conflict the record is left untouched and the
+    caller gets a plain-words explanation."""
+    require_record_writer(current_user)
+    record = db.query(FranchiseRecord).filter(
+        FranchiseRecord.id == record_id, FranchiseRecord.is_deleted == False).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Operator record not found.")
+    log_row = db.query(AuditLog).filter(AuditLog.id == log_id).first()
+    if not log_row or log_row.target_id != record_id:
+        raise HTTPException(status_code=404, detail="That edit is not part of this record's history.")
+    try:
+        snapshot = json.loads(log_row.before_values) if log_row.before_values else None
+    except (ValueError, TypeError):
+        snapshot = None
+    if not snapshot or not isinstance(snapshot, dict):
+        raise HTTPException(status_code=400, detail="This entry has no saved 'before' values to go back to.")
+
+    restored_sbn = str(snapshot.get("sbn_no") or "").strip().upper()
+    conflict = None
+    if restored_sbn and restored_sbn != str(record.sbn_no or "").strip().upper():
+        conflict = db.query(FranchiseRecord).filter(
+            FranchiseRecord.sbn_no == restored_sbn,
+            FranchiseRecord.id != record.id,
+            FranchiseRecord.is_deleted == False).first()
+    if conflict:
+        raise HTTPException(status_code=409, detail=(
+            f"Cannot undo: SBN {restored_sbn} is now used by another record "
+            "on this computer. Undo the other record's edit first or contact the Admin."))
+
+    previous_sbn = record.sbn_no
+    for field in ("sbn_no", "operator_name", "address", "motor_no", "chassis_no",
+                  "make", "plate_no", "route", "driving_route", "is_active", "processed_by"):
+        setattr(record, field, snapshot.get(field))
+    for date_field in ("issue_date", "valid_until"):
+        raw = snapshot.get(date_field)
+        setattr(record, date_field, datetime.fromisoformat(raw) if raw else None)
+    record.is_deleted = False
+    record.updated_at = get_pht_now()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=(
+            f"Cannot undo: SBN {restored_sbn or '(empty)'} already exists on this computer."))
+    invalidate_ml_cache(record.route)
+    clear_api_caches()
+
+    full_name = get_full_name(current_user)
+    log_action(
+        db, full_name, "EDIT_REVERT", record.id, record.route,
+        f"Undid the {log_row.action.replace('_', ' ').title().lower()} entry of "
+        f"{log_row.clerk_name}. Record went back to SBN {restored_sbn or '(as before)'}.",
+        operator_name=record.operator_name,
+        sbn_no=record.sbn_no,
+        field_changed="SBN",
+        old_value=previous_sbn or "NONE",
+        new_value=restored_sbn or "NONE",
+    )
+    return {"message": "Edit undone. The record is back to its values before that change."}
+
+
 @app.get("/api/operators/deleted")
 def get_deleted_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == True).all()
@@ -1039,7 +1117,10 @@ def rename_route(route_name: str, payload: RouteRenameRequest, current_user: Use
                                      "new_route_name": payload.new_route_name,
                                      "new_prefix": payload.new_prefix,
                                      "new_driving_route": payload.new_driving_route or ""}),
-            reason=payload.new_driving_route and f"Also set driving route: {payload.new_driving_route}" or None,
+            # OPTIONAL TICKET NOTE: the clerk can write WHY the line should be
+            # renamed; the admin sees it in the approval queue, and it lands
+            # in Activity History. Empty stays empty — the reason is optional.
+            reason=(payload.override_reason or "").strip() or None,
         )
         db.add(ticket)
         db.commit()
@@ -1297,6 +1378,7 @@ def approve_ticket(ticket_id: str, decision: TicketDecision = None, current_user
             # a working Admin.
             pass
         target.is_deactivated = not is_active
+        target.updated_at = get_pht_now()
         db.commit()
         # HEARTBEAT: the flag must reach the other office computers in seconds.
         sync_engine.notify_users_changed()
@@ -1564,7 +1646,10 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         last_name=payload.last_name.upper(),
         username=username_upper,
         password_hash=pwd_context.hash(payload.password),
-        role="Clerk"
+        role="Clerk",
+        updated_at=get_pht_now(),
+        # ACCOUNT OWNER: this computer is the master of its own accounts.
+        create_origin=sync_engine.machine_fingerprint(),
     )
     db.add(new_user)
     db.commit()
@@ -1765,6 +1850,17 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     with _login_lock:
         _login_attempts.pop(username_upper, None)
     _clear_persisted_lock(username_upper, db)
+
+    # LAST SIGN-IN TRAVELS (2026-10-24): the stamp rides the account on every
+    # pull, so "Last seen" in Manage Office Accounts agrees on all computers
+    # instead of depending on which machine holds the login audit history.
+    try:
+        user.last_signin_at = get_pht_now()
+        db.commit()
+    except Exception as e:
+        # Never let a stamp failure block a successful sign-in.
+        force_log(f"[LOGIN] could not stamp last_signin_at for {username_upper}: {e}")
+        db.rollback()
     
     full_name = get_full_name(user)
     access_token = create_access_token(data={"sub": username_upper})
@@ -1919,6 +2015,7 @@ def recovery_reset(payload: RecoveryAnswers, db: Session = Depends(get_db)):
     if not all_correct:
         _recovery_fail(username_upper, db, "answer check")
     user.password_hash = pwd_context.hash(payload.new_password)
+    user.updated_at = get_pht_now()
     if promote_to_admin:
         user.role = "Admin"
     db.commit()
@@ -1976,6 +2073,7 @@ def update_password(payload: PasswordUpdate, current_user: User = Depends(get_cu
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     current_user.password_hash = pwd_context.hash(payload.new_password)
+    current_user.updated_at = get_pht_now()
     db.commit()
     # HEARTBEAT: the password roams, so wake the other computers to pull it.
     sync_engine.notify_users_changed()
@@ -2016,6 +2114,13 @@ class UserSetActive(BaseModel):
     # direct execution then demands a written reason.
     override_reason: str = ""
 
+class UserRoleChange(BaseModel):
+    # Change an account's role from the accounts table (Admin -> Clerk or
+    # Clerk -> Admin). Guards: caller must be an active Admin, the office
+    # keeps at least one active Admin, and you cannot change your own role.
+    username: str
+    role: str
+
 @app.get("/admin/needed")
 def admin_needed(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"needed": db.query(User).filter(User.role == "Admin").count() == 0}
@@ -2031,6 +2136,7 @@ def admin_bootstrap(payload: AdminBootstrap, current_user: User = Depends(get_cu
                    "Bootstrap refused: password did not match.")
         raise HTTPException(status_code=401, detail="Password did not match this account.")
     current_user.role = "Admin"
+    current_user.updated_at = get_pht_now()
     db.commit()
     # HEARTBEAT: role changes roam, so wake the other computers now.
     sync_engine.notify_users_changed()
@@ -2062,9 +2168,50 @@ def list_users(current_user: User = Depends(get_current_user), db: Session = Dep
         {"username": u.username, "full_name": get_full_name(u), "role": u.role,
          "has_password": bool(u.password_hash) and u.password_hash != "SYNCED_NO_PASSWORD",
          "is_deactivated": bool(getattr(u, "is_deactivated", False)),
-         "last_login": login_times[get_full_name(u)].isoformat() if login_times.get(get_full_name(u)) else None}
+         # Prefer the synced sign-in stamp: local LOGIN audit history only
+         # covers sign-ins on THIS machine, which made other computers show
+         # "Never" for an account that signs in elsewhere.
+         "last_login": (getattr(u, "last_signin_at", None)
+                        or login_times.get(get_full_name(u))
+                        )
+                        .isoformat() if (getattr(u, "last_signin_at", None) or login_times.get(get_full_name(u))) else None}
         for u in users
     ]
+
+@app.put("/users/set-role")
+def admin_set_user_role(payload: UserRoleChange, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """ROLE CHANGE (2026-10-24): an Admin promotes or demotes an account from
+    the accounts table itself. Bumps updated_at so the change wins the sync
+    timestamp race everywhere, wakes the other computers, and audits it."""
+    require_admin(current_user)
+    new_role = payload.role.strip().title()
+    if new_role not in ("Admin", "Clerk"):
+        raise HTTPException(status_code=400, detail="Role must be Admin or Clerk")
+    target = db.query(User).filter(User.username == payload.username.strip().upper()).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if target.id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot change the role of the account you are signed in with.")
+    old_role = target.role
+    if old_role == "Admin" and new_role != "Admin":
+        other_admins = db.query(User).filter(
+            User.role == "Admin",
+            User.is_deactivated == False,  # noqa: E712
+            User.id != target.id,
+        ).count()
+        if other_admins == 0:
+            raise HTTPException(status_code=400, detail="The office must keep at least one active Admin. Promote another account first.")
+    old_role = target.role
+    target.role = new_role
+    target.updated_at = get_pht_now()
+    db.commit()
+    # HEARTBEAT: the new role must reach every computer in seconds, not on
+    # the next sync cycle — otherwise one machine lets the demoted clerk be
+    # treated as an admin for a while.
+    sync_engine.notify_users_changed()
+    log_action(db, get_full_name(current_user), "CHANGE_ROLE", "0", "SYSTEM",
+               f"Admin changed the role of {target.username} from {old_role} to {new_role}.")
+    return {"status": "success", "message": f"{get_full_name(target)} is now {new_role}."}
 
 @app.post("/users")
 def admin_create_user(payload: UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -2086,6 +2233,9 @@ def admin_create_user(payload: UserCreate, current_user: User = Depends(get_curr
         username=username_upper,
         password_hash=pwd_context.hash(payload.password),
         role=payload.role,
+        updated_at=get_pht_now(),
+        # ACCOUNT OWNER: this computer is the master of its own accounts.
+        create_origin=sync_engine.machine_fingerprint(),
     )
     db.add(new_user)
     db.commit()
@@ -2106,6 +2256,7 @@ def admin_reset_password(payload: AdminPasswordReset, current_user: User = Depen
     if not target:
         raise HTTPException(status_code=404, detail="Account not found")
     target.password_hash = pwd_context.hash(payload.new_password)
+    target.updated_at = get_pht_now()
     db.commit()
     # HEARTBEAT: the old password must die everywhere within seconds.
     sync_engine.notify_users_changed()
@@ -2143,6 +2294,7 @@ def admin_set_user_active(payload: UserSetActive, current_user: User = Depends(g
         raise HTTPException(status_code=400,
                             detail="Type a short reason so the audit log records why this account is being switched.")
     target.is_deactivated = not payload.is_active
+    target.updated_at = get_pht_now()
     db.commit()
     # HEARTBEAT: a deactivated clerk must not be able to dodge the switch by
     # signing in on another computer; wake those computers to pull the flag now.
@@ -2889,6 +3041,28 @@ def update_franchise(
     # nanggagaling yung mga phantom change-motor entries. Isang refresh lang, dito.
     db.refresh(db_record)
     
+    # EDIT SNAPSHOT — full pre-edit values, captured BEFORE this request's
+    # renewal / change-motor logic touches anything. Every kind of edit
+    # (plain edit, change motor, renewal) therefore comes with its own
+    # undo: the History dialog and the success toast both call the revert
+    # endpoint with this log's id. Dates are stored as ISO strings; they
+    # parse back cleanly on revert.
+    before_values = {
+        "sbn_no": db_record.sbn_no,
+        "operator_name": db_record.operator_name,
+        "address": db_record.address,
+        "motor_no": db_record.motor_no,
+        "chassis_no": db_record.chassis_no,
+        "make": db_record.make,
+        "plate_no": db_record.plate_no,
+        "route": db_record.route,
+        "driving_route": db_record.driving_route,
+        "issue_date": db_record.issue_date.isoformat() if db_record.issue_date else None,
+        "valid_until": db_record.valid_until.isoformat() if db_record.valid_until else None,
+        "is_active": bool(db_record.is_active),
+        "processed_by": db_record.processed_by,
+    }
+    
     record.route = alias_route(record.route)
     record.address = expand_address_abbreviations(record.address)
 
@@ -3038,15 +3212,19 @@ def update_franchise(
             field_changed=", ".join(field for field, _, _ in spec_changes),
             old_value=spec_changes[0][1] or "NONE",
             new_value=spec_changes[0][2] or "NONE",
-            secondary_value=db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else ""
+            secondary_value=db_record.issue_date.strftime('%Y-%m-%d') if db_record.issue_date else "",
+            before_values=before_values
         )
     elif is_renewal:
         # Ilagay sa log yung aktwal na valid_until na na-compute, huwag yung hardcoded
         # na "Dec 31 ng current year" — minsan magkaiba talaga.
         _vu_disp = db_record.valid_until.strftime('%Y-%m-%d') if db_record.valid_until else "NO DATE"
-        log_action(db, full_name, "RENEWAL", db_record.id, db_record.route, f"Renewed SBN to {new_base_sbn}. Extended to {_vu_disp}")
+        log_action(db, full_name, "RENEWAL", db_record.id, db_record.route,
+                   f"Renewed SBN to {new_base_sbn}. Extended to {_vu_disp}", before_values=before_values)
     else:
-        log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route, f"Updated record for {db_record.operator_name or 'VACANT'} - SBN {db_record.sbn_no} ({db_record.route})")
+        log_action(db, full_name, "EDIT_RECORD", db_record.id, db_record.route,
+                   f"Updated record for {db_record.operator_name or 'VACANT'} - SBN {db_record.sbn_no} ({db_record.route})",
+                   before_values=before_values)
         
     return {
         "status": "success",
