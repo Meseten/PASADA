@@ -114,16 +114,47 @@ bundle against the public key embedded in the app binary before installing.
 Releases are published only by the tag-triggered GitHub Actions workflow from
 this repository. A corrupted or tampered installer cannot run.
 
+### Threat 7: Backup archive read from lost or stolen media
+
+**Vector.** A USB drive or copied backup folder is lost, stolen, or opened on
+another computer. Every nightly archive holds the whole registry: operator
+names, addresses, plate numbers, and password hashes.
+
+**Mitigation.** When the office sets a backup password, archives are written as
+`.psdb` files encrypted with AES-256-GCM under a PBKDF2-SHA256 key
+(200,000 iterations); without the password the file is unreadable, including to
+PASADA. The nightly job refuses to write a plaintext archive while encrypted
+archives exist and the key file is missing or damaged, logs that refusal once a
+day, and retries every minute once the key is repaired. Verify and Full Restore
+try each password stored in `backup_passphrase.key`, so a password change does
+not orphan older archives.
+
+**Residual exposure, stated plainly.** The key file lives on the office PC, not
+inside the archive, so the drive alone is useless. The office is told to copy
+`backup_passphrase.key` to the drive as well, because a replacement PC has
+neither key nor registry; doing so puts the password in the same bag as the
+archives. Encryption therefore protects against a lost drive opened elsewhere,
+not against someone who takes the drive and the printed or copied password
+together. Physical custody of the off-site drive remains the control.
+
+**Reopen when.** Archives are stored anywhere reachable from the network, or
+the office starts emailing them.
+
 ## 5. Features explicitly out of scope
 
 These omissions are deliberate and approved for the single-tier, offline
 deployment:
 
-- **Fine-grained RBAC.** There are exactly two roles, Clerk and Admin, and
-  the gate is one helper (`require_admin` in `backend/main.py`) that stops any
-  non-Admin with a 403. Windows accounts and the locked office still handle
-  the physical boundary. As of the Sept 2026 full-endpoint audit, Admin-only
-  (hard `require_admin`) covers 14 endpoints: user list/create/reset-password/
+- **Fine-grained RBAC.** There are three roles: Admin, Clerk, and Viewer
+  (read-only). `require_admin` in `backend/main.py` stops non-Admins at
+  administrative doors with a 403, and `require_record_writer` refuses Viewer
+  on every record write. Backups are gated separately: downloading, verifying, and
+  changing the backup password are Admin-only, and the merge import and Full
+  Restore of a database file refuse non-Admin accounts. Windows accounts and the locked office still handle
+  the physical boundary. As of the September 2026 endpoint audit, Admin-only
+  (hard `require_admin`) covered 14 of the 68 endpoints the file then held. The
+  file now holds 89 endpoints (counted November 21, 2026, after the masterlist export, the backup/duplicate maintenance endpoints and encrypted-backup support; `GET /backup/database` was removed on November 21 because it copied the unencrypted registry to disk); the gated set below
+  has not changed, and its share of the total has not been re-derived. The 14: user list/create/reset-password/
   set-active (`/users`, `/users/reset-password`, `/users/set-active`), the
   approval decisions (`/admin/tickets/{id}/approve`, `/reject`), registry-wide
   repair (`/admin/refresh-db`), manual sync (`/system/sync-now`), document
@@ -147,7 +178,7 @@ deployment:
   more simply. HMAC gives integrity and authenticity on every mutation;
   confidentiality rides on authentication and the closed network.
 
-## 6. Accepted risks register (reviewed Sept 28, 2026)
+## 6. Accepted risks register (first reviewed September 28, 2026; re-read November 21, 2026)
 
 Three residual risks are **accepted by design**, not deferred work. Each
 entry records the exposure, the compensating control, the failure mode, and
@@ -222,4 +253,9 @@ session as the NVDA screen-reader check on the office machines). Confirm:
   never the contents).
 - The daily DB `quick_check` and the backup retention sweep are logging to
   the crash log.
+- The newest backup has been verified from Settings (opened, integrity ok,
+  record count plausible) and one Full Restore has been practised that
+  quarter on a spare machine.
+- The backup key file is on the off-site drive beside the archives, and the
+  password is written down somewhere outside the office.
 - The latest release on GitHub matches the version installed in the office.

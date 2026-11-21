@@ -46,9 +46,14 @@ export default function OfficeAccounts({ notify, title = "Office accounts", blur
   const [resetPassword, setResetPassword] = useState("");
   const [resetConfirm, setResetConfirm] = useState("");
   // The username is built from the full name, so the signed-in admin can
-  // recognize its own row. The backend refuses self-deactivation anyway.
+  // recognize its own row. Sign-in stores the real username separately, so
+  // the guard still matches when the display name differs from it; older
+  // sessions that predate that key fall back to the full name.
   const [myUsername] = useState(() =>
-    typeof window !== "undefined" ? (localStorage.getItem("pasada_full_name") || "").trim().toUpperCase() : ""
+    typeof window !== "undefined"
+      ? (localStorage.getItem("pasada_username") || localStorage.getItem("pasada_full_name") || "")
+          .trim().toUpperCase()
+      : ""
   );
 
   const loadUsers = useCallback(async () => {

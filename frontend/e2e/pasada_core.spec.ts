@@ -1,4 +1,4 @@
-// PASADA core E2E: login -> search -> renewal -> approval.
+// PASADA core E2E: login -> search -> renewal -> account switch.
 //
 // Runs against the REAL desktop stack (real FastAPI backend + real SQLite +
 // the production static export the Tauri webview loads), not a dev server.
@@ -10,12 +10,11 @@
 // The only things NOT covered here are the thin Rust shell commands (updater,
 // PDF print fallback, native context menu); those are covered by cargo check
 // plus manual release testing (see docs/TESTING_ON_LINUX.md).
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 
 // Fixed credentials for the seeded office. The backend upper-cases usernames
 // on submit, so we type uppercase to match what the UI produces.
 const ADMIN = { first: 'E2E', last: 'ADMIN', user: 'E2E ADMIN', pass: 'password123' };
-const SECOND_ADMIN = { first: 'E2E', last: 'APPROVER', user: 'E2E APPROVER', pass: 'password123' };
 const CLERK = { first: 'E2E', last: 'CLERK', user: 'E2E CLERK', pass: 'password123' };
 const ROUTE = 'BATODA';
 const OPERATOR = 'E2E RENEWAL SUBJECT';
@@ -40,11 +39,14 @@ async function authedGet(request: APIRequestContext, token: string, path: string
   return request.get(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
+async function authedPut(request: APIRequestContext, token: string, path: string, data: unknown) {
+  return request.put(`${API}${path}`, { data, headers: { Authorization: `Bearer ${token}` } });
+}
+
 // Seed a fresh office over the real API: promote the first account to Admin
-// via bootstrap, create a second Admin (for the two-key approval queue), a
-// Clerk (the deactivation target), and one operator to renew. This mirrors
-// exactly what the UI does, just without the clicks, so the flows under test
-// start from a realistic, deterministic state.
+// via bootstrap, create a Clerk (the deactivation target), and one operator to
+// renew. This mirrors what the UI does, just without the clicks, so the flows
+// under test start from a realistic, deterministic state.
 async function seedOffice(request: APIRequestContext) {
   // First account via signup (open only while the office has no account).
   const signup = await request.post(`${API}/signup`, {
@@ -61,15 +63,7 @@ async function seedOffice(request: APIRequestContext) {
   const bootstrap = await authedPost(request, adminToken, '/admin/bootstrap', { password: ADMIN.pass });
   expect(bootstrap.ok(), 'bootstrap should promote the first account to Admin').toBeTruthy();
 
-  // Second Admin so the two-key rule routes deactivations through approval.
-  const mkSecond = await authedPost(request, adminToken, '/users', {
-    first_name: SECOND_ADMIN.first, last_name: SECOND_ADMIN.last,
-    username: SECOND_ADMIN.user, password: SECOND_ADMIN.pass,
-    password_confirm: SECOND_ADMIN.pass, role: 'Admin',
-  });
-  expect(mkSecond.ok(), 'creating the second Admin should succeed').toBeTruthy();
-
-  // A Clerk, used as the deactivation target in the approval flow.
+  // A Clerk, used as the deactivation target in the account-switch flow.
   const mkClerk = await authedPost(request, adminToken, '/users', {
     first_name: CLERK.first, last_name: CLERK.last, username: CLERK.user,
     password: CLERK.pass, password_confirm: CLERK.pass, role: 'Clerk',
@@ -87,7 +81,7 @@ async function seedOffice(request: APIRequestContext) {
 }
 
 // Drive the real login form and land on the dashboard.
-async function loginViaUi(page: any, user: string, pass: string) {
+async function loginViaUi(page: Page, user: string, pass: string) {
   await page.goto('/');
   // The login screen polls /health and shows a spinner until the backend is up.
   await page.waitForSelector('button:has-text("Log In")', { timeout: 30000 });
@@ -103,6 +97,12 @@ test.describe.configure({ mode: 'serial' });
 
 test.describe('PASADA core flows (real desktop stack)', () => {
   let adminToken: string;
+
+  test.beforeEach(async ({ page }) => {
+    // The first-run guided tour is a driver.js overlay that intercepts clicks;
+    // mark it seen before the app boots so it never covers the UI under test.
+    await page.addInitScript(() => localStorage.setItem('pasada_tour_done', '1'));
+  });
 
   test.beforeAll(async ({ request }) => {
     adminToken = await seedOffice(request);
@@ -144,7 +144,7 @@ test.describe('PASADA core flows (real desktop stack)', () => {
 
     // Confirm persistence through the real API (the same DB the UI wrote to).
     // The record's validity now reflects the renewed year.
-    const res = await authedGet(page.request as unknown as APIRequestContext, adminToken, `/franchise/route/${ROUTE}`);
+    const res = await authedGet(page.request, adminToken, `/franchise/route/${ROUTE}`);
     expect(res.ok()).toBeTruthy();
     const records = await res.json();
     const renewed = (records as Array<Record<string, unknown>>).find(
@@ -154,63 +154,52 @@ test.describe('PASADA core flows (real desktop stack)', () => {
     expect(String(renewed!.valid_until)).toContain(nextYear);
   });
 
-  test('FLOW 4 — approval: a two-key deactivation files a ticket a second Admin can approve', async ({ page }) => {
-    // As the first Admin, deactivate the Clerk. With a second active Admin
-    // present, the two-key rule files an approval ticket instead of acting.
+  test('FLOW 4 — account switch: Admin deactivates the Clerk with a reason; sign-in is refused', async ({ page }) => {
+    // Single-key rule (2026-10-14): an Admin switches an account off directly
+    // after typing a reason that goes into the audit log. No second-Admin
+    // ticket is involved for user accounts.
     await loginViaUi(page, ADMIN.user, ADMIN.pass);
-    await page.goto('/settings');
-    // OfficeAccounts lives under the Settings > Security tab.
-    await page.click('button:has-text("Security")');
-    await expect(page.locator('text=Manage Office Accounts')).toBeVisible({ timeout: 30000 });
+    await page.goto('/admin');
+    // OfficeAccounts lives in the Admin Console's Administrative tab.
+    await page.click('button:has-text("Administrative")');
+    await expect(page.locator('#admin-panel-administrative')).toBeVisible({ timeout: 30000 });
 
-    const clerkRow = page.locator('tr', { hasText: CLERK.user }).first();
+    const clerkRow = page.locator('#admin-panel-administrative tr', { hasText: CLERK.user }).first();
     await expect(clerkRow).toBeVisible({ timeout: 30000 });
 
-    // Wait for the set-active PUT to actually resolve, so the ticket is filed
-    // before we assert on the queue (the click kicks off an async fetch).
+    // Wait for the set-active PUT to actually resolve before asserting state
+    // (the click kicks off an async fetch).
     const setActiveResponse = page.waitForResponse(
       (r) => r.url().includes('/users/set-active') && r.request().method() === 'PUT'
     );
     await clerkRow.locator('button', { hasText: 'Deactivate' }).click();
 
-    // Two-key confirm dialog: the button reads "File the request".
-    const fileBtn = page.locator('button:has-text("File the request")');
-    await expect(fileBtn).toBeVisible({ timeout: 30000 });
-    await fileBtn.click();
+    // Confirm the switch, then supply the mandatory reason.
+    const dialog = page.locator('[role="alertdialog"]');
+    await dialog.getByRole('button', { name: 'Deactivate' }).click();
+    await expect(dialog.locator('text=Reason required')).toBeVisible({ timeout: 30000 });
+    await dialog.locator('input[type="text"]').fill('E2E: clerk leaves the office');
+    await dialog.getByRole('button', { name: 'Continue' }).click();
 
     const setActive = await setActiveResponse;
     expect(setActive.ok(), `set-active should succeed: ${await setActive.text().catch(() => '')}`).toBeTruthy();
 
-    // The ticket now waits in the queue; assert it exists via the real API.
-    const pending = await authedGet(page.request as unknown as APIRequestContext, adminToken, '/admin/tickets?status_filter=pending');
-    expect(pending.ok()).toBeTruthy();
-    const tickets = await pending.json();
-    const ticket = (tickets as Array<{ ticket_type: string; payload: { username?: string } }>).find(
-      (t) => t.ticket_type === 'user_deactivate' && t.payload?.username === CLERK.user
-    );
-    expect(ticket, 'deactivation should file a pending approval ticket').toBeTruthy();
-
-    // Sign out, then sign in as the SECOND Admin to approve it.
-    await page.evaluate(() => localStorage.clear());
-    await loginViaUi(page, SECOND_ADMIN.user, SECOND_ADMIN.pass);
-
-    await page.goto('/admin');
-    await expect(page.locator('text=Approvals')).toBeVisible({ timeout: 30000 });
-    await page.click('button:has-text("Approvals")');
-
-    // The pending ticket is in the queue; approve it.
-    const ticketCard = page.locator('#admin-panel-approvals', { hasText: CLERK.user }).first();
-    await expect(ticketCard).toBeVisible({ timeout: 30000 });
-    await ticketCard.locator('button:has-text("Approve")').click();
-
-    // After approval the Clerk is actually deactivated: sign-in is refused.
-    // Assert through the real API that the account is now off.
-    const secondToken = await loginViaApi(page.request as unknown as APIRequestContext, SECOND_ADMIN.user, SECOND_ADMIN.pass);
-    const users = await authedGet(page.request as unknown as APIRequestContext, secondToken, '/users');
+    // The real API shows the account off...
+    const users = await authedGet(page.request, adminToken, '/users');
     expect(users.ok()).toBeTruthy();
     const list = await users.json();
     const clerk = (list as Array<Record<string, unknown>>).find((u) => u.username === CLERK.user);
     expect(clerk, 'Clerk should still exist after deactivation').toBeTruthy();
     expect(clerk!.is_deactivated, 'Clerk should now be deactivated').toBe(true);
+
+    // ...and the Clerk can no longer sign in.
+    const refused = await page.request.post(`${API}/token`, { data: { username: CLERK.user, password: CLERK.pass } });
+    expect(refused.ok(), 'a deactivated account must be refused at sign-in').toBeFalsy();
+
+    // Reactivate so the seeded office is left as it was.
+    const reactivate = await authedPut(page.request, adminToken, '/users/set-active', {
+      username: CLERK.user, is_active: true, override_reason: 'E2E cleanup',
+    });
+    expect(reactivate.ok(), `reactivate should succeed: ${reactivate.status()} ${await reactivate.text().catch(() => '')}`).toBeTruthy();
   });
 });

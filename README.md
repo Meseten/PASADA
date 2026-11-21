@@ -31,7 +31,7 @@ PASADA is a municipal tricycle franchise registry for Local Government Units (LG
 
 ## How it works
 
-PASADA uses a sidecar pattern: the interface is a Tauri 2 desktop app (Next.js frontend compiled to static assets) and the logic runs as a compiled FastAPI (Python) executable beside it. When you open PASADA, Tauri starts the backend automatically and the login screen waits until the backend answers its health check. Everything runs on the local machine, so the app works in offices with no internet at all.
+PASADA uses a sidecar pattern: the interface is a Tauri 2 desktop app (Next.js frontend compiled to static assets) and the logic runs as a compiled FastAPI (Python) sidecar folder beside it. When you open PASADA, Tauri starts the backend automatically and the login screen waits until the backend answers its health check. Everything runs on the local machine, so the app works in offices with no internet at all.
 
 ## The five subsystems
 
@@ -69,7 +69,7 @@ Every franchise slot is always in exactly one of these states, and the same comp
 
 Hovering a status badge anywhere in the app shows the same description in plain words. Route badges and the dashboard KPI cards also carry hover explanations, so no number or color is ever unexplained.
 
-SBN rules the app enforces automatically:
+SBN stands for **Sangguniang Bayan Number**: the franchise number the municipal council assigns to one tricycle slot, written like `BA-002-26`, where the year suffix marks the renewal year. The app enforces these rules on it automatically:
 
 - New operators get an auto-generated SBN; editing an SBN counts as a renewal and updates the dates.
 - Record history is kept per operator: every change shows who made it and when.
@@ -100,7 +100,7 @@ SBN rules the app enforces automatically:
 ## Settings guide
 
 - **General**: MTOP signatory name (printed on certificates and summaries), save-preview behavior, auto-date on Change Motor (off by default — clerks opt in; renewals always set the date).
-- **Backups**: explicit DB backup action; backups live outside the app folder.
+- **Backups**: set a backup password to encrypt every archive (AES-256-GCM, PBKDF2-SHA256) as a `.psdb` file; **Download backup now** writes one, **Verify newest backup** opens it and counts the records inside, and earlier passwords stay stored so an archive made before a password change still restores. Without a password the archive is a plain `.zip`. Archives live outside the app folder; the key file `backup_passphrase.key` must be copied to the USB drive beside them.
 - **Security**: Quick PIN (hash-only on device), three recovery questions with custom slots.
 - **Connections**: this computer's IP, sync port 43888, connected peers with their names, sharing status, key-share status (fingerprint), Sync now, Test computers now, and the manual **Pair a computer / Join by PIN** panel for offices where the automatic handshake cannot run.
 - **App Updates and Guide**: version, update check, install preference, check schedule, signature guarantee, tutorial replay.
@@ -176,7 +176,7 @@ PASADA is a desktop app for a government office, so its security assumptions are
 - **Registration is first-run only:** the open signup endpoint closes forever once the first account exists; administrators create later accounts.
 - **Passwords** are bcrypt-hashed and never logged; **tokens** are JWT (HS256) with a 30-day expiry and a per-installation random secret.
 - **LAN sync is authenticated:** discovery broadcasts and pull requests are HMAC-signed; security-answer hashes never leave the machine that set them. Password hashes DO travel inside the signed cluster, so an account created on one computer signs in on every computer.
-- **Account management:** after first-run registration closes, an Admin creates accounts and resets forgotten passwords in Settings > Security > Manage Office Accounts. A reset also clears any login lockout on that account. Changes sync to the other computers.
+- **Account management:** after first-run registration closes, an Admin creates accounts and resets forgotten passwords in Admin Console > Administrative > Office accounts. A reset also clears any login lockout on that account. Changes sync to the other computers.
 - **Two-key rule for big actions:** deleting a whole TODA line, renaming a line, and batch-restoring deleted records are Admin-approved. A clerk's click files an approval ticket (nothing changes); the Admin approves or rejects it in Admin Console > Approvals. Filing, approval, and rejection all land in the audit log. An Admin's own click on the same buttons executes directly — their click is the approval.
 - **PIN pairing is Admin-only on both sides.** Only an Admin can arm a PIN, join by PIN, or read the armed status; arming, joining, and clearing are audit-logged (action, actor, expiry — never the digits, which are never stored, echoed, or logged anywhere). The envelope is AES-GCM under SHA-256(PIN+salt) with a fresh salt per attempt; the hops that could reveal it are a 10-minute TTL, an attempt lockout per joining machine, and a 90-second reply-adoption window. Residual risk, stated plainly: anyone who records both datagrams on the wire can brute-force the 10⁶ PIN space offline, so PIN pairing is a manual rescue for trusted-office LANs — automatic pairing (challenge/signature) remains the stronger primary path.
 - **Promotion keeps every clerk power:** when a Clerk becomes the Admin through the one-time bootstrap, the same account keeps creating, editing, renewing, printing, and exporting exactly as before; the admin doors simply open on top. Verified by `test_admin_console.py`.
@@ -243,11 +243,11 @@ A scratch database auto-migrates on first boot; the first account created on it 
 
 ## Packaging and deployment readiness
 
-**Status: ready for office deployment on the Windows packaged build, with the conditions below.**
+**Status: ready for office deployment on the Windows packaged build, with the conditions below.** The current version is 0.82.14 (documentation reviewed November 21, 2026); counts and versions are kept in `CURRENT_STATE.md` in the repository root.
 
 Verified working, with evidence in `AUDIT.md`:
 
-- Records, renewals, Change Motor, deletes with undo, edits, certificates, summaries, batch printing, exports: covered by 49 backend tests and live click-through.
+- Records, renewals, Change Motor, deletes with undo, edits, certificates, summaries, batch printing, exports: covered by the backend test suite (205 tests in 24 files) and live click-through. The suites were executed on November 21, 2026: 205 of 205 backend tests, 30 of 30 frontend tests, and 4 of 4 Playwright browser flows passed.
 - LAN sync: signed discovery and pulls verified end to end, including replay, stale, wrong-secret, and wrong-address refusals.
 - Updates: check, background prepare, three install preferences, signature verification; the Rust side is `cargo check`-clean.
 - Both themes fully styled, tooltips and popovers verified against every window edge, no page overflow.
@@ -296,6 +296,8 @@ pasada/
 │   ├── src/lib/        API client, guided tutorial
 │   └── src-tauri/      Desktop shell, updater, signing config
 └── docs/
+    ├── FULL_AUDIT.md               Full-stack audit and the backup-integrity pass
+    ├── TESTING_AUDIT.md            Test inventory, results, and coverage gaps
     ├── THREAT_MODEL.md             Threats, mitigations, accepted risks
     ├── ISO25010_COMPLIANCE.md      Quality-characteristic compliance mapping
     ├── ALGORITHM_EVALUATION.md     ML clustering evaluation

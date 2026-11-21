@@ -1,5 +1,7 @@
 # PASADA LAN Sync Protocol (v1)
 
+*Counts reviewed November 21, 2026; current values are in `CURRENT_STATE.md`.*
+
 Wire format for machine-to-machine discovery and record pulls on the office
 LAN. Everything below is verified by `backend/tests/test_sync_security.py`.
 
@@ -96,11 +98,12 @@ but their home computer until an admin reset them.
   delete propagates instead of resurrecting.
 - Last-write-wins on `updated_at` (naive ISO strings, office machines share
   one timezone; clock-skew tolerance is the 300 s freshness window).
-- **Records are matched by SBN first** (2026-10-24 duplicate fix): a pull
+- **Records are matched by SBN (Sangguniang Bayan Number) first** (2026-10-24 duplicate fix): a pull
   row whose `id` is unknown but whose `sbn_no` already exists on this
   machine updates that row in place instead of inserting a twin — this is
-  what once doubled the live count to 12,246 against ~6,123 real records
-  when both computers held copies imported on each. The local row keeps
+  what once doubled the live count to 12,246 against roughly 6,120 real records
+  when both computers held copies imported on each. The registry now holds 6,137
+  records in total (see `CURRENT_STATE.md`). The local row keeps
   **its own id** even when the peer's copy has a different one, so history
   entries and approval tickets keep pointing at it. Verified by
   `tests/test_sync_failure_paths.py::test_same_sbn_from_peer_fuses_instead_of_duplicating`.

@@ -165,6 +165,10 @@ export default function Login() {
         const data = await res.json(); 
         localStorage.setItem("pasada_token", data.access_token);  
         localStorage.setItem("pasada_full_name", data.full_name);  
+        // The real sign-in name, kept apart from the display name: the office
+        // accounts panel compares usernames to stop you deactivating yourself,
+        // and a full name is not always the same string as the username.
+        localStorage.setItem("pasada_username", username.trim().toUpperCase());  
         localStorage.setItem("pasada_role", data.role || "Clerk");  
  
         localStorage.setItem("token", data.access_token);  

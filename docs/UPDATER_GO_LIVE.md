@@ -1,11 +1,16 @@
 # PASADA UPDATER — GO-LIVE RUNBOOK
 
-For the day this repository goes public. Everything below was verified on the
-v0.82.5 release pipeline; the ONLY thing currently stopping updates is that
-GitHub returns 404 to anonymous reads when a repo is private, and office
+*Status: this runbook was written for the v0.82.5 pipeline and verified on October
+13, 2026. The current release is 0.82.14 (November 20, 2026). Repository visibility
+was not re-checked when the release number was updated, so confirm whether the flip
+described below has already happened before repeating it.*
+
+The runbook is for the day this repository goes public. Everything below was
+verified on the v0.82.5 release pipeline. The condition that stops updates is that
+GitHub returns 404 to anonymous reads when a repository is private, and office
 machines read anonymously.
 
-## What should already have happened by v0.82.5 (verified 2026-10-13)
+## What should already have happened by v0.82.5 (verified 2026-10-13; the same steps produced every release up to 0.82.14)
 
 - Every push to `main` bumps the patch version from `.github/version.txt`
   (`0.82.5`), stamps it into `frontend/src-tauri/tauri.conf.json`, `Cargo.toml`,
@@ -46,7 +51,7 @@ to Public. Done.
    PASADA installed (v0.82.4 or earlier is ideal — anything below the newest
    release tag), open PASADA.
 2. Settings ▸ App Updates ▸ **Check for Updates**. Expected within ~10 s:
-   the blue "New version found: 0.82.?" badge — NOT the network-blame message.
+   the blue "New version found: 0.82.14" badge, or whatever the newest tag is — NOT the network-blame message.
    Press **Install** and let the machine restart into the new version.
 3. After restart, verify Help/Settings shows the new `APP_VERSION`.
 4. Press Check once more: expected is the green "Up to date" badge.

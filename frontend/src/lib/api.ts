@@ -15,6 +15,7 @@ export const clearAuthAndRedirect = () => {
     localStorage.removeItem("pasada_token");
     localStorage.removeItem("full_name");
     localStorage.removeItem("pasada_full_name");
+    localStorage.removeItem("pasada_username");
     localStorage.removeItem("role");
     localStorage.removeItem("pasada_role");
     sessionStorage.removeItem("pasada_pin_unlocked");
@@ -25,12 +26,16 @@ export const clearAuthAndRedirect = () => {
 // Global interceptor for 401 Unauthorized (Expired Tokens)
 export const fetchWithAuth = async (endpoint: string, options: RequestInit = {}) => {
   const token = getToken();
-  const headers = {
-    ...options.headers,
-    "Authorization": `Bearer ${token}`,
+  // NO TOKEN, NO HEADER: a page that loads before sign-in (or after the token
+  // was cleared) used to send the literal string "Bearer null", which reads as
+  // a malformed credential. Omitting the header lets the API answer 401 the
+  // way it does for any signed-out request.
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string> | undefined),
     "Pragma": "no-cache",
     "Cache-Control": "no-cache, no-store, must-revalidate"
   };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
 
   const isAbsolute = endpoint.startsWith('http');
   const baseUrl = isAbsolute ? endpoint : `${API_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;

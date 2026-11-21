@@ -13,6 +13,7 @@ import {
   LogOut, 
   LayoutDashboard, 
   ClipboardList, 
+  Clock,
   Map, 
   Pin, 
   Trash2, 
@@ -646,6 +647,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </Link>
                   <Link prefetch={false} href="/logs" aria-current={normPath === '/logs' ? 'page' : undefined} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${normPath === '/logs' ? 'bg-blue-100/70 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-l-4 border-blue-600 shadow-sm' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <ClipboardList className="mr-2 h-4 w-4" /> Activity History
+                  </Link>
+                  {/* MY REQUESTS: a clerk files restore/delete asks but used to
+                      have no way to see whether the Admin acted on them. */}
+                  <Link prefetch={false} href="/requests" aria-current={normPath === '/requests' ? 'page' : undefined} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${normPath === '/requests' ? 'bg-blue-100/70 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-l-4 border-blue-600 shadow-sm' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
+                    <Clock className="mr-2 h-4 w-4" /> My Requests
                   </Link>
                   <Link prefetch={false} href="/import" aria-current={normPath === '/import' ? 'page' : undefined} className={`flex items-center rounded-md px-3 py-2 text-sm font-bold transition-colors ${normPath === '/import' ? 'bg-blue-100/70 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-l-4 border-blue-600 shadow-sm' : 'text-slate-700 dark:text-slate-300 hover:bg-accent hover:text-slate-900 dark:hover:text-white'}`}>
                     <UploadCloud className="mr-2 h-4 w-4" /> Import Records

@@ -23,9 +23,30 @@ export default function MassImport() {
   // Settings State
   const [forceOverwrite, setForceOverwrite] = useState(false);
   const [dbImportMode, setDbImportMode] = useState<'merge' | 'restore'>('merge');
+  // ENCRYPTED ARCHIVE (.psdb): the backup password is needed to open it. It is
+  // sent as a form field, never in the URL, so it does not land in logs.
+  const [dbPassword, setDbPassword] = useState("");
   
-  const isDatabaseFile = files.length === 1 && (files[0].name.endsWith(".db") || files[0].name.endsWith(".zip"));
-  const isZipBackup = files.length === 1 && files[0].name.endsWith(".zip");
+  // Encrypted archives are recognised by their PSDB1 header, not by the file
+  // name: a backup renamed to .db (or .PSDB) must still ask for its password.
+  const [isEncryptedBackup, setIsEncryptedBackup] = useState(false);
+  const isDatabaseFile = files.length === 1 && (
+    [".db", ".zip", ".psdb"].some((ext) => files[0].name.toLowerCase().endsWith(ext)) || isEncryptedBackup
+  );
+  const isZipBackup = files.length === 1 && files[0].name.toLowerCase().endsWith(".zip");
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsEncryptedBackup(false);
+    if (files.length !== 1) return;
+    files[0].slice(0, 5).arrayBuffer().then((buf) => {
+      if (cancelled) return;
+      const head = new Uint8Array(buf);
+      const magic = [0x50, 0x53, 0x44, 0x42, 0x31]; // "PSDB1"
+      setIsEncryptedBackup(head.length === 5 && magic.every((b, i) => head[i] === b));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [files]);
 
   useEffect(() => {
     // Load Client-side UI preferences
@@ -77,7 +98,6 @@ export default function MassImport() {
   };   
 
   const executeUpload = async () => {     
-    setUploading(true);     
     setServerErrors([]);     
     try {      
       if (isDatabaseFile) {  
@@ -92,16 +112,19 @@ export default function MassImport() {
               confirmLabel: "Restore",
             });
             if (!confirmed) {
-                setUploading(false);
                 return;
             }
         }
 
+        setUploading(true);
         startFluidProgress(1.5);         
         const formData = new FormData();         
         formData.append("file", files[0]);         
+        if (isEncryptedBackup && dbPassword) {
+          formData.append("password", dbPassword);
+        }
         
-        const endpoint = (dbImportMode === 'restore' && !files[0].name.endsWith(".zip")) ? `${API_URL}/restore/database` : `${API_URL}/upload/database`;
+        const endpoint = (dbImportMode === 'restore' && !isZipBackup) ? `${API_URL}/restore/database` : `${API_URL}/upload/database`;
 
         const res = await fetchWithAuth(endpoint, {           
           method: "POST",           
@@ -133,6 +156,7 @@ export default function MassImport() {
             }
         }
       } else {         
+        setUploading(true);
         if (!selectedRoute.trim()) {           
           showToast("Please enter a valid route name.", "error");           
           setUploading(false);           
@@ -269,10 +293,30 @@ export default function MassImport() {
               <div className="flex items-center gap-3">
                 <Database className="text-blue-600 shrink-0" size={24} />               
                 <div>
-                  <p className="text-sm font-bold text-blue-600">Database Backup File Detected</p>
+                  <p className="text-sm font-bold text-blue-600">
+                    {isEncryptedBackup ? "Encrypted Database Backup Detected" : "Database Backup File Detected"}
+                  </p>
                   <p className="text-xs text-blue-600/80 font-semibold">Choose how to import records from this backup file.{isZipBackup && " A nightly backup ZIP (the .db is inside) is imported by merging new records only."}</p>
                 </div>             
               </div>
+
+              {isEncryptedBackup && (
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">Backup password</label>
+                  <input
+                    type="password"
+                    value={dbPassword}
+                    onChange={(e) => setDbPassword(e.target.value)}
+                    disabled={uploading}
+                    placeholder="The password set in Settings → Backup"
+                    autoComplete="off"
+                    className="w-full bg-background border border-border shadow-sm rounded-lg px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
+                  />
+                  <p className="text-[11px] text-muted-foreground font-medium">
+                    Without this password the archive cannot be opened by anyone, including PASADA.
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-3 pt-2">
                  <label className="flex items-start gap-3 cursor-pointer">
@@ -300,12 +344,12 @@ export default function MassImport() {
           )}                      
           
           <div className="space-y-2">             
-            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db, .zip)</label>             
+            <label className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Select Files (.docx, .xlsx, .csv, .db, .zip, .psdb)</label>             
             <div className={`border-2 border-dashed border-border rounded-xl p-8 text-center bg-muted/20 transition-colors relative ${uploading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-muted/50'}`}>               
               <input                 
                 type="file"                 
                 multiple                 
-                accept=".docx,.xlsx,.csv,.db,.zip"                 
+                accept=".docx,.xlsx,.csv,.db,.zip,.psdb"                 
                 onChange={handleFileChange}                 
                 disabled={uploading}                 
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"               

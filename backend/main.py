@@ -25,6 +25,8 @@ import threading
 import multiprocessing
 import io
 import shutil
+import sqlite3
+import tempfile
 import calendar
 import uuid
 import platform
@@ -62,6 +64,7 @@ from route_seed_data import ALIASES as _ROUTE_ALIASES
 import route_seed_data
 from doc_generator import generate_certificate, generate_toda_summary
 from extractor import extract_docx_data
+import backup_crypto
 import sync_engine
 from sync_engine import (start_lan_sync, get_local_ip, PEERS, get_last_sync_check,
                          cluster_secret_fingerprint, rotate_cluster_secret, import_cluster_secret,
@@ -127,6 +130,19 @@ def automated_background_tasks():
                         except OSError:
                             pass
 
+            # The old raw-database download copied plaintext .db files here.
+            # The endpoint is gone; remove what it left behind.
+            leftover_dir = os.path.join(BASE_DIR, "temp_backups")
+            if os.path.isdir(leftover_dir):
+                current_timestamp = time.time()
+                for file_name in os.listdir(leftover_dir):
+                    leftover = os.path.join(leftover_dir, file_name)
+                    try:
+                        if os.path.getmtime(leftover) < current_timestamp - 3600:
+                            os.remove(leftover)
+                    except OSError:
+                        pass
+
             track_file = os.path.join(BASE_DIR, "last_backup.txt")
             last_backup = ""
             if os.path.exists(track_file):
@@ -167,19 +183,25 @@ def automated_background_tasks():
                 
                 db_path = os.path.join(BASE_DIR, 'pasada_production.db')
                 if os.path.exists(db_path):
-                    zip_name = os.path.join(backup_dir, f"PASADA_Backup_{today_str}.zip")
-                    with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.write(db_path, os.path.basename(db_path))
-                    force_log(f"Automated backup secured: {zip_name}")
+                    # One writer for both archive types. It encrypts when a key
+                    # is configured, and refuses to write anything when
+                    # encrypted archives exist but the key is missing: silence
+                    # there would quietly downgrade the office to plaintext.
+                    _nightly_backup_and_track(db_path, backup_dir, today_str, track_file)
                 
                 # ISO 25010 Reliability: backup retention policy. Panatilihin
                 # lang ang huling 30 araw ng backup ZIP; lahat ng mas luma ay
                 # kasama na ng desktop hard drive kung sasapatin, pero ang
                 # unang 30 araw ay sapat para sa anumang makatwirang rollback.
                 try:
-                    cutoff = (now - timedelta(days=30)).strftime('PASADA_Backup_%Y-%m-%d.zip')
+                    cutoff = (now - timedelta(days=30)).strftime('%Y-%m-%d')
                     for old_name in os.listdir(backup_dir):
-                        if old_name.startswith("PASADA_Backup_") and old_name < cutoff:
+                        # Both .zip (plain) and .psdb (encrypted) archives age
+                        # out on the same 30-day rule; compare the date inside
+                        # the name, not the whole filename (extensions sort
+                        # differently).
+                        day = old_name[len("PASADA_Backup_"):][:10] if old_name.startswith("PASADA_Backup_") else ""
+                        if len(day) == 10 and day < cutoff:
                             try:
                                 os.remove(os.path.join(backup_dir, old_name))
                                 force_log(f"Backup retention: removed old backup {old_name}")
@@ -188,8 +210,9 @@ def automated_background_tasks():
                 except Exception as prune_err:
                     force_log(f"Backup retention sweep failed: {prune_err}")
                 
-                with open(track_file, "w") as f: 
-                    f.write(today_str)
+                # The day is marked done by _nightly_backup_and_track only when
+                # a file was actually written, so a refused backup retries as
+                # soon as the password is fixed instead of waiting a day.
                     
         except Exception as e:
             force_log(f"Background task engine error: {e}")
@@ -880,7 +903,8 @@ def health_check():
     return {"status": "online"}
 
 @app.delete("/api/operators/{identifier}")
-def delete_single_operator(identifier: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_single_operator(identifier: str, route: Optional[str] = None,
+                           current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_record_writer(current_user)
     if len(identifier) > 15 and "-" in identifier: 
         records = db.query(FranchiseRecord).filter(
@@ -896,7 +920,23 @@ def delete_single_operator(identifier: str, current_user: User = Depends(get_cur
             ((FranchiseRecord.sbn_no == clean_sbn) | (FranchiseRecord.sbn_no == identifier.upper()) | (FranchiseRecord.sbn_no.like(f"{clean_sbn}-%"))) &
             (FranchiseRecord.is_deleted == False)
         ).all()
-        
+
+    # SBN AMBIGUITY: the same base SBN can exist on two TODA lines (an operator
+    # who moved, or a line that reused a number). Deleting on the bare SBN used
+    # to take every match, including the other line's record. Every year-suffix
+    # copy on ONE line still deletes together (that is the historical cleanup
+    # the office wants); a spread across lines needs the caller to name the line.
+    if route:
+        wanted_route = alias_route(route)
+        records = [r for r in records if r.route == wanted_route]
+    elif len({r.route for r in records}) > 1:
+        routes_found = sorted({r.route for r in records})
+        raise HTTPException(
+            status_code=409,
+            detail=f"SBN {identifier} exists on more than one route ({', '.join(routes_found)}). "
+                   "Choose the route before deleting, so the wrong line is not touched.",
+        )
+
     if not records:
         raise HTTPException(status_code=404, detail="Operator record not found.")
         
@@ -1229,10 +1269,15 @@ def get_record_restore_status(record_id: str, current_user: User = Depends(get_c
     }
 
 @app.get("/admin/tickets")
-def list_tickets(status_filter: str = "pending", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_tickets(status_filter: str = "pending", mine: bool = False,
+                 current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Approval queue for the Admin Console. Clerks also read it to see their
-    own requests' status, so the list is open to any signed-in account."""
+    own requests' status, so the list is open to any signed-in account.
+    mine=true narrows it to the caller's own filings ("My Requests"): the
+    queue is shared, but a clerk does not need to read other people's asks."""
     q = db.query(ApprovalTicket)
+    if mine:
+        q = q.filter(ApprovalTicket.created_by == get_full_name(current_user))
     if status_filter != "all":
         q = q.filter(ApprovalTicket.status == status_filter)
     tickets = q.order_by(ApprovalTicket.created_at.desc()).limit(200).all()
@@ -2185,8 +2230,11 @@ def admin_set_user_role(payload: UserRoleChange, current_user: User = Depends(ge
     timestamp race everywhere, wakes the other computers, and audits it."""
     require_admin(current_user)
     new_role = payload.role.strip().title()
-    if new_role not in ("Admin", "Clerk"):
-        raise HTTPException(status_code=400, detail="Role must be Admin or Clerk")
+    # VIEWER (2026-11-20): the read-only role the second office PC runs on.
+    # require_record_writer already refuses Viewer on every write, so the
+    # role is safe to hand out from this panel now that it can be assigned.
+    if new_role not in ("Admin", "Clerk", "Viewer"):
+        raise HTTPException(status_code=400, detail="Role must be Admin, Clerk, or Viewer")
     target = db.query(User).filter(User.username == payload.username.strip().upper()).first()
     if not target:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -2757,7 +2805,19 @@ def sync_pull(since: str, request: Request, db: Session = Depends(get_db)):
         u_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns if c.name not in SENSITIVE_USER_COLUMNS}
         safe_users.append(u_dict)
         
-    return {"records": [attach_status(r) for r in records], "users": safe_users}
+    # RECONCILE HINT: the caller cannot tell "this peer has nothing new" from
+    # "this peer's rows all carry timestamps older than my watermark" by the
+    # payload alone, so it gets the peer's newest stamp and total. A peer that
+    # sits entirely in the past (an old backup imported there, with its
+    # historical updated_at values) is then pulled once in full instead of
+    # never.
+    peer_max = db.query(func.max(FranchiseRecord.updated_at)).scalar()
+    return {
+        "records": [attach_status(r) for r in records],
+        "users": safe_users,
+        "server_max_updated_at": peer_max.isoformat() if peer_max else None,
+        "record_count": db.query(FranchiseRecord).count(),
+    }
 
 # --- ADMIN CONSOLE: TEMPLATE MANAGEMENT ---
 # 25010 Characteristic: Maintainability. The certificate (template.docx) and
@@ -3238,7 +3298,9 @@ def update_franchise(
 MAX_DB_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB — a full registry DB is ~100 MB
 
 @app.post("/upload/database")
-async def upload_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def upload_database_file(file: UploadFile = File(...),
+                               password: Optional[str] = Form(None),
+                               current_user: User = Depends(get_current_user)):
     # Importing a whole .db file can add or overwrite thousands of records;
     # that is an administrative migration, not part of a clerk's workflow.
     require_admin(current_user)
@@ -3283,7 +3345,22 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
                     os.remove(temp_db_path)
                     raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB import limit.")
                 buffer.write(chunk)
-    
+
+    # ENCRYPTED ARCHIVE: decrypt a .psdb before the merge reads it as SQLite.
+    try:
+        with open(temp_db_path, "rb") as fh:
+            head = fh.read(len(backup_crypto.MAGIC))
+        if backup_crypto.is_encrypted(head):
+            with open(temp_db_path, "rb") as fh:
+                raw = fh.read()
+            raw = _decrypt_and_unpack(raw, password, "import")
+            with open(temp_db_path, "wb") as fh:
+                fh.write(raw)
+    except HTTPException:
+        try: os.remove(temp_db_path)
+        except OSError: pass
+        raise
+
     temp_db = None
     db = None
     try:
@@ -3298,20 +3375,64 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
         db = SessionLocal()
         
         existing_ids = {r.id for r in db.query(FranchiseRecord.id).all()}
-        
+
+        # SAME SBN, DIFFERENT ROW ID: a backup taken on the other computer (or
+        # before a reinstall) carries that machine's ids. Merging by id alone
+        # inserted a second row for every record, which is how a registry of
+        # ~6,100 once read 12,246. Fuse by SBN instead.
+        existing_by_sbn = {}
+        # ACTIVE ROWS WIN a shared SBN: fusing into a tombstone would hide the
+        # imported record behind a deleted one. 
+        for rec in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all():
+            existing_by_sbn.setdefault(normalize_base_sbn(rec.sbn_no), rec)
+        for rec in db.query(FranchiseRecord).all():
+            existing_by_sbn.setdefault(normalize_base_sbn(rec.sbn_no), rec)
+
         new_count = 0
         skipped_count = 0
-        
+        merged_count = 0
+
+        def _newer(a, b):
+            """Later of two timestamps, tolerating the None on old rows."""
+            if not a: return b
+            if not b: return a
+            return max(a, b)
+
         for r in imported_records:
             if getattr(r, 'is_deleted', False):
                 skipped_count += 1
                 continue
-                
+
             if r.id in existing_ids:
                 skipped_count += 1
                 continue
 
             is_vac = not r.operator_name or str(r.operator_name).strip() == ""
+            base_sbn = normalize_base_sbn(r.sbn_no)
+            twin = existing_by_sbn.get(base_sbn)
+            if twin is not None and getattr(twin, "is_deleted", False):
+                # Merging a backup is not a restore: a record the office
+                # deliberately deleted stays deleted here. (Use Full Restore
+                # for that.) Counting it as skipped keeps the report honest.
+                skipped_count += 1
+                continue
+            if twin is not None:
+                # NEWER YEAR WINS, blanks are filled, nothing is erased.
+                if get_record_year(r.issue_date) >= get_record_year(twin.issue_date):
+                    twin.issue_date = r.issue_date
+                    twin.valid_until = r.valid_until
+                    twin.sbn_no = format_sbn_with_year(base_sbn, r.issue_date, is_vac)
+                twin.operator_name = twin.operator_name or r.operator_name
+                twin.address = twin.address or r.address
+                twin.motor_no = twin.motor_no or r.motor_no
+                twin.chassis_no = twin.chassis_no or r.chassis_no
+                twin.make = twin.make or r.make
+                twin.plate_no = twin.plate_no or r.plate_no
+                twin.is_active = bool(twin.is_active) or bool(r.is_active)
+                twin.updated_at = _newer(twin.updated_at, r.updated_at)
+                merged_count += 1
+                continue
+
             new_record = FranchiseRecord(
                 id=r.id, sbn_no=format_sbn_with_year(r.sbn_no, r.issue_date, is_vac), operator_name=r.operator_name,
                 address=r.address, motor_no=r.motor_no, chassis_no=r.chassis_no,
@@ -3323,13 +3444,15 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
             )
             db.add(new_record)
             existing_ids.add(r.id)
+            existing_by_sbn[base_sbn] = new_record
             new_count += 1
             
         db.commit()
         invalidate_ml_cache()
         clear_api_caches()
-        log_action(db, get_full_name(current_user), "DATABASE_MIGRATION", "0", "ALL", f"Merged {new_count} records from .db file. Skipped {skipped_count}.")
-        return {"imported": new_count, "skipped": skipped_count}
+        log_action(db, get_full_name(current_user), "DATABASE_MIGRATION", "0", "ALL",
+                   f"Merged {new_count} new records and {merged_count} matching SBNs from .db file. Skipped {skipped_count}.")
+        return {"imported": new_count, "merged": merged_count, "skipped": skipped_count}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -3343,28 +3466,10 @@ async def upload_database_file(file: UploadFile = File(...), current_user: User 
             try: os.remove(temp_db_path)
             except: pass
 
-@app.get("/backup/database")
-def backup_database(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_path = os.path.join(BASE_DIR, 'pasada_production.db')
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail="Database file not found.")
-    
-    temp_backup_dir = os.path.join(BASE_DIR, "temp_backups")
-    os.makedirs(temp_backup_dir, exist_ok=True)
-    
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"PASADA_BACKUP_{timestamp}.db"
-    temp_db_path = os.path.join(temp_backup_dir, filename)
-    
-    shutil.copyfile(db_path, temp_db_path)
-    
-    log_action(db, get_full_name(current_user), "DOWNLOAD_DB_BACKUP", "0", "SYSTEM", f"Downloaded raw database backup {filename}")
-    
-    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-    return FileResponse(path=temp_db_path, media_type="application/octet-stream", headers=headers)
-
 @app.post("/restore/database")
-async def restore_database_file(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def restore_database_file(file: UploadFile = File(...),
+                                password: Optional[str] = Form(None),
+                                current_user: User = Depends(get_current_user)):
     # Full Restore replaces the whole registry with the uploaded backup.
     # Same rule as /upload/database: Admin only. (Found in the full endpoint
     # audit: the merge import was gated but this one was not.)
@@ -3379,7 +3484,25 @@ async def restore_database_file(file: UploadFile = File(...), current_user: User
                 os.remove(temp_db_path)
                 raise HTTPException(status_code=413, detail="Database file exceeds the 500 MB restore limit.")
             buffer.write(chunk)
-    
+
+    # ENCRYPTED ARCHIVE: a .psdb backup is decrypted before anything opens it
+    # as SQLite. A wrong password stops here with a plain message rather than
+    # "invalid or corrupted database", which used to send people hunting for
+    # the wrong problem.
+    try:
+        with open(temp_db_path, "rb") as fh:
+            head = fh.read(len(backup_crypto.MAGIC))
+        if backup_crypto.is_encrypted(head):
+            with open(temp_db_path, "rb") as fh:
+                raw = fh.read()
+            raw = _decrypt_and_unpack(raw, password, "restore")
+            with open(temp_db_path, "wb") as fh:
+                fh.write(raw)
+    except HTTPException:
+        try: os.remove(temp_db_path)
+        except OSError: pass
+        raise
+
     temp_db = None
     db = None
     try:
@@ -3397,17 +3520,31 @@ async def restore_database_file(file: UploadFile = File(...), current_user: User
         restored_inserted = 0
         
         valid_keys = {c.name for c in FranchiseRecord.__table__.columns}
-        
+        # A restore from another computer's backup carries that machine's ids;
+        # matching on id alone inserted a duplicate for every record. The SBN
+        # is the business key, so a row with a new id but a known SBN is an
+        # UPDATE of the local row, not a second copy.
+        existing_by_sbn = {}
+        for rec in db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all():
+            existing_by_sbn.setdefault(normalize_base_sbn(rec.sbn_no), rec)
+        for rec in db.query(FranchiseRecord).all():
+            existing_by_sbn.setdefault(normalize_base_sbn(rec.sbn_no), rec)
+
         for r in imported_records:
             existing = db.query(FranchiseRecord).filter(FranchiseRecord.id == r.id).first()
+            if not existing:
+                existing = existing_by_sbn.get(normalize_base_sbn(r.sbn_no))
             if existing:
                 for key in valid_keys:
+                    if key == 'id':
+                        continue  # keep the local id: history and tickets point at it
                     setattr(existing, key, getattr(r, key))
                 restored_updated += 1
             else:
                 clean_kwargs = {key: getattr(r, key) for key in valid_keys}
                 new_rec = FranchiseRecord(**clean_kwargs)
                 db.add(new_rec)
+                existing_by_sbn[normalize_base_sbn(r.sbn_no)] = new_rec
                 restored_inserted += 1
             
         db.commit()
@@ -3425,6 +3562,573 @@ async def restore_database_file(file: UploadFile = File(...), current_user: User
         if db:
             try: db.close()
             except: pass
+        if os.path.exists(temp_db_path):
+            try: os.remove(temp_db_path)
+            except: pass
+
+# --- BACKUP HEALTH (the "all the computers died" question) -----------------
+# The nightly job writes a ZIP at 16:45 and keeps 30 days. That protects
+# against a bad edit or a dead disk, not against the whole office PC being
+# lost: a copy that only exists on that machine dies with it. This endpoint
+# makes the state visible (how old, how many, is the newest one actually
+# readable), and the UI turns it into a warning before the office finds out
+# the hard way.
+BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+BACKUP_STALE_HOURS = 48
+BACKUP_RETENTION_DAYS = 30
+
+
+def _backup_archive_files() -> list:
+    if not os.path.isdir(BACKUP_DIR):
+        return []
+    files = [f for f in os.listdir(BACKUP_DIR)
+             if f.startswith("PASADA_Backup_")
+             and (f.lower().endswith(".zip") or f.lower().endswith(backup_crypto.EXTENSION))]
+    return sorted(files, reverse=True)
+
+
+def _zip_db_bytes(data: bytes, member_name: str = "pasada_production.db") -> bytes:
+    """The compressed database payload that every archive holds.
+
+    A plain backup is a ZIP with the database inside; an encrypted backup now
+    holds that same ZIP, encrypted. Compressing first matters because encrypted
+    bytes cannot be deflated afterwards: doing it the other way round made the
+    nightly encrypted archive several times larger than the plain one.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(member_name, data)
+    return buf.getvalue()
+
+
+def _unzip_db_bytes(data: bytes, limit: int = MAX_DB_UPLOAD_BYTES) -> Optional[bytes]:
+    """Return the .db inside an archive payload, or None when the payload is
+    already a database (backups written before compression was added).
+
+    The size cap is enforced while reading, not taken from the ZIP header: an
+    archive arriving on a USB drive is not necessarily one PASADA wrote.
+    """
+    if data[:4] != b"PK\x03\x04":
+        return None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        members = [i for i in zf.infolist() if i.filename.lower().endswith(".db")]
+        if not members:
+            raise ValueError("no .db file inside the archive")
+        member = max(members, key=lambda i: i.file_size)
+        out = bytearray()
+        with zf.open(member) as src:
+            while chunk := src.read(1024 * 1024):
+                out.extend(chunk)
+                if len(out) > limit:
+                    raise ValueError("the .db inside the archive is too large")
+        return bytes(out)
+
+
+# --- BACKUP PASSWORD --------------------------------------------------------
+# The office password that lets the 16:45 job encrypt unattended. It is kept
+# in its own 0600 file on this computer, never in the database and never in
+# the archive: a stolen USB drive holds ciphertext, and the key stays on the
+# office machine. It is not a defence against someone who already has this
+# computer unlocked (that person has the live database anyway).
+BACKUP_PASSPHRASE_PATH = os.path.join(BASE_DIR, "backup_passphrase.key")
+BACKUP_KEY_HISTORY = 10
+
+
+class BackupPasswordRequest(BaseModel):
+    password: Optional[str] = None
+    # The Settings dialog sets this once the clerk confirms the password has
+    # been written down somewhere outside this computer. Without it a password
+    # exists only on the disk the backups are meant to survive.
+    confirm_written_down: bool = False
+
+
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write a file so a crash leaves either the old contents or the new ones,
+    never a truncated password."""
+    tmp = f"{path}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Windows ignores POSIX modes; the file inherits the folder's ACL.
+        pass
+
+
+def _read_backup_key_state() -> dict:
+    """The stored backup passwords, newest first.
+
+    Returns {"enabled", "keys", "status"}, where status is "ok", "absent"
+    (never configured) or "corrupt" (the file exists but cannot be read). A
+    corrupt file must never be mistaken for "no password": that would silently
+    turn the nightly archive back into plaintext.
+    """
+    if not os.path.exists(BACKUP_PASSPHRASE_PATH):
+        return {"enabled": False, "keys": [], "status": "absent"}
+    try:
+        with open(BACKUP_PASSPHRASE_PATH, "r", encoding="utf-8-sig") as f:
+            text = f.read().strip()
+    except OSError:
+        return {"enabled": False, "keys": [], "status": "corrupt"}
+    if not text:
+        return {"enabled": False, "keys": [], "status": "corrupt"}
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return {"enabled": False, "keys": [], "status": "corrupt"}
+        raw_keys = data.get("keys") if isinstance(data, dict) else None
+        if not isinstance(raw_keys, list):
+            return {"enabled": False, "keys": [], "status": "corrupt"}
+        keys = [str(k).strip() for k in raw_keys if str(k).strip()]
+        # Keep "enabled" exactly as stored: enabled with no usable key is a
+        # damaged file, not an intentional opt-out, and must block plaintext.
+        return {"enabled": bool(data.get("enabled", True)),
+                "keys": keys, "status": "ok"}
+    # A file written before this format holds one plain password.
+    return {"enabled": True, "keys": [text], "status": "ok"}
+
+
+def _write_backup_key_state(enabled: bool, keys: list) -> None:
+    payload = json.dumps({"version": 1, "enabled": bool(enabled),
+                          "keys": list(dict.fromkeys(keys))}).encode("utf-8")
+    _atomic_write_bytes(BACKUP_PASSPHRASE_PATH, payload)
+
+
+def _read_backup_passphrase() -> Optional[str]:
+    state = _read_backup_key_state()
+    if state["enabled"] and state["keys"]:
+        return state["keys"][0]
+    return None
+
+
+def _backup_passphrases() -> list:
+    """Every password still stored here, newest first. Earlier keys are kept
+    after a rotation so the archives written with them stay openable."""
+    return list(_read_backup_key_state()["keys"])
+
+
+def _encrypted_archive_count(directory: Optional[str] = None) -> int:
+    folder = directory or BACKUP_DIR
+    if not os.path.isdir(folder):
+        return 0
+    return sum(1 for f in os.listdir(folder)
+               if f.startswith("PASADA_Backup_") and f.lower().endswith(backup_crypto.EXTENSION))
+
+
+def _decrypt_and_unpack(raw: bytes, typed_password: Optional[str], action: str) -> bytes:
+    """Turn an encrypted archive into database bytes for restore/import.
+
+    Tries the typed password first, otherwise every password still stored
+    here. Raises an HTTPException with something a clerk can act on, never
+    "invalid or corrupted database".
+    """
+    typed = (typed_password or "").strip()
+    candidates = [typed] if typed else _backup_passphrases()
+    if not candidates:
+        raise HTTPException(status_code=400,
+                            detail=f"This backup is encrypted. Type the backup password to {action} it.")
+    opened = None
+    for candidate in candidates:
+        try:
+            opened = backup_crypto.decrypt_bytes(raw, candidate)
+            break
+        except backup_crypto.BackupPasswordError:
+            continue
+    if opened is None:
+        raise HTTPException(
+            status_code=400,
+            detail=("That password did not open this backup." if typed else
+                    "None of the backup passwords stored on this computer opened this archive.") +
+                   " An archive keeps the password it was made with, so a file older than the last "
+                   "password change needs the earlier password.")
+    try:
+        unpacked = _unzip_db_bytes(opened)
+    except (ValueError, zipfile.BadZipFile):
+        raise HTTPException(status_code=400,
+                            detail="This backup decrypted, but the database inside it could not be unpacked. "
+                                   "Treat the archive as damaged and use an older backup.")
+    return unpacked if unpacked is not None else opened
+
+
+def _snapshot_db_bytes(db_path: str) -> bytes:
+    """A consistent copy of the live database, for archiving.
+
+    PASADA runs SQLite in WAL mode, so `pasada_production.db` alone is not the
+    whole database: recent commits live in `pasada_production.db-wal`. Reading
+    the file's bytes (what both backup paths used to do, and what a plain file
+    copy still does) produced an archive missing the latest records — Verify
+    then reported a healthy database with fewer rows than the office had
+    entered. sqlite3's backup API takes a coherent snapshot instead.
+    """
+    fd, snapshot_path = tempfile.mkstemp(suffix=".db", prefix="pasada_snapshot_")
+    os.close(fd)
+    try:
+        source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            target = sqlite3.connect(snapshot_path)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
+        with open(snapshot_path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(snapshot_path)
+        except OSError:
+            pass
+
+
+_backup_refusal_notice_day = ""
+
+
+def _nightly_backup_and_track(db_path: str, backup_dir: str, day: str,
+                              track_file: str) -> Optional[str]:
+    """Write today's archive and mark the day done only on success.
+
+    Marking a refused night as attempted used to cost a full day of coverage:
+    the key could be fixed at 17:00 and nothing would be written until the next
+    afternoon. Now the loop retries every minute and the first attempt after
+    the fix succeeds.
+    """
+    name = _write_daily_archive(db_path, backup_dir, day)
+    if name:
+        with open(track_file, "w") as f:
+            f.write(day)
+    return name
+
+
+def _write_daily_archive(db_path: str, backup_dir: str, day: str) -> Optional[str]:
+    """Write one daily archive and return its filename, or None when writing a
+    plaintext backup would lose data protection the office asked for.
+
+    Encryption used to be decided by "is a key file present", so a key that
+    was deleted, emptied or made unreadable silently downgraded the nightly
+    job to plaintext. Now it refuses to write anything while encrypted
+    archives exist and the key cannot be read.
+    """
+    global _backup_refusal_notice_day
+    os.makedirs(backup_dir, exist_ok=True)
+    state = _read_backup_key_state()
+    passphrase = state["keys"][0] if state["enabled"] and state["keys"] else None
+    plaintext_blocked = (
+        state["status"] == "corrupt"
+        or (state["enabled"] and not state["keys"])
+        or (state["status"] == "absent" and _encrypted_archive_count(backup_dir) > 0)
+    )
+    if plaintext_blocked and not passphrase:
+        # Logged once per day: the retry runs every minute, and the point is to
+        # leave a mark in the log, not to fill it.
+        if _backup_refusal_notice_day != day:
+            force_log("BACKUP NOT WRITTEN: encrypted archives exist on this computer but the backup key is "
+                      "missing or unreadable. Refusing to write a plaintext backup; will retry until the "
+                      "password is set again in Settings.")
+            _backup_refusal_notice_day = day
+        return None
+    payload = _zip_db_bytes(_snapshot_db_bytes(db_path))
+    if passphrase:
+        blob = backup_crypto.encrypt_bytes(payload, passphrase)
+        name = f"PASADA_Backup_{day}{backup_crypto.EXTENSION}"
+        _atomic_write_bytes(os.path.join(backup_dir, name), blob)
+        force_log(f"Automated ENCRYPTED backup secured: {os.path.join(backup_dir, name)} "
+                  f"({len(blob) / 1_048_576:.1f} MB compressed)")
+        _backup_refusal_notice_day = ""
+        return name
+    name = f"PASADA_Backup_{day}.zip"
+    _atomic_write_bytes(os.path.join(backup_dir, name), payload)
+    force_log(f"Automated backup secured: {os.path.join(backup_dir, name)}")
+    _backup_refusal_notice_day = ""
+    return name
+
+
+@app.get("/backup/encryption")
+def backup_encryption_status(current_user: User = Depends(get_current_user)):
+    require_admin(current_user)
+    state = _read_backup_key_state()
+    return {
+        "configured": bool(state["enabled"] and state["keys"]),
+        "stored_passwords": len(state["keys"]),
+        "key_problem": state["status"] == "corrupt" or (state["enabled"] and not state["keys"]),
+        "archives_encrypted": _encrypted_archive_count(),
+        "extension": backup_crypto.EXTENSION,
+        "min_length": backup_crypto.MIN_PASSWORD_LENGTH,
+    }
+
+
+@app.post("/backup/encryption")
+def set_backup_encryption(payload: BackupPasswordRequest,
+                          current_user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """Set or rotate the office backup password.
+
+    Earlier passwords are kept in the key file (newest first) instead of being
+    discarded: re-encrypting a month of archives on this hardware would need a
+    second copy of every file, and a crash halfway through would orphan the
+    rest. Keeping the keys means no archive made before the change is lost.
+    """
+    require_admin(current_user)
+    password = (payload.password or "").strip()
+    if len(password) < backup_crypto.MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400,
+                            detail=f"Use at least {backup_crypto.MIN_PASSWORD_LENGTH} characters. "
+                                   "This password is the only thing standing between a lost USB drive and the registry.")
+    if not payload.confirm_written_down:
+        raise HTTPException(status_code=400,
+                            detail="Confirm the password is written down somewhere outside this computer. "
+                                   "It is the only way into an encrypted archive from a replacement PC.")
+    state = _read_backup_key_state()
+    keys = [password] + [k for k in state["keys"] if k != password]
+    keys = keys[:BACKUP_KEY_HISTORY]
+    _write_backup_key_state(True, keys)
+    log_action(db, get_full_name(current_user), "BACKUP_PASSWORD_SET", "0", "SYSTEM",
+               f"Backup password set; {len(keys) - 1} earlier password(s) kept so older archives stay openable.")
+    return {"configured": True, "stored_passwords": len(keys), "previous_kept": len(keys) - 1,
+            "extension": backup_crypto.EXTENSION}
+
+
+@app.delete("/backup/encryption")
+def clear_backup_encryption(current_user: User = Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    """Stop encrypting new backups. Stored passwords are kept so the archives
+    already written can still be opened and restored."""
+    require_admin(current_user)
+    state = _read_backup_key_state()
+    archives = _encrypted_archive_count()
+    _write_backup_key_state(False, state["keys"])
+    log_action(db, get_full_name(current_user), "BACKUP_PASSWORD_CLEARED", "0", "SYSTEM",
+               f"Backup encryption turned off; {archives} encrypted archive(s) still open with the saved password(s).")
+    return {"configured": False, "stored_passwords": len(state["keys"]),
+            "encrypted_archives": archives}
+
+
+@app.post("/backup/download")
+def download_encrypted_backup(payload: Optional[BackupPasswordRequest] = None,
+                              current_user: User = Depends(get_current_user),
+                              db: Session = Depends(get_db)):
+    """One-off password-protected copy of the live database, for the USB drive.
+    Uses the typed password when one is sent, otherwise the stored office one."""
+    require_admin(current_user)
+    db_path = os.path.join(BASE_DIR, 'pasada_production.db')
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="Database file not found.")
+    password = ((payload.password or "").strip() if payload else "") or _read_backup_passphrase()
+    if not password:
+        raise HTTPException(status_code=400,
+                            detail="Set a backup password first, so the file on the USB drive is unreadable to anyone else.")
+    blob = backup_crypto.encrypt_bytes(_zip_db_bytes(_snapshot_db_bytes(db_path)), password)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"PASADA_BACKUP_{stamp}{backup_crypto.EXTENSION}"
+    log_action(db, get_full_name(current_user), "DOWNLOAD_DB_BACKUP", "0", "SYSTEM",
+               f"Downloaded encrypted database backup {filename}")
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return Response(content=blob, media_type="application/octet-stream", headers=headers)
+
+
+@app.get("/backup/status")
+def backup_status(current_user: User = Depends(get_current_user)):
+    """How safe is the registry right now: the age of the newest backup on
+    THIS computer, and whether that file and tonight's file are encrypted."""
+    files = _backup_archive_files()
+    latest = files[0] if files else None
+    latest_path = os.path.join(BACKUP_DIR, latest) if latest else None
+    size_bytes = os.path.getsize(latest_path) if latest_path and os.path.exists(latest_path) else 0
+    age_hours = None
+    if latest_path and os.path.exists(latest_path):
+        age_hours = round((time.time() - os.path.getmtime(latest_path)) / 3600, 1)
+    state = _read_backup_key_state()
+    latest_encrypted = False
+    if latest_path and os.path.exists(latest_path):
+        try:
+            with open(latest_path, "rb") as fh:
+                latest_encrypted = backup_crypto.is_encrypted(fh.read(len(backup_crypto.MAGIC)))
+        except OSError:
+            latest_encrypted = False
+    return {
+        "folder": BACKUP_DIR,
+        "count": len(files),
+        "latest_file": latest,
+        "latest_size_bytes": size_bytes,
+        "age_hours": age_hours,
+        "stale": age_hours is None or age_hours > BACKUP_STALE_HOURS,
+        "stale_after_hours": BACKUP_STALE_HOURS,
+        "retention_days": BACKUP_RETENTION_DAYS,
+        "automatic_time": "16:45 local time, once a day",
+        "encrypted": bool(state["enabled"] and state["keys"]),
+        "latest_encrypted": latest_encrypted,
+        "stored_passwords": len(state["keys"]),
+        "encrypted_archives": _encrypted_archive_count(),
+        "key_problem": state["status"] == "corrupt" or (state["enabled"] and not state["keys"]),
+        "extension": backup_crypto.EXTENSION,
+    }
+
+
+# --- DUPLICATE RECORDS (same route, same base SBN) --------------------------
+# Sync and imports fuse by SBN now, but a registry that lived through the old
+# merge-by-id days can still hold two rows for one franchise. These two
+# endpoints report them and clean them, scoped to ONE route: the same SBN on
+# two different TODA lines is a real office situation, not a duplicate.
+def _duplicate_groups(db: Session) -> dict:
+    groups = {}
+    rows = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
+    for r in rows:
+        key = (r.route, normalize_base_sbn(r.sbn_no))
+        groups.setdefault(key, []).append(r)
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+@app.get("/admin/duplicates")
+def list_duplicate_records(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_admin(current_user)
+    groups = _duplicate_groups(db)
+    items = [
+        {
+            "route": route,
+            "sbn": sbn,
+            "count": len(recs),
+            "ids": [r.id for r in recs],
+            "names": [r.operator_name or "VACANT" for r in recs],
+        }
+        for (route, sbn), recs in sorted(groups.items())
+    ]
+    return {"count": len(items), "records": sum(len(g) for g in groups.values()), "items": items[:200]}
+
+
+@app.post("/admin/dedupe")
+def dedupe_duplicate_records(dry_run: bool = True,
+                             current_user: User = Depends(get_current_user),
+                             db: Session = Depends(get_db)):
+    """Keep one row per (route, base SBN): the newest renewal year wins, then
+    the most recent edit, and blanks are filled from the copies being retired.
+    The retired rows become tombstones with a fresh updated_at, so the removal
+    travels to the other computers over sync instead of being re-created by
+    the next pull. dry_run=true reports the same counts and changes nothing."""
+    require_admin(current_user)
+    groups = _duplicate_groups(db)
+    retired = 0
+    kept_detail = []
+    now = get_pht_now()
+    for (route, sbn), recs in groups.items():
+        keep = max(recs, key=lambda r: (get_record_year(r.issue_date),
+                                        r.updated_at or datetime.min))
+        kept_detail.append({"route": route, "sbn": sbn, "kept_id": keep.id,
+                            "kept_name": keep.operator_name or "VACANT"})
+        for other in recs:
+            if other.id == keep.id:
+                continue
+            retired += 1
+            if dry_run:
+                continue
+            keep.operator_name = keep.operator_name or other.operator_name
+            keep.address = keep.address or other.address
+            keep.motor_no = keep.motor_no or other.motor_no
+            keep.chassis_no = keep.chassis_no or other.chassis_no
+            keep.make = keep.make or other.make
+            keep.plate_no = keep.plate_no or other.plate_no
+            other.is_deleted = True
+            other.updated_at = now
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+        invalidate_ml_cache()
+        clear_api_caches()
+        log_action(db, get_full_name(current_user), "DEDUPE", "0", "ALL",
+                   f"Removed {retired} duplicate row(s) across {len(groups)} route/SBN group(s).")
+    return {"dry_run": dry_run, "groups": len(groups), "would_retire": retired,
+            "kept": kept_detail[:200]}
+
+
+def backup_auth_error(status_code: int, code: str, filename: str, detail: str):
+    """A refusal the Settings screen can act on. A plain error toast would
+    leave the clerk with an archive they cannot open and no way forward, so
+    the code tells the UI to ask for the password by name."""
+    return JSONResponse(status_code=status_code,
+                        content={"detail": detail, "code": code, "file": filename})
+
+
+@app.post("/backup/verify")
+def verify_latest_backup(payload: Optional[BackupPasswordRequest] = None,
+                         current_user: User = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """Open the newest backup and prove it is a usable database: the archive
+    is readable (decrypted when it is encrypted), it contains a database,
+    that database passes SQLite's quick_check, and it holds records. A backup
+    nobody ever opened is a hope, not a backup."""
+    require_admin(current_user)
+    files = _backup_archive_files()
+    if not files:
+        raise HTTPException(status_code=404, detail="No backup file exists yet. PASADA writes one daily at 16:45; you can also use Download backup now.")
+    archive_path = os.path.join(BACKUP_DIR, files[0])
+    temp_db_path = os.path.join(BASE_DIR, f"temp_verify_{uuid.uuid4().hex}.db")
+    try:
+        with open(archive_path, "rb") as f:
+            raw = f.read()
+        encrypted = backup_crypto.is_encrypted(raw)
+        if encrypted:
+            typed = ((payload.password if payload else None) or "").strip()
+            candidates = [typed] if typed else _backup_passphrases()
+            if not candidates:
+                return backup_auth_error(
+                    400, "password-required", files[0],
+                    "This backup is encrypted and no password is known here. Type the password it was made with so it can be checked.")
+            opened = None
+            for candidate in candidates:
+                try:
+                    opened = backup_crypto.decrypt_bytes(raw, candidate)
+                    break
+                except backup_crypto.BackupPasswordError:
+                    continue
+            if opened is None:
+                return backup_auth_error(
+                    422, "password-rejected", files[0],
+                    ("That password did not open " if typed else
+                     "None of the backup passwords stored on this computer opened ")
+                    + f"{files[0]}. An archive keeps the password it was made with, so a file older than "
+                      "the last password change needs the earlier password. Type it.")
+            raw = opened
+        if raw[:4] == b"PK\x03\x04":
+            try:
+                raw = _unzip_db_bytes(raw)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=422, detail=f"{files[0]} is not a readable ZIP archive. Treat this backup as unusable and download a fresh one.")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"{files[0]} could not be unpacked ({e}). Treat this backup as unusable and download a fresh one.")
+        with open(temp_db_path, "wb") as out:
+            out.write(raw)
+        engine = create_engine(f"sqlite:///{temp_db_path}")
+        with engine.connect() as conn:
+            integrity = conn.execute(text("PRAGMA quick_check")).fetchone()
+            integrity = integrity[0] if integrity else "unknown"
+            record_count = conn.execute(text("SELECT COUNT(*) FROM franchise_records")).scalar()
+        engine.dispose()
+        log_action(db, get_full_name(current_user), "BACKUP_VERIFIED", "0", "SYSTEM",
+                   f"Verified backup {files[0]}: integrity={integrity}, records={record_count}.")
+        return {
+            "file": files[0],
+            "integrity": integrity,
+            "records": int(record_count or 0),
+            "ok": integrity == "ok" and int(record_count or 0) > 0,
+            "encrypted": encrypted,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"{files[0]} could not be opened as a database: {e}")
+    finally:
         if os.path.exists(temp_db_path):
             try: os.remove(temp_db_path)
             except: pass
@@ -3908,6 +4612,169 @@ def get_inactive_records(current_user: User = Depends(get_current_user), db: Ses
 @app.get("/predict/{route}")
 def get_prediction(route: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return run_kmeans_clustering(db, alias_route(route))
+
+# --- ALL-ROUTES MASTERLIST (one sheet per TODA line) ---------------------
+# The per-route export stays the working copy for one line. This one answers
+# the request that arrives as a single workbook: every line, same columns and
+# same colour legend, one sheet each, so the office can print per TODA without
+# assembling a dozen files by hand.
+MASTERLIST_COLUMNS = ["SBN", "DATE OF RENEWAL", "NAME", "MAKE",
+                      "MOTOR NO.", "CHASSIS NO.", "PLATE NO."]
+MAX_EXCEL_SHEET_NAME = 31
+
+
+def _masterlist_rows(records) -> list:
+    rows = []
+    for r in records:
+        is_vacant = not r.operator_name or str(r.operator_name).strip() == ""
+        rows.append({
+            "SBN": escape_excel(normalize_base_sbn(r.sbn_no)),
+            "DATE OF RENEWAL": None if is_vacant else r.issue_date,
+            "NAME": "" if is_vacant else escape_excel(r.operator_name),
+            "MAKE": escape_excel(r.make),
+            "MOTOR NO.": escape_excel(r.motor_no),
+            "CHASSIS NO.": escape_excel(r.chassis_no),
+            "PLATE NO.": escape_excel(r.plate_no),
+        })
+    return rows
+
+
+def _excel_sheet_name(route: str) -> str:
+    cleaned = "".join(ch for ch in str(route or "ROUTE") if ch not in '[]:*?/\\').strip()
+    return (cleaned or "ROUTE")[:MAX_EXCEL_SHEET_NAME]
+
+
+def _write_masterlist_sheet(ws, rows: list, current_year: int) -> None:
+    """Same layout as the per-route export: header on row 2, records from row 3,
+    the renewal-count formula above, and the year legend in I3:K6."""
+    calibri_11 = Font(name="Calibri", size=11)
+    calibri_11_bold = Font(name="Calibri", size=11, bold=True)
+    calibri_16_bold = Font(name="Calibri", size=16, bold=True)
+
+    fill_vacant = PatternFill(start_color="FF00B0F0", end_color="FF00B0F0", fill_type="solid")
+    fill_y2_1 = PatternFill(start_color="FFBDD7EE", end_color="FFBDD7EE", fill_type="solid")
+    fill_y3_7 = PatternFill(start_color="FF92D050", end_color="FF92D050", fill_type="solid")
+    fill_y8 = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
+
+    for col_num, name in enumerate(MASTERLIST_COLUMNS, start=1):
+        cell = ws.cell(row=2, column=col_num, value=name)
+        cell.font = calibri_11_bold
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    total_row_count = len(rows) + 2
+    ws.merge_cells("A1:B1")
+    ws["A1"] = f'=COUNTIFS(B3:B{total_row_count}, ">="&K5, B3:B{total_row_count}, "<="&K6)'
+    ws["A1"].font = calibri_16_bold
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    for cell, label, fill in (
+        ("I3", "VACANT", fill_vacant),
+        ("I4", "2024-2025", fill_y2_1),
+        ("I5", "2019-2023", fill_y3_7),
+        ("I6", "2018", fill_y8),
+    ):
+        ws[cell] = label
+        ws[cell].font = calibri_11_bold
+        ws[cell].fill = fill
+
+    ws["J5"] = "Count:"
+    ws["J5"].font = calibri_11_bold
+    ws["J5"].alignment = Alignment(horizontal="right", vertical="center")
+    ws["K5"] = f"{current_year}-01-01"
+    ws["K5"].font = calibri_11
+    ws["K6"] = f"{current_year}-12-31"
+    ws["K6"].font = calibri_11
+
+    for row_num, r_dict in enumerate(rows, start=3):
+        op_name = str(r_dict["NAME"]).strip()
+        issue_date = r_dict["DATE OF RENEWAL"]
+        issue_year = issue_date.year if pd.notna(issue_date) else 0
+
+        if not op_name or op_name == "'":
+            fill_color = fill_vacant
+        elif issue_year == current_year:
+            fill_color = None
+        elif issue_year in (current_year - 1, current_year - 2):
+            fill_color = fill_y2_1
+        elif current_year - 7 <= issue_year <= current_year - 3:
+            fill_color = fill_y3_7
+        else:
+            fill_color = fill_y8
+
+        for col_num, key in enumerate(MASTERLIST_COLUMNS, start=1):
+            cell = ws.cell(row=row_num, column=col_num, value=r_dict.get(key))
+            cell.font = calibri_11
+            if fill_color:
+                cell.fill = fill_color
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+            if key == "DATE OF RENEWAL" and cell.value:
+                cell.number_format = "dd-mmm-yy"
+
+    for col_idx in range(1, len(MASTERLIST_COLUMNS) + 1):
+        col_letter = get_column_letter(col_idx)
+        if col_letter in ("I", "J", "K"):
+            ws.column_dimensions[col_letter].width = 16
+            continue
+        width = 0
+        for row_idx in range(1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value
+            if col_idx == 2 and value:
+                width = max(width, 12)
+            elif value:
+                width = max(width, len(str(value)))
+        ws.column_dimensions[col_letter].width = width + 2
+
+
+@app.get("/export/masterlist-all")
+def export_all_route_masterlists(status_filter: str = "ALL",
+                                current_user: User = Depends(get_current_user),
+                                db: Session = Depends(get_db)):
+    """Every TODA line in one workbook, one sheet per route, same format as the
+    single-route masterlist. Read-only for the Viewer role: exporting is not a
+    write, so the read-only PC can print the monthly copy too."""
+    current_year = get_pht_now().year
+    wanted = (status_filter or "ALL").upper()
+    records = db.query(FranchiseRecord).filter(FranchiseRecord.is_deleted == False).all()
+    records = deduplicate_records_by_base_sbn(records)
+
+    by_route = {}
+    for r in records:
+        if wanted != "ALL" and compute_record_status(r) != wanted:
+            continue
+        by_route.setdefault(r.route, []).append(r)
+    if not by_route:
+        raise HTTPException(status_code=404, detail="No records found matching this filter")
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    used_names = set()
+    for route in sorted(by_route):
+        sheet_name = _excel_sheet_name(route)
+        base_name, suffix = sheet_name, 2
+        while sheet_name in used_names:
+            tail = f" {suffix}"
+            sheet_name = base_name[:MAX_EXCEL_SHEET_NAME - len(tail)] + tail
+            suffix += 1
+        used_names.add(sheet_name)
+        ws = wb.create_sheet(title=sheet_name)
+        _write_masterlist_sheet(
+            ws, _masterlist_rows(sorted(by_route[route], key=get_sbn_sort_key)), current_year
+        )
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    label = "ALL" if wanted == "ALL" else wanted
+    filename_str = (f"MASTERLIST ALL ROUTES {current_year}.xlsx" if label == "ALL"
+                    else f"MASTERLIST ALL ROUTES {current_year} - {label}.xlsx")
+    log_action(db, get_full_name(current_user), "EXPORT_MASTERLIST", "0", "ALL",
+               f"Exported all-routes masterlist ({len(by_route)} sheets, {label})")
+    headers = {'Content-Disposition': f'attachment; filename="{filename_str}"'}
+    return Response(content=output.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers=headers)
+
 
 @app.get("/export/masterlist/{route_name}")
 def export_toda_masterlist(route_name: str, status_filter: str = "ALL", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

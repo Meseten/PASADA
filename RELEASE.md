@@ -1,5 +1,8 @@
 # Releasing PASADA
 
+*Current version: 0.82.14 (November 20, 2026). The version record and the
+software counts are listed in `CURRENT_STATE.md` in the repository root.*
+
 Installers are produced **on the Windows build machine** — the document
 pipeline needs Microsoft Word, so they cannot be built on the Linux dev
 machine (see README → "Packaging and deployment readiness"). There are two
@@ -37,29 +40,31 @@ The installer filename, the About page, and the update manifest all read these
 values; a mismatch makes the updater consider the new build "already
 installed".
 
-## 2. Build the Python sidecar
+## 2. Build the Python sidecar (ONEDIR folder)
 
 ```bash
 cd backend
 pip install -r requirements.txt
-pyinstaller --onefile \
-  --hidden-import passlib.handlers.bcrypt --hidden-import uvicorn.logging \
-  --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto \
-  --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto \
-  --hidden-import python_multipart --hidden-import multipart \
-  --hidden-import anyio._backends._asyncio --hidden-import psutil \
-  --hidden-import jose --hidden-import pypdf \
-  --hidden-import win32com --hidden-import pythoncom \
-  --add-data "template.docx;." --add-data "dashboard_template.docx;." \
-  --name pasada-backend-x86_64-pc-windows-msvc main.py
-mkdir -p ../frontend/src-tauri/bin
-cp dist/pasada-backend-x86_64-pc-windows-msvc.exe ../frontend/src-tauri/bin/
+pyinstaller --clean --noconfirm pasada-backend.spec
+mkdir -p ../frontend/src-tauri/backend
+cp -r dist/pasada-backend/. ../frontend/src-tauri/backend/
 ```
 
-The binary name encodes the target triple — `tauri.conf.json` declares it as
-`bundle.externalBin`, and the app will not start without it. `win32com` /
-`pythoncom` exist only on Windows; they are what make Word-rendered PDFs work
-in the packaged app.
+The build is ONEDIR. `dist/pasada-backend/` holds `pasada-backend.exe` plus an
+`_internal/` folder, and the whole folder is what ships. `tauri.conf.json`
+lists it under `bundle.resources` as `backend/`, and `src-tauri/src/lib.rs`
+launches `backend/pasada-backend(.exe)` from the resource directory, falling
+back to the folder beside the executable during local runs. The spec carries
+both `.docx` templates and every hidden import the engine needs (uvicorn,
+passlib/bcrypt, jose, pypdf, psutil, multipart, and the Windows-only
+`pythoncom` / `win32com` that make Word-rendered PDFs work), so no
+`--hidden-import` list belongs on the command line.
+
+ONEDIR is deliberate. The earlier onefile build self-extracted roughly 106 MB
+into a temporary folder on every launch, which measured as the dominant part of
+cold boot on the office machine; a folder unpacks once at install time. CI uses
+this same spec and the same copy step (`.github/workflows/release.yml`, "Build
+Python Backend (onedir)"), so the manual path and CI produce the same layout.
 
 ## 3. Build and sign the Tauri app
 
@@ -152,7 +157,7 @@ that happens, delete the release and recreate it.
 
 | Bump | When |
 |------|------|
-| PATCH `0.82.5` | fixes |
+| PATCH `0.82.15` | fixes |
 | MINOR `0.83.0` | feature set |
 | MAJOR `1.0.0` | breaking changes |
 
@@ -162,7 +167,7 @@ that happens, delete the release and recreate it.
 |---------|---------------|
 | Build succeeds but step 4 says "No signed updater artifacts" | Signing env vars were unset — no `.sig` files exist. Rebuild step 3 with them set; never hand-craft `.sig` files. |
 | `A public key has been found, but no private key` | `TAURI_SIGNING_PRIVATE_KEY` missing or empty at build time. Paste the private key file contents (starts with `untrusted comment: minisign encrypted secret key`), not the `.pub` file. |
-| App starts but the backend never answers | The sidecar binary name doesn't match `bundle.externalBin` / the target triple. Rebuild step 2 with the exact `--name`. |
+| App starts but the backend never answers | The `backend/` folder is missing from the bundle, or the executable inside it is not named `pasada-backend.exe`. Rebuild step 2 (ONEDIR folder, copied whole) and confirm `bundle.resources` still lists `backend/`. |
 | `checksum error` during update | Installer and `.sig` on the release page are from different builds. Rebuild and re-upload the pair; never hand-swap files. |
 | *Check for Updates* says up to date though a newer release exists | Installed version ≥ manifest version — the stamped versions in step 1 disagreed. Fix the stamp and re-release. |
 | Office machine never sees any release | `latest.json` missing from the release, or not the "latest" release. The endpoint is `releases/latest/download/latest.json`. |

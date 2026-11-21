@@ -183,6 +183,9 @@ def data_table(doc, headers, rows, caption=None, col_widths=None):
         for i, v in enumerate(row_vals):
             run = r[i].paragraphs[0].add_run(v)
             force_arial(run, size=10, color=BLACK)
+    # Keep each row on one page: LibreOffice detaches cell text at a break.
+    for row in table.rows:
+        row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
     return table
 
 
@@ -243,7 +246,7 @@ def build():
         ["Word", "What it means in this manual"],
         [
             ("Record", "One operator's franchise information: name, SBN, motor, plate, route, dates."),
-            ("SBN", "Franchise serial number, like BA-002-26. Identifies one slot."),
+            ("SBN", "Sangguniang Bayan Number: the franchise number the municipal council assigns to one slot, like BA-002-26. The year suffix marks the renewal year."),
             ("TODA line / route", "One group of operators, like BATODA or HCTODA."),
             ("Renewal", "The yearly re-registration that keeps a franchise active."),
             ("Inactive / vacant", "A slot with no operator, or not renewed for 2+ years."),
@@ -478,7 +481,7 @@ def build():
     h2(doc, "Bringing records in from a file")
     steps(doc, [
         "Click Import Records in the sidebar.",
-        "Drop or choose the Excel or CSV file. A .db database backup is also accepted, and so is the nightly backup ZIP (a .zip file with the .db inside — it imports by merging new records only).",
+        "Drop or choose the Excel or CSV file. A .db database backup is also accepted, and so is the nightly backup archive (a .zip file with the .db inside, or an encrypted .psdb file — it imports by merging new records only).",
         "PASADA previews the file. Check that columns line up: name, SBN, route, dates.",
         "For spreadsheets, choose whether to skip existing records or overwrite them.",
         "For a database file, choose Merge (adds records that are new) or Full Restore (replaces matching records; admins only).",
@@ -487,8 +490,8 @@ def build():
     figure(doc, "08_import.png", "Import Records: pick the file, check the preview, confirm.")
     note_box(doc, "GOOD TO KNOW:", "The nightly backup ZIP works even when the old Franchise folder is long gone. If the office's spreadsheet files cannot be found, the ZIP from the backup drive is enough to bring every record over. Merge mode never overwrites: it only adds records the current registry does not have yet.")
     h2(doc, "Importing a database backup file")
-    para(doc, "When the chosen file is a .db backup, PASADA offers two choices. Merge new records only adds records that do not exist yet and leaves everything else alone. Full Restore replaces the current records with the backup's contents. Full Restore is admin-only: a clerk who selects it will be refused at the moment of upload, and the request must go through the admin.")
-    warn(doc, "Full Restore overwrites matching records with the backup's values. Download a fresh backup first (Settings > Full Database Backup) so today's state can always be recovered.")
+    para(doc, "When the chosen file is a .db backup or an encrypted .psdb archive, PASADA offers two choices. Merge new records only adds records that do not exist yet and leaves everything else alone. Full Restore replaces the current records with the backup's contents. Full Restore is admin-only: a clerk who selects it will be refused at the moment of upload, and the request must go through the admin. An encrypted file shows a password box first; type the password the archive was made with, which may be an earlier one than the password set today.")
+    warn(doc, "Full Restore overwrites matching records with the backup's values. Download a fresh backup first (Settings > Backups > Download backup now) so today's state can always be recovered.")
     h2(doc, "After an import")
     para(doc, "Dashboard counts change, affected lines appear in the sidebar, and the import lands in the Activity History. Computers connected for sync receive the new records automatically.")
 
@@ -526,8 +529,11 @@ def build():
     ])
     h2(doc, "Recovery questions")
     para(doc, "Set or change your three security questions here. Answer honestly; these are your spare key. Answers are stored in secret form and never leave this computer.")
-    h2(doc, "Full Database Backup")
-    para(doc, "Download an exact copy of the whole registry as one .db file. Save one before big cleanups, before imports, and regularly anyway. PASADA also takes its own nightly backup; see Chapter 8.")
+    h2(doc, "Backups and the backup password")
+    para(doc, "Download an exact copy of the whole registry. Save one before big cleanups, before imports, and regularly anyway. PASADA also takes its own nightly backup; see Chapter 8.")
+    para(doc, "A backup holds every operator name, address, and password hash, so PASADA can encrypt it. Set a backup password once in Settings > Backups and tick the box confirming you wrote it down somewhere outside the computer. From then on every archive is saved as an encrypted .psdb file that nobody can open without that password, including PASADA. The password is kept in a key file on this computer together with up to nine earlier passwords, so changing the password never locks you out of an older archive; Verify and Full Restore try each saved password in turn.")
+    para(doc, "The key file is the only copy of the password PASADA keeps. Copy backup_passphrase.key to the USB drive beside the archives: a replacement computer has neither the key nor the registry. If the key file is damaged or missing while encrypted archives exist, the nightly job refuses to write an unprotected backup, shows a red warning in Settings, and retries every minute once the key is repaired, rather than waiting for the next night.")
+    para(doc, "Verify newest backup opens the newest archive, checks its integrity, and counts the records inside. An archive nobody has opened is a hope, not a backup. Removing the password stops future encryption but keeps the saved passwords, so archives already encrypted still open and restore on this computer; a copy on a USB drive still needs the password it was made with.")
     h2(doc, "Updates")
     para(doc, "PASADA checks for new versions automatically and shows a prompt when one is ready. Click Install. The updater verifies the release signature before installing anything. If the office has no internet, updates wait; the program keeps working fully offline.")
 
@@ -774,7 +780,7 @@ def build():
     h2(doc, "17. I need to import records but the Franchise folder is gone")
     steps(doc, [
         "Open Import Records in the sidebar.",
-        "Choose the nightly backup ZIP file (PASADA_Backup_YYYY-MM-DD.zip). PASADA finds the .db inside automatically.",
+        "Choose the nightly backup archive (PASADA_Backup_YYYY-MM-DD.zip, or .psdb when a backup password is set). PASADA finds the .db inside automatically and asks for the password when the file is encrypted.",
         "Leave Merge selected and click Import. Every record the current registry is missing is added; nothing already there is touched.",
         "Check the totals on the Dashboard against what the office expects, and against a print of the old Excel masterlist if there is one.",
     ])
@@ -808,7 +814,7 @@ def build():
             ("Lock the screen", "Set a PIN in Settings; it locks when you leave"),
             ("Import from backup", "Import Records; drop the nightly .zip or the .db"),
             ("Preview a certificate while editing", "MTOP Certificate Preview button inside the edit form"),
-            ("Backup everything", "Settings > Full Database Backup"),
+            ("Backup everything", "Settings > Backups > Download backup now"),
             ("Check system health", "Admin Console > Technical"),
             ("Dark mode", "Sun/moon button, top of the sidebar"),
             ("Log out", "Log out button, bottom of the sidebar"),
@@ -902,14 +908,14 @@ def build():
             ("Pasada", "Filipino term for a driver's working trip: going out to transport passengers and earn the day's living. The system is named for this work."),
             ("Tigil pasada", "When the runs stop: drivers cannot work. Shows why keeping franchises active matters."),
             ("MTOP", "Motorized Tricycle Operator's Permit: the franchise document per operator."),
-            ("SBN", "Serial bound number: the franchise serial like BA-002-26."),
+            ("SBN", "Sangguniang Bayan Number: the franchise number like BA-002-26 that identifies one tricycle slot; the year suffix marks the renewal year."),
             ("TODA", "Tricycle Operators and Drivers Association: one line or route."),
             ("Renewal", "Yearly re-registration keeping a franchise active for the calendar year."),
             ("Deduplication", "The system collapsing duplicate rows of the same SBN into one clean record."),
             ("Fullness score", "Active operators compared with the route's population and road length."),
             ("Approval ticket", "A logged request for a big action, waiting for admin approval."),
             ("Audit log / Activity History", "The permanent record of every change: who, what, when, old and new values."),
-            ("Backup", "An exact copy of the whole registry, downloadable as one .db file."),
+            ("Backup", "A copy of the whole registry. With a backup password set it is saved as an encrypted .psdb archive; without one it is a plain .zip holding the .db file."),
             ("Sync", "Automatic record sharing between office computers on the same network, usually within seconds of a change."),
             ("Cluster secret", "The shared key office computers use to recognize each other during sync."),
             ("Template", "The Word document (.docx) with placeholders that certificates are printed from."),
@@ -919,7 +925,7 @@ def build():
             ("Undo an edit", "One click that puts a record back to exactly the values it had before a given edit. Offered right after saving and inside the record's History dialog."),
             ("One-time admin setup", "The panel that makes the first admin when an office has none. It closes forever once an admin exists."),
             ("Viewer account", "A read-only account. It can open, search, and print everything but cannot change records, meant for a second office computer that only looks things up."),
-            ("Nightly backup ZIP", "The automatic backup PASADA makes each night: a .zip file with the whole registry (.db) inside. It can be imported on another computer to rebuild the records."),
+            ("Nightly backup archive", "The automatic backup PASADA makes each night: a .zip file with the whole registry (.db) inside, or an encrypted .psdb file when a backup password is set. It can be imported on another computer (with its password, if encrypted) to rebuild the records."),
         ],
         caption="Terms used in this manual and in PASADA.")
 

@@ -125,6 +125,45 @@ export default function Settings() {
   const [keyImportDraft, setKeyImportDraft] = useState("");
   const [keyBusy, setKeyBusy] = useState<"rotate" | "import" | null>(null);
 
+  // BACKUP HEALTH: the nightly ZIP is the only copy that survives a dead
+  // disk, so its age is shown plainly instead of being buried in the log.
+  type BackupStatus = {
+    folder: string;
+    count: number;
+    latest_file: string | null;
+    latest_size_bytes: number;
+    age_hours: number | null;
+    stale: boolean;
+    stale_after_hours: number;
+    retention_days: number;
+    automatic_time: string;
+    latest_encrypted?: boolean;
+    stored_passwords?: number;
+    key_problem?: boolean;
+  };
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [backupVerifying, setBackupVerifying] = useState(false);
+  const [backupVerify, setBackupVerify] = useState<{ ok: boolean; file: string; records: number; integrity: string } | null>(null);
+  // BACKUP ENCRYPTION: a lost USB drive must not expose names, addresses and
+  // password hashes. The password lives on this PC only and lets the nightly
+  // job run unattended.
+  const [backupEnc, setBackupEnc] = useState<{ configured: boolean; extension: string; min_length: number; stored_passwords?: number; key_problem?: boolean; archives_encrypted?: number } | null>(null);
+  const [pwDialogOpen, setPwDialogOpen] = useState(false);
+  const [pwDraft, setPwDraft] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwWrittenDown, setPwWrittenDown] = useState(false);
+  // VERIFY PASSWORD: an archive keeps the password it was made with, so after
+  // a password change the saved one no longer opens older files. Rather than
+  // reporting "could not verify", the button asks for the older password.
+  const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
+  const [verifyDraft, setVerifyDraft] = useState("");
+  const [verifyFileName, setVerifyFileName] = useState<string | null>(null);
+  const [verifyError, setVerifyError] = useState("");
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [dupInfo, setDupInfo] = useState<{ count: number; records: number; items: { route: string; sbn: string; count: number; names: string[] }[] } | null>(null);
+  const [dupBusy, setDupBusy] = useState<"check" | "clean" | null>(null);
+
   // The Manual key recovery dialog still lives here (its network state is
   // wired into this page); the trigger button is in the ADMIN CONSOLE and
   // navigates here with ?tab=network&keyrecovery=1, which opens the dialog.
@@ -359,6 +398,211 @@ export default function Settings() {
     }
   };
 
+  const loadBackupStatus = useCallback(async () => {
+    // The previous verification may refer to a file that has since been
+    // rotated out or deleted, so the line is cleared on every refresh.
+    setBackupVerify(null);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/backup/status`);
+      if (res.ok) setBackupStatus(await res.json());
+      const encRes = await fetchWithAuth(`${API_URL}/backup/encryption`);
+      if (encRes.ok) setBackupEnc(await encRes.json());
+    } catch {
+      // Keep the card empty rather than show a number we could not read.
+    }
+  }, []);
+
+  useEffect(() => { loadBackupStatus(); }, [loadBackupStatus]);
+
+  const handleVerifyBackup = async (password?: string) => {
+    const fromDialog = password !== undefined;
+    if (fromDialog) setVerifyBusy(true); else setBackupVerifying(true);
+    setBackupVerify(null);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/backup/verify`, fromDialog
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) }
+        : { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (body?.code === "password-required" || body?.code === "password-rejected") {
+        setVerifyFileName(body.file || backupStatus?.latest_file || null);
+        setVerifyError(body.code === "password-rejected" ? (body.detail || "") : "");
+        setVerifyDraft("");
+        setVerifyDialogOpen(true);
+        return;
+      }
+      if (res.ok) {
+        setBackupVerify(body);
+        setVerifyDialogOpen(false);
+        setVerifyDraft("");
+        showToast(
+          body.ok
+            ? `Backup verified: ${body.records} records, integrity ${body.integrity}.`
+            : `Backup opened but looks wrong: integrity ${body.integrity}, ${body.records} records.`,
+          body.ok ? "success" : "error"
+        );
+      } else {
+        const msg = body.detail || "Could not verify the backup.";
+        if (fromDialog) setVerifyError(msg); else showToast(msg, "error");
+      }
+    } catch {
+      const msg = "Network error while verifying the backup.";
+      if (fromDialog) setVerifyError(msg); else showToast(msg, "error");
+    } finally {
+      setVerifyBusy(false);
+      setBackupVerifying(false);
+    }
+  };
+
+  const handleVerifyWithPassword = () => {
+    if (verifyDraft) handleVerifyBackup(verifyDraft);
+  };
+
+  const handleDownloadBackupNow = async () => {
+    try {
+      const res = await fetchWithAuth(`${API_URL}/backup/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        if (res.status === 400) setPwDialogOpen(true);
+        showToast(body.detail || "Could not download a backup.", "error");
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `PASADA_BACKUP_${new Date().toISOString().slice(0, 10)}${backupEnc?.extension || ".psdb"}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => window.URL.revokeObjectURL(url), 2000);
+      showToast("Encrypted backup downloaded. Copy it to a USB drive and keep it outside the office.", "success");
+    } catch {
+      showToast("Network error while downloading the backup.", "error");
+    }
+  };
+
+  const saveBackupPassword = async () => {
+    if (pwDraft.length < (backupEnc?.min_length ?? 8)) {
+      showToast(`Use at least ${backupEnc?.min_length ?? 8} characters.`, "error");
+      return;
+    }
+    if (pwDraft !== pwConfirm) {
+      showToast("The two passwords do not match.", "error");
+      return;
+    }
+    if (!pwWrittenDown) {
+      showToast("Tick the box confirming you have written this password down.", "error");
+      return;
+    }
+    setPwBusy(true);
+    try {
+      const res = await fetchWithAuth(`${API_URL}/backup/encryption`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pwDraft, confirm_written_down: true }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setBackupEnc(body);
+        setPwDialogOpen(false);
+        setPwDraft("");
+        setPwConfirm("");
+        setPwWrittenDown(false);
+        loadBackupStatus();
+        showToast(
+          body.previous_kept
+            ? `Backup password set. ${body.previous_kept} earlier password(s) stay saved, so older archives still open here.`
+            : "Backup password set. Tonight's archive is encrypted.",
+          "success"
+        );
+      } else {
+        showToast(body.detail || "Could not set the backup password.", "error");
+      }
+    } catch {
+      showToast("Network error while setting the backup password.", "error");
+    } finally {
+      setPwBusy(false);
+    }
+  };
+
+  const clearBackupPassword = async () => {
+    const ok = await confirmDialog({
+      mode: "confirm",
+      title: "Remove backup password",
+      message: "New backups become plain ZIP files that anyone can open. The passwords saved on this computer are kept, so the archives already encrypted can still be opened and restored here. A copy on a USB drive still needs the password it was made with.",
+      destructive: true,
+      confirmLabel: "Remove password",
+    });
+    if (!ok) return;
+    try {
+      const res = await fetchWithAuth(`${API_URL}/backup/encryption`, { method: "DELETE" });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setBackupEnc({ configured: false, extension: ".psdb", min_length: 8 });
+        loadBackupStatus();
+        showToast(
+          body.encrypted_archives
+            ? `Encryption off. ${body.encrypted_archives} encrypted archive(s) still open with the saved password.`
+            : "Backup password removed. New backups are plain ZIP files.",
+          "success"
+        );
+      }
+    } catch {
+      showToast("Network error while removing the backup password.", "error");
+    }
+  };
+
+  const checkDuplicates = async () => {
+    setDupBusy("check");
+    try {
+      const res = await fetchWithAuth(`${API_URL}/admin/duplicates`);
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setDupInfo(body);
+        showToast(body.count === 0
+          ? "No duplicates: every route has one row per franchise number."
+          : `${body.count} duplicate group(s) found (${body.records} rows).`, body.count === 0 ? "success" : "error");
+      } else {
+        showToast(body.detail || "Could not check for duplicates.", "error");
+      }
+    } catch {
+      showToast("Network error while checking for duplicates.", "error");
+    } finally {
+      setDupBusy(null);
+    }
+  };
+
+  const cleanDuplicates = async () => {
+    if (!dupInfo || dupInfo.count === 0) return;
+    const confirmed = await confirmDialog({
+      mode: "confirm",
+      title: "Merge duplicate records",
+      message: `Keep the newest row for each franchise number and retire ${dupInfo.records - dupInfo.count} duplicate row(s). Retired rows are recoverable from the record History and the Inactive list.`,
+      destructive: true,
+      confirmLabel: "Merge duplicates",
+    });
+    if (!confirmed) return;
+    setDupBusy("clean");
+    try {
+      const res = await fetchWithAuth(`${API_URL}/admin/dedupe?dry_run=false`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        showToast(`Merged ${body.would_retire} duplicate row(s).`, "success");
+        setDupInfo(null);
+      } else {
+        showToast(body.detail || "Could not merge duplicates.", "error");
+      }
+    } catch {
+      showToast("Network error while merging duplicates.", "error");
+    } finally {
+      setDupBusy(null);
+    }
+  };
+
   const handleToggleSavePreview = (val: boolean) => {
     setShowSavePreview(val);
     localStorage.setItem("pasada_show_save_preview", String(val));
@@ -445,36 +689,6 @@ export default function Settings() {
       }, 1000);
     } catch (err) {
       showToast("No records found for the selected filter.", "error");
-    } finally {
-      setExportLoading(false);
-    }
-  };
-
-  const handleDbBackup = async () => {
-    setExportLoading(true);
-    try {
-      const res = await fetchWithAuth(`${API_URL}/backup/database`);
-      if (!res.ok) throw new Error("DB Backup failed");
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.style.display = 'none';
-      a.href = url;
-      
-      const now = new Date();
-      const pad = (n: number) => n.toString().padStart(2, '0');
-      const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      
-      a.download = `PASADA_BACKUP_${dateStr}.db`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-      }, 1000);
-      showToast("Raw database backup downloaded successfully.", "success");
-    } catch (err) {
-      showToast("Failed to download database backup.", "error");
     } finally {
       setExportLoading(false);
     }
@@ -757,7 +971,237 @@ export default function Settings() {
           {/* ========================================================================= */}
           {activeTab === "backup" && (
             <div className="space-y-8">
+              {/* BACKUP HEALTH: answers "is the registry safe if this PC dies
+                  today?" before the office has to find out the hard way. */}
+              <div className={`border p-6 rounded-2xl space-y-4 ${
+                backupStatus?.stale
+                  ? "border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 dark:border-amber-900"
+                  : "bg-muted/15 border-border"
+              }`}>
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                      <ShieldCheck className={backupStatus?.stale ? "text-amber-600" : "text-emerald-600"} size={20} />
+                      Registry backup health
+                    </h2>
+                    <p className="text-xs text-muted-foreground font-medium max-w-2xl leading-relaxed">
+                      PASADA writes a compressed copy of the whole registry once a day ({backupStatus?.automatic_time || "16:45 local time"}) and keeps
+                      the last {backupStatus?.retention_days ?? 30} days here on this computer. That copy is what brings the office back if the disk fails.
+                      It does not survive the computer being lost, stolen, or destroyed. Keep one copy on a USB drive outside the office.
+                    </p>
+                  </div>
+                  <Button variant="outline" onClick={loadBackupStatus} className="font-bold shrink-0">
+                    <RefreshCw size={14} className="mr-2" /> Refresh
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="bg-background border border-border rounded-xl p-4">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Newest backup</p>
+                    <p className="text-sm font-bold mt-1 break-all">{backupStatus?.latest_file || "None yet"}</p>
+                  </div>
+                  <div className="bg-background border border-border rounded-xl p-4">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Age</p>
+                    <p className={`text-sm font-bold mt-1 ${backupStatus?.stale ? "text-amber-700 dark:text-amber-300" : ""}`}>
+                      {backupStatus?.age_hours == null
+                        ? "No backup on this computer"
+                        : backupStatus.age_hours < 1
+                          ? "Less than an hour old"
+                          : backupStatus.age_hours < 48
+                            ? `${Math.round(backupStatus.age_hours)} hour(s) old`
+                            : `${Math.round(backupStatus.age_hours / 24)} day(s) old`}
+                    </p>
+                  </div>
+                  <div className="bg-background border border-border rounded-xl p-4">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Copies kept</p>
+                    <p className="text-sm font-bold mt-1">{backupStatus?.count ?? 0} backup file(s)</p>
+                  </div>
+                </div>
+
+                {backupStatus?.key_problem && (
+                  <p className="text-xs font-bold text-red-700 dark:text-red-300 flex items-start gap-2">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    The backup key file is missing or unreadable while encrypted archives exist. Nightly backups are
+                    paused until the password is set again.
+                  </p>
+                )}
+
+                {backupStatus?.stale && (
+                  <p className="text-xs font-bold text-amber-700 dark:text-amber-300 flex items-start gap-2">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    No recent backup on this computer. Download one now and keep it somewhere else.
+                  </p>
+                )}
+
+                {backupVerify && (
+                  <p className={`text-xs font-bold ${backupVerify.ok ? "text-emerald-700 dark:text-emerald-300" : "text-red-700 dark:text-red-300"}`}>
+                    {backupVerify.file}: integrity {backupVerify.integrity}, {backupVerify.records} record(s).
+                  </p>
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Button onClick={() => handleVerifyBackup()} disabled={backupVerifying || !backupStatus?.latest_file || !isAdmin}
+                    title={isAdmin ? undefined : "Only the Admin can verify the backup."}
+                    variant="outline" className="font-bold">
+                    {backupVerifying ? <Loader2 size={14} className="mr-2 animate-spin" /> : <CheckCircle2 size={14} className="mr-2" />}
+                    Verify newest backup
+                  </Button>
+                  <Button onClick={handleDownloadBackupNow} disabled={!isAdmin}
+                    title={isAdmin ? undefined : "Only the Admin can download a backup."}
+                    className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                    <Download size={14} className="mr-2" /> Download backup now
+                  </Button>
+                </div>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 pt-3 border-t border-border/60">
+                  <p className="text-xs font-bold">
+                    Encryption:{" "}
+                    <span className={backupEnc?.configured ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}>
+                      {backupEnc?.configured
+                        ? "ON — tonight's archive needs the backup password"
+                        : "OFF — new backups are plain ZIP files anyone can open"}
+                    </span>
+                    {backupStatus?.latest_file && (
+                      <span className="block text-[11px] font-medium text-muted-foreground mt-1">
+                        Newest archive is {backupStatus.latest_encrypted ? "encrypted" : "not encrypted"}
+                        {backupEnc?.stored_passwords && backupEnc.stored_passwords > 1
+                          ? ` · ${backupEnc.stored_passwords} passwords remembered for older archives`
+                          : ""}
+                      </span>
+                    )}
+                  </p>
+                  <div className="flex gap-2 sm:ml-auto">
+                    <Button variant="outline" size="sm" onClick={() => setPwDialogOpen(true)} className="font-bold">
+                      {backupEnc?.configured ? "Change password" : "Set backup password"}
+                    </Button>
+                    {backupEnc?.configured && (
+                      <Button variant="outline" size="sm" onClick={clearBackupPassword} className="font-bold text-red-600 border-red-200">
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <Dialog open={pwDialogOpen} onOpenChange={(open) => {
+                  setPwDialogOpen(open);
+                  if (!open) { setPwWrittenDown(false); setPwDraft(""); setPwConfirm(""); }
+                }}>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>{backupEnc?.configured ? "Change backup password" : "Backup password"}</DialogTitle>
+                      <DialogDescription>
+                        {backupEnc?.configured
+                          ? "This becomes the password for new backups. Earlier passwords stay saved on this computer, so archives made with them still open here."
+                          : "This password encrypts every backup from tonight on."}{" "}
+                        Write it down somewhere outside this computer: a copy on a USB drive can only be opened with
+                        the password it was made with, and PASADA cannot recover a lost one.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3">
+                      <p className="text-xs font-bold text-amber-700 dark:text-amber-300 flex items-start gap-2">
+                        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                        The key file on this computer is the only copy PASADA keeps. Copy it to the USB drive with the
+                        archives, because a replacement PC has neither the key nor the registry.
+                      </p>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="backup-pw">Password</Label>
+                        <Input id="backup-pw" type="password" value={pwDraft} onChange={(e) => setPwDraft(e.target.value)}
+                          placeholder={`At least ${backupEnc?.min_length ?? 8} characters`} autoComplete="new-password" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="backup-pw2">Type it again</Label>
+                        <Input id="backup-pw2" type="password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)}
+                          autoComplete="new-password" />
+                      </div>
+                      <label className="flex items-start gap-2 text-xs font-bold cursor-pointer">
+                        <input type="checkbox" checked={pwWrittenDown}
+                          onChange={(e) => setPwWrittenDown(e.target.checked)} className="mt-0.5" />
+                        <span>I have written this password down somewhere outside this computer.</span>
+                      </label>
+                    </div>
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setPwDialogOpen(false)} className="font-bold">Cancel</Button>
+                      <Button onClick={saveBackupPassword} disabled={pwBusy} className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                        {pwBusy ? <Loader2 size={14} className="mr-2 animate-spin" /> : <Lock size={14} className="mr-2" />}
+                        Save password
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                <Dialog open={verifyDialogOpen} onOpenChange={(open) => { setVerifyDialogOpen(open); if (!open) { setVerifyDraft(""); setVerifyError(""); } }}>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Open the newest backup</DialogTitle>
+                      <DialogDescription>
+                        {verifyFileName ? `${verifyFileName} was` : "The newest backup was"} not opened by the backup
+                        password saved on this computer. An archive keeps the password it was made with, so a file from
+                        before a password change needs the older one. Type the password this archive was made with.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                      <Label htmlFor="verify-pw">Password this archive was made with</Label>
+                      <Input id="verify-pw" type="password" value={verifyDraft} autoComplete="off"
+                        onChange={(e) => { setVerifyDraft(e.target.value); setVerifyError(""); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleVerifyWithPassword(); }} />
+                      {verifyError && (
+                        <p className="text-xs font-bold text-red-700 dark:text-red-300">{verifyError}</p>
+                      )}
+                    </div>
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setVerifyDialogOpen(false)} className="font-bold">Cancel</Button>
+                      <Button onClick={handleVerifyWithPassword} disabled={verifyBusy || !verifyDraft}
+                        className="font-bold bg-blue-600 hover:bg-blue-700 text-white">
+                        {verifyBusy ? <Loader2 size={14} className="mr-2 animate-spin" /> : <CheckCircle2 size={14} className="mr-2" />}
+                        Verify this archive
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {backupStatus?.folder && (
+                  <p className="text-[10px] text-muted-foreground font-medium break-all">Folder: {backupStatus.folder}</p>
+                )}
+              </div>
+
               {/* Top: Mass Export ZIP */}
+              {/* DUPLICATES: a registry that lived through the merge-by-id
+                  days can hold two rows for one franchise. This cleans one
+                  route at a time and never touches a second TODA line. */}
+              <div className={`bg-muted/15 border border-border p-6 rounded-2xl space-y-4 ${isAdmin ? "" : "hidden"}`}>
+                <div className="space-y-1">
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <Database className="text-blue-600" size={20} /> Duplicate records
+                  </h2>
+                  <p className="text-xs text-muted-foreground font-medium max-w-2xl leading-relaxed">
+                    Two rows with the same franchise number on the same TODA line are one operator counted twice.
+                    Merging keeps the newest renewal year, fills missing fields from the copy, and retires the rest so
+                    the cleanup travels to the other computers.
+                  </p>
+                </div>
+                {dupInfo && (
+                  <div className="space-y-2">
+                    <p className={`text-xs font-bold ${dupInfo.count ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300"}`}>
+                      {dupInfo.count === 0 ? "No duplicates found." : `${dupInfo.count} group(s), ${dupInfo.records} rows.`}
+                    </p>
+                    {dupInfo.items.slice(0, 5).map((d) => (
+                      <p key={`${d.route}-${d.sbn}`} className="text-[11px] font-medium text-muted-foreground">
+                        {d.route} · {d.sbn} · {d.count} rows ({d.names.join(", ")})
+                      </p>
+                    ))}
+                  </div>
+                )}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Button variant="outline" onClick={checkDuplicates} disabled={dupBusy !== null} className="font-bold">
+                    {dupBusy === "check" ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCw size={14} className="mr-2" />}
+                    Check for duplicates
+                  </Button>
+                  <Button onClick={cleanDuplicates} disabled={dupBusy !== null || !dupInfo || dupInfo.count === 0}
+                    className="font-bold bg-amber-600 hover:bg-amber-700 text-white">
+                    {dupBusy === "clean" ? <Loader2 size={14} className="mr-2 animate-spin" /> : <Trash2 size={14} className="mr-2" />}
+                    Merge duplicates
+                  </Button>
+                </div>
+              </div>
               <div className="bg-muted/15 border border-border p-6 rounded-2xl space-y-6">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
@@ -804,29 +1248,7 @@ export default function Settings() {
               </div>
 
               {/* Bottom: Raw DB Snapshot & Cleanup Split into 2 Balanced Columns */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
-                {/* Left: Raw SQLite DB */}
-                <div className="bg-muted/15 border border-border p-6 rounded-2xl flex flex-col justify-between space-y-6">
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-slate-800 dark:text-slate-200">
-                      <Database className="text-blue-600 shrink-0" size={20} />
-                      <h3 className="text-base font-bold">Full Database Backup (.db)</h3>
-                    </div>
-                    <p className="text-xs text-muted-foreground font-medium leading-relaxed">
-                      Download an exact copy of the whole database. Save one before big cleanups or tests. You can restore it anytime from the Import page.
-                    </p>
-                  </div>
-
-                  <button 
-                    onClick={handleDbBackup} 
-                    disabled={exportLoading} 
-                    className="w-full bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold py-3.5 px-6 rounded-lg flex items-center justify-center gap-2 hover:bg-slate-800 dark:hover:bg-slate-200 transition-all shadow-md"
-                  >
-                    {exportLoading ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
-                    Download Database (.db)
-                  </button>
-                </div>
-
+              <div className="grid grid-cols-1 gap-6 items-stretch">
                 {/* Right: Database Self-Healing & Cleanup */}
                 <div className="bg-amber-500/10 border border-amber-500/30 p-6 rounded-2xl flex flex-col justify-between space-y-6">
                   <div className="space-y-3">

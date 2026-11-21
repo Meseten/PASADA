@@ -76,18 +76,20 @@ Open **http://localhost:3000** in the browser (Firefox is fine).
 ## 6. The automated test battery
 
 The full battery is the first check after any change. All three commands
-must pass before code is considered done.
+must pass before code is considered done. Test counts were verified on
+November 21, 2026; the current values and the executed results are listed in
+`CURRENT_STATE.md` and `docs/TESTING_AUDIT.md`.
 
 ```bash
-# Backend: 191 tests (endpoints, PIN pairing, sync security, business logic,
-# uploads, performance incl. 50k scale, backup restore, protocol version,
-# migration, restore flow)
+# Backend: 205 tests across 24 files (endpoints, PIN pairing, sync security,
+# business logic, uploads, performance incl. 50k scale, backup restore,
+# protocol version, migration, restore flow)
 cd pasada/backend
 source venv/bin/activate
 pytest                        # full suite
 pytest --cov                  # with statement coverage report
 
-# Frontend: 27 vitest unit tests (restore UI, pairing panel, API client, ...)
+# Frontend: 30 vitest unit tests (restore UI, pairing panel, API client, ...)
 export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
 cd ../frontend
 npx vitest run
@@ -96,7 +98,9 @@ npx vitest run
 npx tsc --noEmit
 ```
 
-What each backend file pins:
+The main backend test files and what they pin. The suite has 24 files and 205
+tests; the table shows the ones that cover the risky paths. SBN below means the
+Sangguniang Bayan Number, the franchise number assigned to one tricycle slot:
 
 | File | Pins |
 |------|------|
@@ -105,7 +109,7 @@ What each backend file pins:
 | `test_business_logic.py` | DD-MM-YYYY parsing, dedup, address expansion |
 | `test_upload_validation.py` | Excel/CSV without NAME+SBN headers fail loudly with a reason |
 | `test_performance.py` | stats speed, write throughput, 50k-record scale ceilings |
-| `test_backup_restore.py` | backup ZIP restores, quick_check ok, row counts match; 30-day retention sweep |
+| `test_backup_restore.py` | backup ZIP restores, quick_check ok, row counts match; encrypted `.psdb` archives decrypt with a stored password and refuse a wrong one; key-file damage refuses a plaintext nightly run; 30-day retention sweep |
 | `test_protocol_version.py` | discovery payload version gate (v2 drops unknown/legacy formats) |
 | `test_migration.py` | legacy schema auto-upgrade on boot |
 

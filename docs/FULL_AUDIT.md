@@ -3,6 +3,10 @@
 **Date:** Oct 11, 2026
 **Scope:** everything — backend API, frontend UI, desktop (Tauri) shell, sync engine,
 dependencies, tests, docs, and the Linux run experience.
+**Figures refreshed:** November 21, 2026. Route, test, line, and version counts were
+updated to the values in `CURRENT_STATE.md`. The findings, their reasoning, and the
+audit date are unchanged.
+
 **Method:** every claim below was verified against the running code on the audit date —
 endpoint counts grepped out of `backend/main.py`, suites re-run, dependency trees
 audited with `npm audit` / `pip`. Nothing here is guessed.
@@ -14,7 +18,7 @@ audited with `npm audit` / `pip`. Nothing here is guessed.
 PASADA is in good shape for what it is: an offline, air-gapped, single-office
 records system. The security *design* is sound and, unusually, it is mostly
 **test-pinned** — the RBAC gates, the two-key approval rule, the login lockout,
-and the sync HMAC are all covered by the 116-test backend suite.
+and the sync HMAC are all covered by the 205-test backend suite.
 
 The gaps are not "broken features." They cluster into four buckets:
 
@@ -23,14 +27,15 @@ The gaps are not "broken features." They cluster into four buckets:
    `npm audit fix` + a `next` patch took it to **9 high, 0 critical**. The backend
    still runs two effectively-unmaintained libraries (`python-jose`, `passlib`).
    → §3
-2. **Architecture debt.** `backend/main.py` is a single **~4,000-line** file holding
-   68 routes, auth, sync, and business logic. It works, but it is the single point
+2. **Architecture debt.** `backend/main.py` is a single **5,563-line** file holding
+   89 routes, auth, sync, and business logic. It works, but it is the single point
    of least testability in the project. → §6
 3. **A thin test front-end — E2E added this pass.** Backend coverage is genuinely
-   strong (116 tests, 50k-scale perf, backup-restore drill). Frontend had **only 11
+   strong (205 tests, 50k-scale perf, backup-restore drill). Frontend had **30
    vitest unit tests**; there is now a **4-flow Playwright E2E** (login → search →
-   renewal → approval) that runs against the real desktop stack (real backend +
-   real SQLite + the production export the webview loads), on Linux and Windows.
+   renewal → account switch) that runs against the real desktop stack (real backend +
+   real SQLite + the production export the webview loads); all four passed on
+   chromium on November 21, 2026.
    Component tests and ESLint gating are still open. → §5
 4. **The Linux experience + the updater.** The two things that made you unable to
    test it — the terminal flooding with GETs and the black window — are both
@@ -77,7 +82,7 @@ air-gapped deployment and are recorded in `THREAT_MODEL.md` §5-6.
 
 ## 2. RBAC / endpoint protection inventory (the audit you asked for)
 
-**68 total routes.** The gate is one helper, `require_admin` (line ~380), which
+**89 total routes**, counted on November 21, 2026: 81 from the earlier audit minus `GET /backup/database` (removed on November 21 because it wrote an unencrypted copy of the registry into `temp_backups/`), plus `GET /export/masterlist-all`, `GET /backup/status`, `POST /backup/verify`, `GET /admin/duplicates`, `POST /admin/dedupe`, `POST /backup/download`, and the three `/backup/encryption` routes (the `@app.middleware("http")` decorator is not a route and is excluded from the count). The gate inventory below was derived when the file held 68 routes and has not been re-derived line by line since; the gated endpoints named are still gated. The gate is one helper, `require_admin` (line ~380), which
 raises 403 for any non-Admin. The counts below were grepped from `main.py` and match
 `THREAT_MODEL.md` exactly.
 
@@ -88,7 +93,7 @@ raises 403 for any non-Admin. The counts below were grepped from `main.py` and m
 | 1 | `GET /users` | The office account roster — usernames, roles, status. Clerk PII. |
 | 2 | `POST /users` | Creating accounts. Stops an Admin minting a second Admin outside audit. |
 | 3 | `PUT /users/reset-password` | Forcing a password reset on any account. |
-| 4 | `PUT /users/set-active` | Deactivating/reactivating an account (also two-key, §below). |
+| 4 | `PUT /users/set-active` | Deactivating/reactivating an account (single-key override with a mandatory written reason). |
 | 5 | `POST /admin/tickets/{id}/approve` | Executing a pending two-key action. |
 | 6 | `POST /admin/tickets/{id}/reject` | Rejecting a pending two-key action. |
 | 7 | `POST /admin/refresh-db` | Registry-wide repair — rewrites records from source. |
@@ -138,7 +143,7 @@ options), pulled in by `vitest@3`, plus a **`next` middleware/proxy bypass**
 critical. All were in the **dev/test toolchain**, not the shipped Tauri bundle,
 but they fail any CI that gates on `npm audit`.
 
-What was done: `vitest` → **v4** (suite re-run, 11/11 pass), `next` +
+What was done: `vitest` → **v4** (suite re-run, 11/11 at that date; the suite now holds 30 tests), `next` +
 `eslint-config-next` → **16.4.0** (the non-breaking fix for the middleware
 bypass), and `npm audit fix` (non-force). Remaining: **9 high, 0 critical, 0
 moderate** — all in dev-only transitives.
@@ -167,7 +172,7 @@ SQLAlchemy `declarative_base` import to clear the warning.
 
 ## 4. Code quality & architecture
 
-- **`main.py` is ~4,000 lines, 68 routes, one file.** Auth, sync, RBAC, uploads,
+- **`main.py` is 5,563 lines with 89 routes, in one file.** Auth, sync, RBAC, uploads,
   business logic, and server boot all live here. It is the hardest thing to unit-test
   and the easiest thing to break accidentally. The test suite is the safety net that
   makes this survivable. → The single highest-leverage structural refactor is splitting
@@ -188,9 +193,9 @@ SQLAlchemy `declarative_base` import to clear the warning.
 
 | Layer | Coverage | Notes |
 |-------|----------|-------|
-| Backend | **116 tests, all passing** (~4m47s) | Endpoints, sync security, business logic, uploads, **50k-scale perf**, backup restore, protocol version, migration. Genuinely strong. |
-| Frontend unit | **11 vitest tests** (v4) | Still thin; no component render tests. |
-| Frontend E2E | **4 Playwright flows, passing** | **Added this pass.** login → search → renewal → approval, against the REAL desktop stack (real FastAPI + real SQLite + the production `out/` export the webview loads), isolated `PASADA_DATA_DIR`, cross-platform (Linux + Windows). See §5a. |
+| Backend | **205 tests, all passing** (last run October 25, 2026) | Endpoints, sync security, business logic, uploads, **50k-scale perf**, backup restore, protocol version, migration. Genuinely strong. |
+| Frontend unit | **30 vitest tests** (last run October 25, 2026) | Still thin; no component render tests. |
+| Frontend E2E | **4 Playwright flows, passing** (chromium, 51.8 s, November 21, 2026) | login → search → renewal → account switch, against the REAL desktop stack (real FastAPI + real SQLite + the production `out/` export the webview loads) and isolated `PASADA_DATA_DIR`. WebKit and Windows were not executed. See §5a. |
 | TypeScript | `tsc` → **clean, exit 0** | Verified. |
 | Production build | `next build` → **exit 0** | 33 pages, all routes compile. |
 
@@ -202,15 +207,15 @@ boots the **real desktop stack**: the FastAPI backend on `127.0.0.1:43888` (the
 frontend's hardcoded `API_URL`) with a real SQLite DB on an **isolated
 `PASADA_DATA_DIR`** (never the office data), and serves the **production static
 export** (`out/`) — the exact bytes the Tauri webview loads — on `localhost:3000`
-(a CORS-allowed origin). The four flows exercise identical code on Linux and
-Windows. Run: `npm run build && npx playwright test`.
+(a CORS-allowed origin). Run: `npm run build && npx playwright test --project=chromium`.
 
-**Honest boundary:** the flows (login/search/renewal/approval) are pure
-frontend↔backend HTTP, so this covers them faithfully on both OSes. What it does
-**not** drive is the thin Rust shell — the updater commands, the PDF print
-fallback, the native context menu. Those are covered by `cargo check` plus manual
-release testing. A `webkit` Playwright project is included so the flows are also
-proven in a WebKitGTK-family engine (what the Linux webview uses).
+**Honest boundary:** the flows (login/search/renewal/account switch) are pure
+frontend↔backend HTTP, so the code they exercise is the same on Linux and
+Windows. What they do **not** drive is the thin Rust shell — the updater commands,
+the PDF print fallback, the native context menu. Those are covered by `cargo check`
+plus manual release testing. The four flows passed on chromium on November 21, 2026;
+a `webkit` Playwright project is configured but was not executed for this pass (its
+browser binary is not installed), and neither was the Windows build.
 
 **Still open:** component render tests for the shared `OfficeAccounts` and the
 approval-queue UI.
@@ -280,7 +285,7 @@ protection badly. It now states the true inventory — 14 hard-gated Admin endpo
 ## 8. Prioritized gap list
 
 ### DONE this pass
-- ✅ **`vitest@4` upgrade** — cleared the 4 critical / 19 high npm vulns; suite 11/11.
+- ✅ **`vitest@4` upgrade** — cleared the 4 critical / 19 high npm vulns; suite 11/11 at that date (30 tests now).
 - ✅ **`next` → 16.4.0** — cleared the middleware-bypass critical.
 - ✅ **Updater error message no longer lies** — a missing update package is
   reported as "no update package published for this OS" instead of blaming the
@@ -314,9 +319,9 @@ protection badly. It now states the true inventory — 14 hard-gated Admin endpo
 ### P2 — structural debt (improve when convenient)
 - **TODO — Split `main.py` into FastAPI routers** (`auth`, `users`, `records`,
   `sync`, `admin`). Highest-leverage maintainability win. **Acceptance criteria:
-  the split must not break any of the 116 backend tests** — after moving routes
+  the split must not break any of the 205 backend tests** — after moving routes
   into `APIRouter`s and including them in `main.py` (or an `app/` package),
-  `pytest` must still report **116 passed**, `tsc` clean, and the 4-flow E2E
+  `pytest` must still report **205 passed**, `tsc` clean, and the 4-flow E2E
   green. Move route handlers only; keep `require_admin`, the two-key helper, and
   every endpoint path/method/response identical. Suggested order: `admin` (most
   self-contained, gated) → `users` → `auth` → `records` → `sync`.
@@ -341,7 +346,7 @@ protection badly. It now states the true inventory — 14 hard-gated Admin endpo
   after 5 min), `failed` when the sidecar terminates or errors mid-boot.
   The login page prefers this real signal and keeps the `/health` polling
   fallback for browser-only contexts (e2e, dev). cargo check exit 0;
-  tsc, vitest 11/11, chromium E2E 4/4 still green.
+  tsc clean, vitest 11/11 at that date (30 tests now), chromium E2E 4/4 still green.
 
 ### Accepted-by-design (no action — recorded in THREAT_MODEL)
 - No TLS on the LAN · single-machine password recovery · no password rotation ·
@@ -354,11 +359,57 @@ protection badly. It now states the true inventory — 14 hard-gated Admin endpo
 
 | Check | Result |
 |-------|--------|
-| Backend suite | **116 passed** (exit 0, ~4m47s) |
+| Backend suite | **205 passed** in 537 s (re-run November 21, 2026) |
 | Frontend typecheck (`tsc`) | **clean, exit 0** |
-| Frontend unit tests (`vitest` v4) | **11 passed** |
-| Frontend E2E (`playwright`, real stack) | **4 passed** (chromium) — login, search, renewal, approval |
+| Frontend unit tests | **30 passed** in 6 files (re-run November 21, 2026) |
+| Frontend E2E (`playwright`, real stack) | **4 passed** (chromium, 51.8 s) — login, search, renewal, account switch |
 | Production build (`next build`) | **exit 0**, 33 pages |
 | `npm audit` | **9 high, 0 critical** (was 30 / 4 critical) — recorded §3 |
 | `pip check` | no broken requirements |
-| RBAC counts (grep) | 14 hard-gated · 4 two-key · 3 bootstrap — matches doc |
+| RBAC counts (grep) | 14 hard-gated, 4 two-key, 3 bootstrap, as counted at 68 routes; not re-derived at 89 |
+
+
+---
+
+## 10. Backup correctness and encryption pass (November 21, 2026)
+
+The last feature before submission was password-protected backups. The audit that
+accompanied it found one serious defect and several smaller ones, all fixed and pinned.
+
+### The defect that mattered
+
+PASADA runs SQLite in WAL mode. Both backup paths — the nightly job and
+**Download backup now** — archived the bytes of `pasada_production.db` alone. Records
+committed since the last checkpoint live in `pasada_production.db-wal`, so they were
+missing from the archive. The failure is quiet: the ZIP is valid, `quick_check` passes,
+and Verify reports a healthy database with fewer records than the office had entered.
+A click-through caught it when a backup made seconds after a save reported
+"integrity ok, 0 record(s)".
+
+**Fix.** `_snapshot_db_bytes()` opens the live database read-only and copies it through
+`sqlite3.Connection.backup()` into a temporary file, which is compressed and then
+removed. Both the nightly job and the HTTP download use it. Verified with a live 1-row
+WAL database: the snapshot holds 1 row while the standalone `.db` file holds 0.
+
+### What else changed
+
+| Area | Before | Now |
+|---|---|---|
+| Raw registry download | `GET /backup/database` returned plaintext to any account and accumulated copies in `temp_backups/` | Removed. Admin-only `/backup/download` writes an archive that honours the password |
+| Password change | Re-encrypting the folder or orphaning old archives | Key history of up to ten passwords, newest first; Verify and Full Restore try each |
+| Removing the password | Could silently downgrade the next nightly archive | Keys kept, `enabled: false`; a missing/corrupt key refuses a plaintext nightly run, logs once a day, warns in Settings |
+| Refused nightly run | Waited for the next day | Retried every minute; the track file is written only on success |
+| Import of `.psdb` | Renamed archives not recognised | PSDB1 magic detection, password field, Full Restore of encrypted archives |
+| Restore confirmation | Progress panel appeared under the dialog | Upload state starts after confirmation |
+| Backup age display | A fresh archive read "1 hour(s) old" | "Less than an hour old" |
+| Verify result after deletion | Stale line survived Refresh | Cleared on every refresh |
+
+### Verification
+
+- Backend suite: **205 passed** (537.26 s). Frontend: **30 passed** (55.34 s).
+- `tsc --noEmit` and `next build`: exit 0.
+- Browser click-through of set, rotate, remove, verify (including a typed password for an
+  unknown-key archive), download, and Full Restore of a renamed encrypted archive.
+- Rotation keeps older archives openable; removal keeps them openable; corrupt, empty,
+  and deleted key files each refuse the nightly run; legacy single-line key files
+  migrate.

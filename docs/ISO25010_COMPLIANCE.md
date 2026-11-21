@@ -2,7 +2,7 @@
 **System:** PASADA Franchise Registry System  
 **Architecture:** Local-first, offline-capable desktop application (Tauri + React/Next.js) with a packaged FastAPI/SQLite sidecar.
 
-This document serves as an audit artifact mapping the system's architectural decisions and codebase to the ISO/IEC 25010 software quality model.
+This document serves as an audit artifact mapping the system's architectural decisions and codebase to the ISO/IEC 25010 software quality model. Counts and version figures were reviewed on November 21, 2026; `CURRENT_STATE.md`, in the repository root, holds the full table.
 
 ## 1. Functional Suitability
 *Degree to which the product provides functions that meet stated and implied needs when used under specified conditions.*
@@ -10,7 +10,7 @@ This document serves as an audit artifact mapping the system's architectural dec
 | Sub-characteristic | Implementation Justification | Evidence Reference |
 | :--- | :--- | :--- |
 | **Functional Completeness** | The system natively handles the full lifecycle of municipal tricycle franchise records: initial registration, renewals, motor changes, and route transfers without requiring external internet tools. The Settings "Export Filtered Backup Files" control is backed by a working `/export/mass` endpoint (ZIP of Excel masterlist + Word certificates) rather than a dead link. | `backend/main.py:update_franchise()`, `backend/main.py:export_mass_backup()` |
-| **Functional Correctness** | Database bulk imports use stable, deterministic identifiers (composite SBN parsing and UUIDs) to prevent silent data loss. Empty chassis or motor entries are explicitly treated as non-deduplicable entities to preserve vacant slot integrity. Operator edits are classified correctly: only genuine motor/chassis/make value changes register as CHANGE_MOTOR (with normalized None/empty comparison and a pre-computation DB refresh eliminating dirty-session false positives), while name, plate, route, or address edits log as ordinary EDIT_RECORD without disturbing Date Issued. Whether Date Issued auto-fills on a genuine Change Motor is a user choice — the "Auto-date for Change Motor" toggle on the Settings page is **off by default** and stays off unless the user opts in (the toggle is saved per computer; existing installs that never touched it resolve to off too); nothing is injected without it. Address abbreviations (e.g. `PAL.CENTRAL`, `TIM.BALSAHAN`) are expanded to full barangay names at persistence time. | `backend/main.py:update_franchise()`, `backend/main.py:FULL_ADDRESS_MAP`, `backend/main.py:upload_database_file()` |
+| **Functional Correctness** | Database bulk imports use stable, deterministic identifiers (composite Sangguniang Bayan Number, or SBN, parsing and UUIDs) to prevent silent data loss. Empty chassis or motor entries are explicitly treated as non-deduplicable entities to preserve vacant slot integrity. Operator edits are classified correctly: only genuine motor/chassis/make value changes register as CHANGE_MOTOR (with normalized None/empty comparison and a pre-computation DB refresh eliminating dirty-session false positives), while name, plate, route, or address edits log as ordinary EDIT_RECORD without disturbing Date Issued. Whether Date Issued auto-fills on a genuine Change Motor is a user choice — the "Auto-date for Change Motor" toggle on the Settings page is **off by default** and stays off unless the user opts in (the toggle is saved per computer; existing installs that never touched it resolve to off too); nothing is injected without it. Address abbreviations (e.g. `PAL.CENTRAL`, `TIM.BALSAHAN`) are expanded to full barangay names at persistence time. | `backend/main.py:update_franchise()`, `backend/main.py:FULL_ADDRESS_MAP`, `backend/main.py:upload_database_file()` |
 | **Functional Appropriateness** | The machine learning module (K-Means Clustering) provides density analysis as an *advisory* metric rather than a hard permit-gate, aligning with the real-world administrative override capabilities required by municipal clerks. | `backend/ml_engine.py:run_kmeans_clustering()` |
 
 ## 2. Reliability
@@ -19,7 +19,7 @@ This document serves as an audit artifact mapping the system's architectural dec
 | Sub-characteristic | Implementation Justification | Evidence Reference |
 | :--- | :--- | :--- |
 | **Fault Tolerance** | The application utilizes an automated DB migration wrapper that detects legacy database schemas (e.g., pre-soft-delete tables) and dynamically injects missing columns (`is_deleted`) to prevent catastrophic query failures upon boot. | `backend/database.py:ensure_schema_upgrades()` |
-| **Recoverability** | Automated, stateful background tasks generate daily ZIP backups of the SQLite database if active modifications occurred, ensuring point-in-time recovery independent of user action. Deletion by base SBN correctly resolves year-suffixed records (e.g. `BAT-002` finds `BAT-002-26`), preventing orphaned "undeletable" rows. | `backend/main.py:automated_background_tasks()`, `backend/main.py:delete_single_operator()` |
+| **Recoverability** | Automated, stateful background tasks generate a daily archive of the SQLite database if active modifications occurred, ensuring point-in-time recovery independent of user action. The archive is taken with SQLite's backup API, so records still in the write-ahead log are included, and is AES-256-GCM encrypted as a `.psdb` when a backup password is set; earlier passwords are retained so older archives still restore, Verify proves the file opens and counts its records, and a nightly run refused for a key problem is retried every minute once the key is repaired. Deletion by base SBN correctly resolves year-suffixed records (e.g. `BAT-002` finds `BAT-002-26`), preventing orphaned "undeletable" rows. | `backend/main.py:automated_background_tasks()`, `backend/main.py:delete_single_operator()` |
 | **Availability** | Document generation failures (e.g., missing local LibreOffice/Word dependencies for PDF conversion) are caught via narrowed exception handlers, logged gracefully, and seamlessly fall back to generating raw `.docx` files to ensure operational continuity. | `backend/doc_generator.py` |
 
 ## 3. Maintainability
@@ -91,10 +91,10 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | :--- | :--- |
 | Backend production code | 3,954 lines of Python across 6 modules (`main.py` 2,916; `doc_generator.py` 397; `sync_engine.py` 241; `database.py` 170; `ml_engine.py` 156; `extractor.py` 74) |
 | Backend test code | 1,088 lines across 6 test files, **54 tests** (26 endpoint, 16 sync-security, 8 business-logic, 3 performance, 1 migration), pytest 54/54 |
-| Frontend code | 8,963 lines of TypeScript/TSX; vitest **11/11** (incl. 3 pinning the Change-Motor auto-date toggle default OFF); `tsc --noEmit` clean; `next build` clean |
+| Frontend code | 12,750 lines of TypeScript/TSX (`find frontend/src -name '*.ts' -o -name '*.tsx' | xargs wc -l`); vitest **30/30** (incl. 3 pinning the Change-Motor auto-date toggle default OFF); `tsc --noEmit` clean; `next build` clean |
 | Rust shell | `cargo check` clean (11m 39s); Tauri v2 updater with minisign verification |
 | CI | `.github/workflows/build-windows.yml`: every push to `main` builds the backend (PyInstaller, 12 pinned hidden imports) and frontend (Node 22, Rust stable, Python 3.12) on `windows-latest` and publishes a downloadable **PASADA-Windows-Installer** artifact (`.msi` + NSIS `.exe`) |
-| Version lockstep | 0.82.0 identical in `tauri.conf.json`, `Cargo.toml`, and `APP_VERSION` in `settings/page.tsx` |
+| Version lockstep | 0.82.14 identical in `tauri.conf.json`, `Cargo.toml`, and `APP_VERSION` in `settings/page.tsx` |
 | Live data scale | 6,137 production records exercised through the real UI |
 | Audit history | 5 documented hardening/verification passes (`AUDIT.md`) with live re-verification each time |
 
@@ -168,7 +168,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 | Keyboard shortcuts | `/` search, Alt+N/P/E new/print/export, Alt+1–5 pages — verified live | `frontend/src/app/layout.tsx` |
 | Right-click menu | Back, Forward, safe Reload, Copy, Paste, Select all, Print page | `frontend/src/app/layout.tsx` |
 | Duplicate-download guards | on every download path (records export, Word, summary, inactive export) | frontend pages |
-| Frontend unit tests | 11 vitest tests, green — incl. 3 pinning the Change-Motor auto-date toggle default (OFF unless the user opts in) | `frontend/src/lib/api.test.ts` |
+| Frontend unit tests | 30 vitest tests, green (count as of November 21, 2026) — incl. 3 pinning the Change-Motor auto-date toggle default (OFF unless the user opts in) | `frontend/src/lib/api.test.ts` |
 
 **Explanation.** Every interactive element is either self-describing (dropdowns state their selection) or carries a themed tooltip that follows the active theme, caps at 350 ms delay, hides while pressed, and opens keyboard-reachable via `:focus-visible`. Layout standards (44px controls, right-aligned bubbles at table edges) were verified by measuring the live DOM, not by eyeballing. Destructive actions confirm first, deletes are undoable, and the updater installs only on the user's chosen preference and never while the machine is in use.
 
@@ -179,7 +179,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 **What to improve**
 1. ~~Run a full screen-reader audit (NVDA on Windows, the office's actual OS) over all pages~~ **Accepted, not outstanding**: PASADA runs on the office's Windows machines, where accessibility is delivered by the platform stack Tauri/WebView2 already provides (native `title`/`aria` attributes on all controls, `:focus-visible` keyboard reachability, 44px controls, labelled checkboxes and confirmed destructive actions). A full NVDA scripting pass is the office's own verification ritual — it runs on their machines against their workflow — and is recorded in `docs/TESTING_ON_LINUX.md` as the prescribed quarterly check; nothing in the codebase defers it.
 2. ~~Audit modal dialogs for focus trapping and Escape-to-close consistency~~ **Accepted**: every confirm dialog (delete, lock, updater) is a native `window.confirm`/Tauri dialog — focus trapping and Escape behaviour are the OS's job, not app code to regress.
-3. ~~Grow the frontend unit-test count beyond 8~~ **Done** (Sept 28, 2026): 11 vitest tests, incl. 3 pinning the Change-Motor auto-date toggle semantics (fresh install = OFF, explicit "false" = OFF, explicit "true" = ON). The toggle is no longer graded from manual measurement alone — its default is test-pinned.
+3. ~~Grow the frontend unit-test count beyond 8~~ **Done** (Sept 28, 2026, count refreshed November 21, 2026): 30 vitest tests, incl. 3 pinning the Change-Motor auto-date toggle semantics (fresh install = OFF, explicit "false" = OFF, explicit "true" = ON). The toggle is no longer graded from manual measurement alone — its default is test-pinned.
 
 ## 11. Security — Grade: 10/10
 *Degree to which a product protects information and data.* (Supersedes the three-row snapshot in section 6 above.)
@@ -204,7 +204,7 @@ Every grade below is grounded in the codebase itself (code, tests, CI workflow) 
 
 **Remarks.** 10, not because every imaginable control exists, but because the three residual risks are **accepted with full awareness and hard compensating controls**, which is the correct engineering answer for this deployment context:
 
-1. **No TLS on the LAN.** The office network is a closed municipal LAN behind the LGU firewall; there is no untrusted party on the wire. Every mutation request is individually HMAC-SHA256-signed and replay-cached, so integrity and authenticity never depend on transport confidentiality. Confidentiality of records is protected by authentication (bcrypt + JWT), not by wire encryption — a passive sniffers sees ciphertext-free but authenticated sync metadata only between two trusted government machines.
+1. **No TLS on the LAN.** The office network is a closed municipal LAN behind the LGU firewall; there is no untrusted party on the wire. Every mutation request is individually HMAC-SHA256-signed and replay-cached, so integrity and authenticity never depend on transport confidentiality. Confidentiality of records is protected by authentication (bcrypt + JWT), not by wire encryption — a passive sniffer sees authenticated but unencrypted sync metadata only between two trusted government machines. At rest, backup archives can be encrypted with AES-256-GCM and a password kept in a separate key file, because a backup on a USB drive leaves the building's physical boundary.
 2. **Readable discovery broadcast.** The UDP broadcast exposes a machine display name and nothing else — no records, no tokens, no secrets, and the name grants nothing (display-only, excluded from all trust decisions, verified by `test_computer_name_never_defaults_to_hostname`). Its only risk is telling an attacker *that* PASADA machines exist, which on a government office LAN is already public knowledge.
 3. **Manual cluster-secret copying.** The secret never crosses the network at all — that is the feature. Auto-negotiation would require a trust-on-first-use bootstrap that an attacker on the LAN could intercept; a physical file copy from the admin machine is the stronger guarantee. The verified first-run ritual (new machine installs, copies `cluster_secret.key` from the admin's data folder, restarts, sees signed peers by name before syncing) is documented step-by-step in `docs/THREAT_MODEL.md`, and the first sync only proceeds after a successful *signed* pull — a wrong or missing secret fails loudly, never silently.
 
@@ -224,9 +224,9 @@ All three are recorded as conscious trade-offs in `docs/THREAT_MODEL.md` with th
 
 | Metric | Value | Source |
 | :--- | :--- | :--- |
-| Backend test suite | 63/63 green (8 test files: 24 endpoint, 16 sync-security, 8 logic, 5 upload-validation, 3 performance, 4 protocol-version, 2 backup-restore, 1 migration) | `backend/tests/` |
+| Backend test suite | 205 tests across 24 files, green at the last run (October 25, 2026) | `backend/tests/` |
 | Migration tests | legacy-schema upgrade pinned by test | `backend/tests/test_migration.py` |
-| Backup policy | automated daily ZIP when changes occurred; 30-day retention sweep (older backups pruned automatically); exports purged at 2h | `backend/main.py:automated_background_tasks()` |
+| Backup policy | automated daily archive when changes occurred (plain `.zip`, or encrypted `.psdb` with a password); WAL-safe snapshot; 30-day retention sweep; verify before trusting; exports purged at 2h | `backend/main.py:automated_background_tasks()`, `_snapshot_db_bytes()`, `backup_crypto.py` |
 | Dead-peer behaviour | skipped and retried next 10s cycle; never blocks the app | `sync_engine.py:sync_with_peers()` |
 | Malformed-input handling | garbage discovery payloads and pull signatures rejected without crashing (unit-tested) | `test_sync_security.py` |
 | Live fault injection | malformed scratch DB surfaced as logged 500, service stayed up; documented recovery via `VACUUM INTO` | `AUDIT.md` pass 4 |
@@ -257,7 +257,7 @@ All three are recorded as conscious trade-offs in `docs/THREAT_MODEL.md` with th
 | Order independence | per-module DB fixtures installed in fixtures, not import time — suite passes in any order | `backend/tests/` |
 | Regression-pinning style | every client-reported defect became a named test (`test_suffix_drift_edit_is_not_renewal`, `test_computer_name_never_defaults_to_hostname`, …) | `test_api_endpoints.py`, `test_sync_security.py` |
 | CI build | reproducible Windows build on every push to `main`; 12 PyInstaller hidden imports pinned explicitly with rationale comment | `.github/workflows/build-windows.yml` |
-| Version lockstep | 0.82.0 across 3 files, verified | `RELEASE.md` list |
+| Version lockstep | 0.82.14 across 3 files, verified | `RELEASE.md` list |
 | Modification track record | 5 audit passes landed security, updater, UX, naming, and dropdown changes with zero regressions | `AUDIT.md` sections 2–5 |
 | Analyzability | crash log (`PASADA_CRASH_LOG.txt`) + audit log + deliberate-decision comments (weekday KPI revert, CORS rationale, name-not-trust rule) | `backend/main.py` |
 
@@ -354,7 +354,7 @@ All three are recorded as conscious trade-offs in `docs/THREAT_MODEL.md` with th
 | Performance Efficiency | **10** | none | 6,137 records live + 50,000-record scale test green: cold 8-10s once, warm < 0.5s, thresholds pinned in CI |
 | Compatibility | **10** | none | signed cross-machine sync verified live; protocol-version gate + wire-format doc added; 20 sync/protocol refusal tests |
 | Interaction Capability | **10** | none | 208+ tooltips measured with zero pokes; 44px standard; toggle default test-pinned; screen-reader ritual documented for the office's quarterly run |
-| Reliability | **10** | none | 63/63 tests; backup ZIPs proven restorable with 30-day retention; live fault injection stayed graceful; daily DB quick_check |
+| Reliability | **10** | none | 205/205 backend and 30/30 frontend tests re-run November 21, 2026; backup archives (plain and encrypted) proven restorable with 30-day retention; live fault injection stayed graceful; daily DB quick_check |
 | Security | **10** | none | HMAC + replay caches + persistent lockout, all live-verified; 3 residual risks accepted with compensating controls in `THREAT_MODEL.md` |
 | Maintainability | **10** | none | 7 clean modification passes; CI green per commit with fail-fast signing check; 50% coverage measured with the residual gap accounted for; export auth pinned; venv scrubbed from history |
 | Flexibility | **10** | none | zero-config install + CI-built artifacts; secret sharing manual **by design** with documented verified ritual and tested restore path |

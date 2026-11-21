@@ -119,13 +119,16 @@ function GlobalSearchClient() {
     try {
       const response = await fetchWithAuth(`${API_URL}/franchise/route/ALL`);
       if (response.ok) {
-        setMembers(await response.json());
+        const list: Member[] = await response.json();
+        setMembers(list);
+        return list;
       }
     } catch (error) {
       console.error("Global fetch error", error)
     } finally {
       setIsLoading(false);
     }
+    return [] as Member[];
   }, [])
 
   useEffect(() => {
@@ -292,11 +295,24 @@ function GlobalSearchClient() {
       if (response.ok) {
         const data = await response.json();
         setIsEditOpen(false)
-        await fetchGlobalMembers();
+        const refreshed = await fetchGlobalMembers();
         
         const returnedIssue = data.issue_date ? data.issue_date.split('T')[0] : "None";
         const returnedValid = data.valid_until ? data.valid_until.split('T')[0] : "None";
         const returnedSBN = data.sbn_no || payload.sbn_no;
+
+        // SAME BEHAVIOUR AS THE TODA PAGE: when the office asked to see the
+        // record after saving, open the certificate preview so it can be
+        // printed or downloaded without hunting for the row again.
+        const previewPref = localStorage.getItem("pasada_show_save_preview");
+        if (previewPref === null || previewPref === "true") {
+          const saved = refreshed.find((m) => m.sbn_no === returnedSBN)
+            || refreshed.find((m) => m.id === formData.id);
+          if (saved) {
+            setViewMember(saved);
+            setIsViewOpen(true);
+          }
+        }
         
         showToast(`Record updated. Date Issued: ${returnedIssue}, Valid until: ${returnedValid}, SBN: ${returnedSBN}.`, "success");
       } else {

@@ -1,6 +1,6 @@
 # Algorithm Evaluation — Why PASADA Clusters with KMeans
 
-*Status: evaluation complete; KMeans retained. All 16 algorithms below were executed
+*Status: evaluation complete; KMeans retained. Route data and model results were verified on September 17, 2026; the review date for this document is November 21, 2026 (`CURRENT_STATE.md` holds the current software figures). All 16 algorithms below were executed
 and measured on the same production input (19 routes, density = fleet / (population ×
 road_km) × 1000, standardized). Nothing was rejected on theory alone. Regenerate the
 evidence any time: `python make_exhibitD.py` (repo root) →
@@ -42,10 +42,10 @@ Any replacement algorithm must therefore satisfy five hard requirements:
 | DBSCAN | n/a | 0.370 | 1 | 8 | ✗ | merges all; 8 noise |
 | Bayesian GMM (auto-k) | 0.772 | 0.782 | 2 | 0 | ✗ | highest score, wrong k=2 |
 
-(ARI = Adjusted Rand Index: 1.000 = identical partition to KMeans. RED trio =
+(ARI = Adjusted Rand Index: 1.000 = same grouping as KMeans (labels may permute). RED trio =
 HMTODA, BBSTODA, BATODA under every qualifying algorithm.)
 
-**Eight algorithms produce the identical partition.** The production choice is
+**Eight algorithms produce the same grouping.** The production choice is
 therefore not "which algorithm finds different groups" — none that qualify do — but
 "which qualifying algorithm is simplest, fastest, most explainable." That is KMeans.
 
@@ -65,8 +65,9 @@ optimum** (silhouette 0.370, wrong membership). Given the same courtesy KMeans e
 baked into the production pipeline:
 
 - `ml_engine.py` pins `KMeans(n_init=10)` — ten restarts, best inertia kept.
-- The validation suite ran a **100-seed stability sweep**: 100/100 identical
-  partitions (`validation_exhibits/exhibitB_seed_stability.png`).
+- The validation suite ran a **100-seed stability sweep**: the same grouping in all
+  100 runs, mean ARI 1.000; four label permutations, 65% raw-label-identical
+  (`validation_exhibits/exhibitB_seed_stability.png`).
 
 Any future algorithm work must budget restarts the same way; single-run comparisons
 are unreliable at n=19.
@@ -75,7 +76,8 @@ are unreliable at n=19.
 
 - **Elbow + silhouette (Exhibit A):** elbow at k=3; silhouette k=2 → 0.772 vs k=3 →
   0.725 — k=3 retained per policy at negligible quality cost.
-- **Seed stability (Exhibit B):** 100 seeds → 100 identical partitions.
+- **Seed stability (Exhibit B):** 100 seeds → same grouping, mean ARI 1.000
+  (four label permutations).
 - **Sensitivity (Exhibit C):** tiers invariant under 2024-growth scaling,
   public-roads-only km, leave-one-route-out, and winsorization (ARI 1.000 each).
 - **Descriptive profile clustering (Exhibit E, `cluster_profiles.py`):** a second

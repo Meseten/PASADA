@@ -58,6 +58,21 @@ export default function Dashboard() {
     const [isDownloadingSummary, setIsDownloadingSummary] = useState(false);
     const [isPrintingSummary, setIsPrintingSummary] = useState(false);
     const [summaryWordSuccess, setSummaryWordSuccess] = useState(false);
+    const [isDownloadingMasterlist, setIsDownloadingMasterlist] = useState(false);
+    // Backup health: a registry whose only copies live on this PC is one
+    // lightning strike away from being gone, so a stale backup is shown here
+    // where the office actually looks every morning.
+    const [backupAgeHours, setBackupAgeHours] = useState<number | null | undefined>(undefined);
+    const [backupBannerDismissed, setBackupBannerDismissed] = useState(false);
+
+    useEffect(() => {
+        let alive = true;
+        fetchWithAuth(`${API_URL}/backup/status`)
+            .then(async (res) => (res.ok ? res.json() : null))
+            .then((data) => { if (alive && data) setBackupAgeHours(data.age_hours ?? null); })
+            .catch(() => { /* the banner stays hidden rather than guess */ });
+        return () => { alive = false; };
+    }, []);
 
     const [downloadedFiles, setDownloadedFiles] = useState<Set<string>>(new Set());
     const [dupModalOpen, setDupModalOpen] = useState(false);
@@ -272,6 +287,35 @@ export default function Dashboard() {
         executeDownloadWithGuard(filename, action);
     };
 
+    // ALL-ROUTES MASTERLIST: one workbook, one sheet per TODA line, same
+    // columns as the per-route export. Read-only, so the Viewer PC can print it.
+    const handleDownloadAllMasterlist = async () => {
+        if (isDownloadingMasterlist) return;
+        setIsDownloadingMasterlist(true);
+        try {
+            const res = await fetchWithAuth(`${API_URL}/export/masterlist-all`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                showToast(err.detail || "Masterlist export failed.", "error");
+                return;
+            }
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `MASTERLIST ALL ROUTES ${new Date().getFullYear()}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => window.URL.revokeObjectURL(url), 2000);
+            showToast("Masterlist downloaded: one sheet per TODA line.", "success");
+        } catch {
+            showToast("Network error while exporting the masterlist.", "error");
+        } finally {
+            setIsDownloadingMasterlist(false);
+        }
+    };
+
     const handlePrintSummaryPDF = async () => {
         if (isPrintingSummary || !summaryData) return;
         setIsPrintingSummary(true);
@@ -431,6 +475,25 @@ export default function Dashboard() {
                 </div>
             )}
             {/* TODA SUMMARY PREVIEW MODAL */}
+            {backupAgeHours !== undefined && (backupAgeHours === null || backupAgeHours > 48) && !backupBannerDismissed && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-start gap-3" role="alert">
+                    <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                        <p className="font-bold text-amber-700 dark:text-amber-400 text-sm">
+                            {backupAgeHours === null
+                                ? "This computer has no registry backup yet"
+                                : `The last registry backup is ${Math.round((backupAgeHours as number) / 24)} day(s) old`}
+                        </p>
+                        <p className="text-xs text-amber-700/90 dark:text-amber-400/90 mt-1">
+                            If this computer fails, everything in PASADA goes with it. Open Settings, then Backup, and download a copy to a USB drive kept outside the office.
+                        </p>
+                    </div>
+                    <button onClick={() => setBackupBannerDismissed(true)} aria-label="Dismiss backup warning" className="text-amber-600 hover:text-amber-800 shrink-0">
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+            )}
+
             <Dialog open={isSummaryOpen} onOpenChange={setIsSummaryOpen}>
                 <DialogContent className="sm:max-w-[700px] shadow-2xl rounded-2xl max-h-[85vh] overflow-hidden flex flex-col">
                     <DialogHeader className="shrink-0">
@@ -751,6 +814,19 @@ export default function Dashboard() {
                         >
                             <FileText className="mr-1.5 h-3 w-3" />
                             TODA Renewal Summary
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleDownloadAllMasterlist}
+                            disabled={isDownloadingMasterlist}
+                            title="Download one Excel workbook with a masterlist sheet for every TODA line."
+                            className="h-8 text-[10px] font-bold shadow-sm ml-2"
+                        >
+                            {isDownloadingMasterlist
+                                ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                                : <Download className="mr-1.5 h-3 w-3" />}
+                            Masterlist
                         </Button>
                     </div>
                     <div className="flex-1 min-h-[280px] w-full mt-2">

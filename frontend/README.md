@@ -8,6 +8,8 @@ Python backend on `http://127.0.0.1:43888`.
 - Do **not** deploy this to Vercel or treat it as a site. The real product is the
   desktop app built by `npm run tauri build`.
 - Backend: `../backend/main.py` (FastAPI + SQLite).
+- Current release: 0.82.14. Test counts, endpoint counts, and file sizes are kept in
+  `CURRENT_STATE.md` in the repository root.
 - Docs live in `../docs/` and the project root:
   - `../README.md` — the main product + development guide
   - `../docs/TESTING_ON_LINUX.md` — running and testing on Linux (incl. the

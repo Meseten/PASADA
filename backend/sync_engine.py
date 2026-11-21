@@ -885,6 +885,49 @@ PEER_MAX_CONSECUTIVE_FAILURES = 20
 _peer_failures = {}
 _peer_failures_lock = threading.Lock()
 
+# BACKFILL: a peer whose newest record is OLDER than this machine's watermark
+# has rows the incremental filter can never include — typically an old backup
+# imported there, which keeps its historical updated_at values. That peer gets
+# one full pull (since 2000) per ten minutes instead of being skipped forever.
+_peer_backfill_requested = {}
+_peer_backfill_last = {}
+PEER_BACKFILL_SECONDS = 10 * 60
+
+
+def _note_peer_max(peer: str, peer_max_raw, last_sync_time: str,
+                   peer_count=None, local_count=None) -> bool:
+    """Schedule a full pull when the peer's newest row is OLDER than the
+    watermark this machine asks from: nothing it holds can satisfy the
+    incremental filter, so "no rows returned" must not be read as "nothing
+    to send". Returns True when the peer was scheduled."""
+    if not peer_max_raw:
+        return False
+    # A peer that holds no more rows than we do has nothing to backfill, even
+    # when its newest stamp sits in our past. Without this the monthly full pull
+    # would keep repeating against a healthy but genuinely older peer.
+    if peer_count is not None and local_count is not None and int(peer_count) <= int(local_count):
+        return False
+    try:
+        peer_max = datetime.fromisoformat(peer_max_raw).replace(tzinfo=None)
+        our_floor = datetime.fromisoformat(last_sync_time).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        return False
+    if peer_max < our_floor:
+        _peer_backfill_requested[peer] = True
+        return True
+    return False
+
+
+def _next_pull_since(peer: str, last_sync_time: str) -> str:
+    """The `since` for this peer's next pull. Consumes a scheduled backfill,
+    at most once per PEER_BACKFILL_SECONDS so an always-stale peer costs one
+    full pull every ten minutes instead of one every ten seconds."""
+    if (_peer_backfill_requested.pop(peer, False)
+            and time.time() - _peer_backfill_last.get(peer, 0) >= PEER_BACKFILL_SECONDS):
+        _peer_backfill_last[peer] = time.time()
+        return "2000-01-01T00:00:00"
+    return last_sync_time
+
 # PEER VISIBILITY: when each peer was last actually HEARD (discovery, nudge,
 # or a successful pull). The office uses this to tell "the laptop is off or
 # unplugged" from "the laptop answers but a pull keeps failing" — and to see
@@ -1544,7 +1587,12 @@ def sync_with_peers():
                 last_sync_time = watermark.isoformat()
             else:
                 last_sync_time = "2000-01-01T00:00:00"
-            
+
+            # One count per cycle, not per peer: used only to decide whether a
+            # peer that sits behind our watermark could actually hold rows we
+            # lack (backfill), never for merging.
+            local_record_count = db.query(FranchiseRecord).count()
+
             for peer in list(PEERS):
                 try:
                     # PULL AUTH: sign the request instead of sending the secret.
@@ -1556,8 +1604,13 @@ def sync_with_peers():
                     nonce = secrets.token_hex(8)
                     body = f"PULL:{peer}:{ts}:{nonce}".encode('utf-8')
                     signature = _hmac_hex(body)
+                    # One-shot full pull when the previous answer showed this
+                    # peer entirely behind our watermark (see
+                    # _peer_backfill_requested). Throttled so a permanently
+                    # stale peer cannot turn every cycle into a 6,000-row pull.
+                    pull_since = _next_pull_since(peer, last_sync_time)
                     response = requests.get(
-                        f"http://{peer}:{API_PORT}/api/sync/pull?since={last_sync_time}",
+                        f"http://{peer}:{API_PORT}/api/sync/pull?since={pull_since}",
                         headers={
                             "X-Cluster-Timestamp": ts,
                             "X-Cluster-Nonce": nonce,
@@ -1579,6 +1632,15 @@ def sync_with_peers():
                         with _peer_failures_lock:
                             _peer_failures.pop(peer, None)
                         _mark_peer_seen(peer)
+                        # PEER IS ENTIRELY IN OUR PAST: nothing it holds can
+                        # match the incremental filter, so schedule its full
+                        # pull for the next pass instead of assuming it is
+                        # empty. Parsed defensively: an old peer build has no
+                        # server_max_updated_at and simply stays incremental.
+                        _note_peer_max(peer, incoming_data.get("server_max_updated_at"),
+                                       last_sync_time,
+                                       peer_count=incoming_data.get("record_count"),
+                                       local_count=local_record_count)
                         # PER-PEER OUTCOME: the log should say when a pull
                         # WORKED, not only when it burned. Throttled to one
                         # line per peer per minute.

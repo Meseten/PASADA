@@ -1,6 +1,26 @@
-# PASADA Audit, September 26, 2026
+# PASADA Audit: September 26 to November 21, 2026
 
 Full audit of backend, frontend, security, and data security, performed with the antislop UI rules (knowledge.md), the security-review checklist, and the web quality audit checklist. Every finding below was either fixed in this pass or is listed as a known limitation with its reason. The Delivery Gate report is at the end.
+
+## 0. Current state (November 21, 2026)
+
+Sections 1 to 11 below are dated records, kept in the order they were written. This
+block states what is true now. The full table, with the command behind each value,
+is in `../CURRENT_STATE.md`.
+
+| Item | Value |
+|---|---|
+| Application version | 0.82.14 |
+| HTTP endpoints | 89 (41 GET, 35 POST, 10 PUT, 3 DELETE) |
+| Backend tests | 205, in 24 files |
+| Frontend tests | 30 |
+| `main.py` | 5,563 lines |
+
+The endpoint figure was reported as 82 in an earlier draft of this review, then as 81.
+The 82 came from a grep that also matched the `@app.middleware("http")` decorator; the
+81 was measured before the masterlist export and the backup encryption/verify/
+maintenance routes landed. On November 21 the file registers 89 routes, and the
+middleware decorator is still excluded.
 
 ## 1. Fixed in this pass
 
@@ -121,7 +141,7 @@ Live verification of this pass: scratch stack on 43889 signed in as the test acc
 2. **Discovery signatures authenticate, but the broadcast stays readable:** an eavesdropper still sees *that* a PASADA cluster exists and which IP is talking (the IP is in the signed payload). Replayed broadcasts are refused (nonce cache), and they learn nothing they could use to join or pull: the HMAC key never leaves each machine. Encrypting discovery end-to-end would add a key-distribution step with no office benefit, so it is deliberately not done.
 3. **JWT secret in a file beside the app:** appropriate for a per-machine desktop install; rotation happens by deleting the file (a new one is generated). Not a server secret store, by design.
 4. **In-memory login lockout** resets on backend restart. Accepted for air-gapped simplicity; the audit trail still records attempts.
-5. **`settings/page.tsx` and `tauri.conf.json` version must be bumped in lockstep** (see RELEASE.md). The Settings card is the runtime reminder. (Snapshot note: the shipped version is `0.82.0`, deliberately matching the released installer line.)
+5. **`settings/page.tsx` and `tauri.conf.json` version must be bumped in lockstep** (see RELEASE.md). The Settings card is the runtime reminder. (Snapshot note: the version at the time of this pass was `0.82.0`; the current release is `0.82.14`, recorded in section 12.)
 ## 9. Delivery Gate (antislop) results
 
 All hard-gate items pass:
@@ -150,7 +170,9 @@ Liveliness: dials ENERGY 1 / RHYTHM 1 / MOTION 1 are deliberate for a government
 
 Review after the office connected real Windows and Linux machines and hit
 duplicated, reverted, and role-flipped data. Every fix below has a test named
-after it in the backend suite (205 tests passing at the end of the pass).
+after it in the backend suite (205 tests passing at the end of the pass). Here and
+below, SBN means the Sangguniang Bayan Number, the franchise number the municipal
+council assigns to one tricycle slot.
 
 | Finding | Fix |
 |---------|-----|
@@ -167,3 +189,73 @@ after it in the backend suite (205 tests passing at the end of the pass).
 - `npm test` (vitest): 30 passed (6 files), including the new edit-undo tests.
 - `npm audit`: 0 vulnerabilities after a lockfile regeneration with npm 11
   (the intake pass had found 9 advisories, all in dev-only tooling).
+
+## 12. Verification pass, November 20, 2026
+
+This section records the state of the repository at the end of the project. No code was
+changed in this pass. Each count below was produced by the command named beside it, and
+the same table appears in `../CURRENT_STATE.md`.
+
+| Item | Value | How it was counted |
+|---|---:|---|
+| Application version | 0.82.14 | `tauri.conf.json`, `Cargo.toml`, and `APP_VERSION` agree |
+| HTTP endpoints | 89 (41 GET, 35 POST, 10 PUT, 3 DELETE) | `grep -cE "^@app\.(get|post|put|delete|patch)\(" backend/main.py`; the `@app.middleware("http")` decorator is not a route and is excluded |
+| Backend test functions | 205, in 24 files | `grep -rho "def test_" backend/tests` |
+| Frontend unit tests | 30 | `grep -rho "\b\(it\|test\)("` over the test files |
+| `main.py` | 5,563 lines | `wc -l` |
+| `sync_engine.py` | 1,797 lines | `wc -l` |
+| `backup_crypto.py` | 77 lines | `wc -l` |
+| `doc_generator.py` | 322 lines | `wc -l` |
+| `database.py` | 235 lines | `wc -l` |
+| `ml_engine.py` | 201 lines | `wc -l` |
+| `extractor.py` | 74 lines | `wc -l` |
+
+Notes on the figures above:
+
+1. Section 11 of this audit already reports 205 passing backend tests. That number is
+   still correct. The frontend count in the same pass was 30.
+2. `ml_engine.py` measures 201 lines. Summaries written before the cache and guard
+   additions quoted 162 lines; the module has grown since.
+3. `docs/FULL_AUDIT.md` was written when `main.py` held 68 routes. The file held 81
+   endpoints on the date of this pass, so the counts in that audit were updated and its
+   gate inventory is marked as derived at 68 routes.
+4. `.github/version.txt` records 0.82.13 while the three build files record 0.82.14. The
+   release workflow rewrites `version.txt` on every tagged release, so the record is one
+   release behind a manual bump. The three build files are authoritative for what is
+   installed.
+5. The test suites were not executed during this pass. The passing results quoted in
+   section 11 come from the October 25, 2026 run; this pass only recounts the tests that
+   exist on disk. Section 13 records a full re-run on November 21, 2026.
+
+
+## 13. Encrypted backups and integrity pass, November 21, 2026
+
+This pass finished the password-protected backup feature, audited it end to end, and
+re-ran both suites. Application version is unchanged (0.82.14); the archive format and
+the backup endpoints are the only new surface.
+
+### Findings and fixes
+
+| Finding | Fix | Evidence |
+|---|---|---|
+| `GET /backup/database` returned the unencrypted registry to any signed-in account and left a copy in `temp_backups/` on every call. | Endpoint removed. Downloading an archive is Admin-only and always goes through `/backup/download`, which honours the backup password. | Endpoint absent from the route table; `test_backup_restore.py` covers the gated paths; Clerk download/verify return 403. |
+| Both backup paths archived the `.db` file bytes only. PASADA runs SQLite in WAL mode, so commits still in `pasada_production.db-wal` were missing: a backup taken right after a save verified as "integrity ok, 0 record(s)". The registry in that archive was silently stale. | `_snapshot_db_bytes()` takes a coherent snapshot through SQLite's backup API (read-only source, temp destination, removed afterwards) and both the nightly job and `/backup/download` compress that. | Fresh archive now contains the seeded record (1 row); the panel reports "integrity ok, 1 record(s)"; scripted check: live 1 row, snapshot 1 row, main `.db` alone 0. |
+| Changing the backup password would have orphaned every earlier archive unless the whole folder was re-encrypted (which needs a second copy of every file and can crash halfway). | The key file keeps up to ten passwords, newest first; rotation prepends. Verify and Full Restore try each stored password. | Rotation to `OfficePass2` then verifying an `OfficePass1` archive succeeded with no typed password. |
+| Removing the password could have downgraded the next nightly archive to plaintext without warning. | Removal sets `enabled: false` but keeps the keys; while encrypted archives exist and the key file is missing, empty, or corrupt, the nightly job refuses to write plaintext, logs once per day, and Settings shows a red warning. | Corrupt, empty, and deleted key each returned no archive and no track file; the refusal logged once. |
+| A refused nightly run waited for the next day even after the key was fixed that morning. | `_nightly_backup_and_track()` only writes `last_backup.txt` after a successful archive and is scheduled every minute, so the retry happens as soon as the key is repaired. | Refused key returns `None` with no track file; the same day after repair returns `PASADA_Backup_2026-04-01.psdb` and writes the track. |
+| The Import page did not recognise a renamed `.psdb` and never asked for its password. | PSDB1 magic detection on the chosen file, password field, `accept` list, and a clearer file-picker label. | Renamed `.db` copy showed "Encrypted Database Backup Detected"; Full Restore reported "Inserted: 0, Updated: 1". |
+| The Import page showed the restore progress panel while the confirmation dialog was still open, and a freshly written backup displayed "1 hour(s) old"; a deleted archive's verify line survived Refresh. | Upload state starts after confirmation; age reads "Less than an hour old"; Refresh clears the previous verify result. | Browser click-through after the fix: dialog first, progress only after Restore; age and cleared line observed. |
+
+### Verification evidence
+
+- `pytest -q` (backend venv, isolated `PASADA_DATA_DIR`): **205 passed** in 537.26 s,
+  exit 0.
+- `npx vitest run`: **30 passed** in 6 files in 55.34 s, exit 0.
+- `npx tsc --noEmit`: exit 0. `npm run build`: exit 0.
+- Browser click-through against an isolated backend and dev frontend: password set
+  (checkbox guard), rotation (earlier password reported kept), verify, verify with a
+  typed password for an unknown-key archive, removal, download, and Full Restore of a
+  renamed encrypted archive.
+- `test_backup_restore.py` and `test_upload_validation.py`: 7 passed, covering key
+  history, wrong password, corrupt key refusal, legacy key migration, retention, and
+  the PSDB1 upload path.
